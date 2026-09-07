@@ -14,6 +14,7 @@
     "test": "bun test",
     "lint": "biome check src test",
     "format": "biome check --write src test",
+    "verify:push": "bun scripts/pre-push-checks.ts",
     "prepare": "husky",
     "db:migrate": "bun src/cli/db-migrate.ts",
     "db:migrate:status": "bun src/cli/db-migrate-status.ts"

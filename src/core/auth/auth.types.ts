@@ -9,7 +9,7 @@ export type AuthenticationMethod = (typeof AuthenticationMethods)[number];
 
 export interface AuthSecurityMetadata {
   ipAddress: string;
-  userAgent?: string;
-  clientType?: AuthClientType;
-  transport?: RefreshTokenTransport;
+  userAgent?: string | undefined;
+  clientType?: AuthClientType | undefined;
+  transport?: RefreshTokenTransport | undefined;
 }

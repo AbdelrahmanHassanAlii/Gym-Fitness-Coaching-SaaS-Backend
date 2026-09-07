@@ -51,6 +51,7 @@ function authConfig(): AppConfig {
       },
       accessTokenTtlSeconds: 900,
       refreshTokenTtlSeconds: 2_592_000,
+      webRefreshCookieSameSite: 'LAX',
       otpHmacSecret: 'test-otp-secret',
       totpEncryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
       loginIdentifierIpWindowMs: 15 * 60 * 1000,
@@ -385,6 +386,30 @@ describe('auth foundation', () => {
     expect(await repository.consume(challenge._id)).toBe(false);
   });
 
+  test('challenge can be consumed on the final allowed attempt', async () => {
+    const collections = new InMemoryCollections();
+    const repository = new AuthChallengeRepository(fakeDatabase(collections));
+    const challenge = await repository.create({
+      purpose: 'EMAIL_VERIFICATION',
+      challengeDigest: 'digest',
+      digestContext: 'ctx',
+      expiresAt: futureDate(),
+      maxAttempts: 5,
+      ipAddress: '127.0.0.1',
+    });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await repository.incrementAttempt(challenge._id);
+    }
+
+    expect(
+      await repository.consumeVerifiedChallenge(challenge._id, 'EMAIL_VERIFICATION'),
+    ).toMatchObject({
+      _id: challenge._id,
+      consumedAt: expect.any(Date),
+    });
+  });
+
   test('recovery code can only be consumed once and regeneration replaces old digests', async () => {
     const collections = new InMemoryCollections();
     const repository = new AuthMfaMethodRepository(fakeDatabase(collections));
@@ -586,6 +611,10 @@ function matchesExpression(document: Record<string, unknown>, expression: Record
   if ('$lt' in expression) {
     const [left, right] = expression.$lt as [string, string];
     return valueAt(document, left) < valueAt(document, right);
+  }
+  if ('$lte' in expression) {
+    const [left, right] = expression.$lte as [string, string];
+    return valueAt(document, left) <= valueAt(document, right);
   }
   return false;
 }

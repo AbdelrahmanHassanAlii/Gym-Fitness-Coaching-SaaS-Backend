@@ -23,6 +23,7 @@ export interface AppConfig {
     jwtPublicKeys: Record<string, string>;
     accessTokenTtlSeconds: number;
     refreshTokenTtlSeconds: number;
+    webRefreshCookieSameSite: 'LAX' | 'STRICT' | 'NONE';
     otpHmacSecret: string;
     totpEncryptionKey: string;
     loginIdentifierIpWindowMs: number;

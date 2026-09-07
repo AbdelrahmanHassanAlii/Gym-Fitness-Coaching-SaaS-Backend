@@ -73,9 +73,9 @@ export interface AuthRefreshTokenDocument {
 export interface AuthChallengeDocument {
   _id: ObjectId;
   purpose: AuthChallengePurpose;
-  userId?: ObjectId;
-  normalizedEmail?: string;
-  normalizedPhone?: string;
+  userId?: ObjectId | undefined;
+  normalizedEmail?: string | undefined;
+  normalizedPhone?: string | undefined;
   challengeDigest: string;
   digestContext: string;
   expiresAt: Date;
@@ -83,9 +83,9 @@ export interface AuthChallengeDocument {
   attemptCount: number;
   maxAttempts: number;
   resendCount: number;
-  lastSentAt?: Date;
-  ipAddress?: string;
-  userAgent?: string;
+  lastSentAt?: Date | undefined;
+  ipAddress?: string | undefined;
+  userAgent?: string | undefined;
   createdAt: Date;
 }
 
@@ -122,13 +122,13 @@ export interface AuthRateLimitDocument {
 export interface AuthSecurityEventDocument {
   _id?: ObjectId;
   type: string;
-  userId?: ObjectId;
-  sessionId?: ObjectId;
+  userId?: ObjectId | undefined;
+  sessionId?: ObjectId | undefined;
   result: 'SUCCESS' | 'FAILURE' | 'DENIED' | 'INFO';
-  reasonCode?: string;
-  ipAddress?: string;
-  userAgent?: string;
-  clientType?: AuthClientType;
+  reasonCode?: string | undefined;
+  ipAddress?: string | undefined;
+  userAgent?: string | undefined;
+  clientType?: AuthClientType | undefined;
   occurredAt: Date;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | undefined;
 }

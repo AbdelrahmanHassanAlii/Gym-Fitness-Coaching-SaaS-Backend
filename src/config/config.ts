@@ -125,6 +125,14 @@ function base64Secret(name: string, value: string, byteLength: number): string {
   return value;
 }
 
+function sameSite(): 'LAX' | 'STRICT' | 'NONE' {
+  const value = process.env.AUTH_REFRESH_COOKIE_SAMESITE?.trim().toUpperCase() || 'LAX';
+  if (!['LAX', 'STRICT', 'NONE'].includes(value)) {
+    throw new Error(`Invalid AUTH_REFRESH_COOKIE_SAMESITE: ${value}`);
+  }
+  return value as 'LAX' | 'STRICT' | 'NONE';
+}
+
 export function loadConfig(): AppConfig {
   const env = environment();
   const maxSupportMinutes = integer('SUPPORT_SESSION_MAX_MINUTES', 60, 1);
@@ -174,6 +182,7 @@ export function loadConfig(): AppConfig {
       jwtPublicKeys: publicJwtKeys,
       accessTokenTtlSeconds: seconds('ACCESS_TOKEN_TTL_SECONDS', 15 * 60),
       refreshTokenTtlSeconds: seconds('REFRESH_TOKEN_TTL_SECONDS', 30 * 24 * 60 * 60),
+      webRefreshCookieSameSite: sameSite(),
       otpHmacSecret: secret('OTP_HMAC_SECRET', env, 'local-dev-otp-hmac-secret'),
       totpEncryptionKey,
       loginIdentifierIpWindowMs: minutesToMs(

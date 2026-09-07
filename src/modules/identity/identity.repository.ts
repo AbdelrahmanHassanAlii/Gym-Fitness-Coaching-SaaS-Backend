@@ -68,6 +68,17 @@ export class IdentityRepository {
     return await this.users.findOne({ $or: conditions });
   }
 
+  async hasVerifiedLoginIdentifier(userId: ObjectId, tx?: TransactionContext): Promise<boolean> {
+    const user = await this.users.findOne(
+      {
+        _id: userId,
+        $or: [{ emailVerifiedAt: { $exists: true } }, { phoneVerifiedAt: { $exists: true } }],
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+    return user !== null;
+  }
+
   async markIdentifierVerified(
     userId: ObjectId,
     identifier: { normalizedEmail?: string; normalizedPhone?: string },

@@ -49,6 +49,11 @@ export interface CreateChallengeInput extends AuthSecurityMetadata {
   now?: Date;
 }
 
+export interface ChallengeIdentifier {
+  normalizedEmail?: string;
+  normalizedPhone?: string;
+}
+
 export class AuthSessionRepository {
   private readonly sessions: Collection<AuthSessionDocument>;
   private readonly refreshTokens: Collection<AuthRefreshTokenDocument>;
@@ -97,6 +102,16 @@ export class AuthSessionRepository {
         revokedAt: { $exists: false },
         expiresAt: { $gt: new Date() },
       },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async findById(
+    sessionId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<AuthSessionDocument | null> {
+    return await this.sessions.findOne(
+      { _id: sessionId },
       tx ? { session: tx.session } : undefined,
     );
   }
@@ -181,6 +196,15 @@ export class AuthSessionRepository {
         options,
       );
     }
+  }
+
+  async revokeSession(
+    sessionId: ObjectId,
+    reason: string,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<void> {
+    await this.revokeSessionFamily(sessionId, reason, now, tx);
   }
 }
 
@@ -300,6 +324,33 @@ export class AuthChallengeRepository {
     return challenge;
   }
 
+  async findById(
+    challengeId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<AuthChallengeDocument | null> {
+    return await this.challenges.findOne(
+      { _id: challengeId },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async findLatestActive(
+    purpose: AuthChallengePurpose,
+    identifier: ChallengeIdentifier,
+    now = new Date(),
+  ): Promise<AuthChallengeDocument | null> {
+    return await this.challenges.findOne(
+      {
+        purpose,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+        ...(identifier.normalizedEmail ? { normalizedEmail: identifier.normalizedEmail } : {}),
+        ...(identifier.normalizedPhone ? { normalizedPhone: identifier.normalizedPhone } : {}),
+      },
+      { sort: { createdAt: -1 } },
+    );
+  }
+
   async incrementAttempt(challengeId: ObjectId, now = new Date()): Promise<AuthChallengeDocument> {
     const challenge = await this.challenges.findOneAndUpdate(
       {
@@ -338,6 +389,56 @@ export class AuthChallengeRepository {
       tx ? { session: tx.session } : undefined,
     );
     return result.modifiedCount === 1;
+  }
+
+  async consumeVerifiedChallenge(
+    challengeId: ObjectId,
+    purpose: AuthChallengePurpose,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<AuthChallengeDocument | null> {
+    return await this.challenges.findOneAndUpdate(
+      {
+        _id: challengeId,
+        purpose,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+        $expr: { $lte: ['$attemptCount', '$maxAttempts'] },
+      },
+      { $set: { consumedAt: now } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+  }
+
+  async invalidateActiveChallenges(
+    purpose: AuthChallengePurpose,
+    identifier: ChallengeIdentifier,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<void> {
+    await this.challenges.updateMany(
+      {
+        purpose,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+        ...(identifier.normalizedEmail ? { normalizedEmail: identifier.normalizedEmail } : {}),
+        ...(identifier.normalizedPhone ? { normalizedPhone: identifier.normalizedPhone } : {}),
+      },
+      { $set: { consumedAt: now } },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async recordResend(
+    challengeId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<void> {
+    await this.challenges.updateOne(
+      { _id: challengeId, consumedAt: { $exists: false }, expiresAt: { $gt: now } },
+      { $inc: { resendCount: 1 }, $set: { lastSentAt: now } },
+      tx ? { session: tx.session } : undefined,
+    );
   }
 
   async invalidateActivePasswordResetChallenges(
@@ -490,7 +591,11 @@ export class AuthRateLimitRepository {
       throw new Error('Rate-limit bucket upsert failed');
     }
 
-    if (result.count >= input.maxAttempts && input.blockMs) {
+    if (result.blockedUntil && result.blockedUntil > now) {
+      return result;
+    }
+
+    if (result.count > input.maxAttempts && input.blockMs) {
       const blockedUntil = new Date(now.getTime() + input.blockMs);
       await this.rateLimits.updateOne(
         { _id: result._id },

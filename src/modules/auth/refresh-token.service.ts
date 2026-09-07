@@ -1,6 +1,7 @@
 import type { ObjectId } from 'mongodb';
 import type { CredentialDigests } from '../../core/auth/credential-digests';
 import type { Database } from '../../core/database/database';
+import type { TransactionContext } from '../../core/database/unit-of-work';
 import { UnitOfWork } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
 import { IdentityRepository } from '../identity/identity.repository';
@@ -9,11 +10,13 @@ import {
   AuthSecurityEventWriter,
   AuthSessionRepository,
 } from './auth.repositories';
+import type { AuthSessionDocument } from './auth.types';
 
 export interface IssuedRefreshToken {
   tokenId: ObjectId;
   publicId: string;
   rawToken: string;
+  session?: AuthSessionDocument;
 }
 
 export class RefreshTokenService {
@@ -50,16 +53,20 @@ export class RefreshTokenService {
     userId: ObjectId;
     sessionId: ObjectId;
     expiresAt: Date;
+    tx?: TransactionContext;
   }): Promise<IssuedRefreshToken> {
     const publicId = this.credentialDigests.randomSecret(18);
     const secret = this.credentialDigests.randomSecret(32);
-    const token = await this.refreshTokens.create({
-      userId: input.userId,
-      sessionId: input.sessionId,
-      publicId,
-      secretHash: this.credentialDigests.hashHighEntropySecret(secret),
-      expiresAt: input.expiresAt,
-    });
+    const token = await this.refreshTokens.create(
+      {
+        userId: input.userId,
+        sessionId: input.sessionId,
+        publicId,
+        secretHash: this.credentialDigests.hashHighEntropySecret(secret),
+        expiresAt: input.expiresAt,
+      },
+      input.tx,
+    );
     return { tokenId: token._id, publicId, rawToken: `${publicId}.${secret}` };
   }
 
@@ -106,6 +113,7 @@ export class RefreshTokenService {
         const user = await this.identity.findById(existing.userId, tx);
         if (user?.emailVerifiedAt || user?.phoneVerifiedAt) {
           await this.sessions.markVerifiedRestrictionResolved(existing.sessionId, now, tx);
+          session.restrictedUntilVerified = false;
         }
       }
 
@@ -139,6 +147,7 @@ export class RefreshTokenService {
         tokenId: replacement._id,
         publicId: replacementPublicId,
         rawToken: `${replacementPublicId}.${replacementSecret}`,
+        session,
       };
     });
 

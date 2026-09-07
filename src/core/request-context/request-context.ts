@@ -2,6 +2,8 @@ export interface RequestContext {
   correlationId: string;
   userId?: string;
   authSessionId?: string;
+  authenticationMethods?: string[];
+  restrictedUntilVerified?: boolean;
   platformMembershipId?: string;
   workspaceId?: string;
   workspaceMembershipId?: string;

@@ -23,6 +23,19 @@ const redactPaths = [
 export function createLoggerOptions(config: AppConfig): LoggerOptions {
   return {
     level: config.logging.level,
+    ...(config.env === 'development'
+      ? {
+          transport: {
+            target: 'pino-pretty',
+            options: {
+              colorize: !('NO_COLOR' in process.env),
+              customColors: 'trace:gray,debug:cyan,info:green,warn:yellow,error:red,fatal:bgRed',
+              translateTime: 'SYS:HH:MM:ss.l',
+              ignore: 'pid,hostname',
+            },
+          },
+        }
+      : {}),
     redact: {
       paths: redactPaths,
       censor: '[REDACTED]',

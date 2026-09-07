@@ -1,0 +1,36 @@
+{
+  "name": "@gym/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:api": "bun --watch src/api/main.ts",
+    "dev:worker": "bun --watch src/worker/main.ts",
+    "start:api": "bun src/api/main.ts",
+    "start:worker": "bun src/worker/main.ts",
+    "build:api": "bun build src/api/main.ts --target=bun --outdir=dist/api",
+    "build:worker": "bun build src/worker/main.ts --target=bun --outdir=dist/worker",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check src test",
+    "format": "biome check --write src test",
+    "db:migrate": "bun src/cli/db-migrate.ts",
+    "db:migrate:status": "bun src/cli/db-migrate-status.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/swagger": "^9.8.1",
+    "@fastify/swagger-ui": "^5.2.6",
+    "@sinclair/typebox": "^0.34.52",
+    "fastify": "^5.12.3",
+    "mongodb": "^7.6.0",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/bun": "^1.4.1",
+    "typescript": "^5.8.3"
+  }
+}

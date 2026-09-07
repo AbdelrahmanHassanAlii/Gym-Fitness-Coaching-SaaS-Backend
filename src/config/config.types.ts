@@ -17,6 +17,26 @@ export interface AppConfig {
   logging: {
     level: string;
   };
+  auth: {
+    jwtActiveKeyId: string;
+    jwtPrivateKey: string;
+    jwtPublicKeys: Record<string, string>;
+    accessTokenTtlSeconds: number;
+    refreshTokenTtlSeconds: number;
+    otpHmacSecret: string;
+    totpEncryptionKey: string;
+    loginIdentifierIpWindowMs: number;
+    loginIdentifierIpMaxAttempts: number;
+    loginIdentifierIpBlockMs: number;
+    loginIpWindowMs: number;
+    loginIpMaxAttempts: number;
+    challengeTtlSeconds: number;
+    challengeMaxAttempts: number;
+    challengeResendCooldownSeconds: number;
+    challengeMaxSendsPerHour: number;
+    passwordResetIdentifierMaxPerHour: number;
+    passwordResetIpMaxPerHour: number;
+  };
   worker: {
     id: string;
     outboxPollIntervalMs: number;

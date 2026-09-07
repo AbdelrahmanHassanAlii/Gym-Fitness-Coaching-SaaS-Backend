@@ -8,6 +8,8 @@ import type { AppContainer } from '../bootstrap/app-container';
 import { registerErrorHandler } from '../core/errors/error-handler';
 import { createLoggerOptions } from '../core/logging/logger';
 import { registerRequestContext } from '../core/request-context/request-context.plugin';
+import { registerAuthentication } from '../modules/auth/auth.middleware';
+import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerHealthRoutes } from './health.routes';
 
 export async function buildApp(container: AppContainer) {
@@ -60,9 +62,11 @@ export async function buildApp(container: AppContainer) {
   }
 
   await registerRequestContext(app);
+  await registerAuthentication(app, container);
   registerErrorHandler(app);
 
   await registerHealthRoutes(app, container);
+  await registerAuthRoutes(app, container);
 
   return app;
 }

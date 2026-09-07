@@ -15,6 +15,7 @@ import {
   AuthSecurityEventWriter,
   AuthSessionRepository,
 } from '../modules/auth/auth.repositories';
+import { AuthApplicationService } from '../modules/auth/auth.service';
 import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
@@ -38,35 +39,59 @@ export interface AppContainer {
   totp: TotpService;
   refreshTokens: RefreshTokenService;
   mfa: MfaService;
+  auth: AuthApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
   const database = await Database.connect(config);
   const credentialDigests = new CredentialDigests(config);
 
+  const unitOfWork = new UnitOfWork(database);
+  const identity = new IdentityRepository(database);
+  const authSessions = new AuthSessionRepository(database);
+  const authChallenges = new AuthChallengeRepository(database);
+  const authRateLimits = new AuthRateLimitRepository(database);
+  const authSecurityEvents = new AuthSecurityEventWriter(database);
+  const passwordHasher = new PasswordHasher();
+  const jwt = new JwtService(config);
+  const refreshTokens = new RefreshTokenService(database, credentialDigests);
+
   return {
     config,
     database,
-    unitOfWork: new UnitOfWork(database),
+    unitOfWork,
     audit: new AuditWriter(database),
     outbox: new OutboxWriter(database),
     jobLeases: new JobLeaseManager(database),
-    identity: new IdentityRepository(database),
-    authSessions: new AuthSessionRepository(database),
-    authChallenges: new AuthChallengeRepository(database),
+    identity,
+    authSessions,
+    authChallenges,
     authMfaMethods: new AuthMfaMethodRepository(database),
-    authRateLimits: new AuthRateLimitRepository(database),
-    authSecurityEvents: new AuthSecurityEventWriter(database),
+    authRateLimits,
+    authSecurityEvents,
     credentialDigests,
-    passwordHasher: new PasswordHasher(),
-    jwt: new JwtService(config),
+    passwordHasher,
+    jwt,
     totp: new TotpService(config),
-    refreshTokens: new RefreshTokenService(database, credentialDigests),
+    refreshTokens,
     mfa: new MfaService(
       new UnitOfWork(database),
       new AuthMfaMethodRepository(database),
       new AuthSecurityEventWriter(database),
       credentialDigests,
+    ),
+    auth: new AuthApplicationService(
+      config,
+      unitOfWork,
+      identity,
+      authSessions,
+      authChallenges,
+      authRateLimits,
+      authSecurityEvents,
+      passwordHasher,
+      credentialDigests,
+      jwt,
+      refreshTokens,
     ),
   };
 }

@@ -10,7 +10,7 @@ export interface AppErrorOptions {
 export class AppError extends Error {
   readonly code: string;
   readonly httpStatus: number;
-  readonly details?: Record<string, unknown>;
+  readonly details: Record<string, unknown> | undefined;
   readonly expose: boolean;
 
   constructor(options: AppErrorOptions) {

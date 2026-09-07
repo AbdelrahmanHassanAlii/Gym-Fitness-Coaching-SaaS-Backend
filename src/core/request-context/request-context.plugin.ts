@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 
 export async function registerRequestContext(app: FastifyInstance): Promise<void> {
-  app.decorateRequest('ctx', null);
+  app.decorateRequest('ctx');
 
   app.addHook('onRequest', async (request, reply) => {
     const incomingCorrelationId = request.headers['x-correlation-id'];

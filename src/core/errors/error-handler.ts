@@ -1,12 +1,8 @@
 import type { FastifyError, FastifyInstance } from 'fastify';
 import { AppError } from './app-error';
 
-interface FastifyValidationError extends FastifyError {
-  validation?: unknown;
-}
-
 export function registerErrorHandler(app: FastifyInstance): void {
-  app.setErrorHandler((error: FastifyValidationError, request, reply) => {
+  app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof AppError) {
       request.log.warn(
         { code: error.code, details: error.details },

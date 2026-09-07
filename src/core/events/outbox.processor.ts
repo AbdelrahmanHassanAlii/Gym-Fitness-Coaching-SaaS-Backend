@@ -59,7 +59,7 @@ export class OutboxProcessor {
     const handler = this.handlers.get(event.eventType);
     if (!handler) {
       await this.markFailed(
-        event._id!,
+        event._id,
         event.attempts,
         `No handler registered for ${event.eventType}`,
       );
@@ -90,7 +90,7 @@ export class OutboxProcessor {
         { err: error, eventId: event._id, eventType: event.eventType },
         'Outbox handler failed',
       );
-      await this.markFailed(event._id!, event.attempts, message);
+      await this.markFailed(event._id, event.attempts, message);
       return true;
     }
   }

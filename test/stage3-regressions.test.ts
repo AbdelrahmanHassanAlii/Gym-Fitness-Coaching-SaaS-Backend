@@ -648,6 +648,11 @@ function routeContainer(input: {
         return input.session;
       },
     },
+    accessControl: {
+      async authorize() {
+        return { allowed: true };
+      },
+    },
     auth: {},
     workspaces: {
       async me() {

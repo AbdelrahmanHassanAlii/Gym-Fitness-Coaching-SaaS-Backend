@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { ObjectId } from 'mongodb';
 import { buildApp } from '../src/api/build-app';
 import type { AppConfig } from '../src/config/config.types';
+import { AppError } from '../src/core/errors/app-error';
 import { migration004Stage3WorkspacesIndexes } from '../src/migrations/004-stage3-workspaces-indexes';
 import type { AuthSessionDocument } from '../src/modules/auth/auth.types';
 import type { UserDocument } from '../src/modules/identity/identity.types';
@@ -165,6 +166,18 @@ function fakeContainer(input: {
     authSessions: {
       async findActive() {
         return input.session;
+      },
+    },
+    accessControl: {
+      async authorize(ctx: { mfaSatisfied?: boolean }) {
+        if (!ctx.mfaSatisfied) {
+          throw new AppError({
+            code: 'TWO_FACTOR_REQUIRED',
+            httpStatus: 403,
+            message: 'MFA is required for Platform access.',
+          });
+        }
+        return { allowed: true };
       },
     },
     auth: emptyAuthService(),

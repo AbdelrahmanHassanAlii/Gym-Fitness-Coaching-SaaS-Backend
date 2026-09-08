@@ -63,6 +63,9 @@ function authConfig(): AppConfig {
       challengeMaxAttempts: 5,
       challengeResendCooldownSeconds: 60,
       challengeMaxSendsPerHour: 5,
+      mfaChallengeTtlSeconds: 300,
+      mfaChallengeMaxAttempts: 5,
+      recoveryCodeCount: 10,
       passwordResetIdentifierMaxPerHour: 3,
       passwordResetIpMaxPerHour: 10,
     },
@@ -126,6 +129,20 @@ describe('auth foundation', () => {
 
     expect(encryptedSecret).not.toContain(secret);
     expect(totp.decryptSecret(encryptedSecret)).toBe(secret);
+  });
+
+  test('creates standard TOTP provisioning data and verifies codes with skew', () => {
+    const totp = new TotpService(authConfig());
+    const secret = totp.generateSecret();
+    const now = new Date('2026-09-08T12:00:00Z');
+    const code = totp.generateCode(secret, now);
+
+    expect(totp.provisioningUri({ secret, accountName: 'a@example.com' })).toContain(
+      'otpauth://totp/',
+    );
+    expect(totp.verifyCode(secret, code, now)).toBe(true);
+    expect(totp.verifyCode(secret, code, new Date(now.getTime() + 30_000))).toBe(true);
+    expect(totp.verifyCode(secret, '000000', now)).toBe(false);
   });
 
   test('rejects invalid TOTP encryption key configuration', async () => {

@@ -44,6 +44,91 @@ describe('auth routes', () => {
     await app.close();
   });
 
+  test('mfa-required login does not issue tokens or set a refresh cookie', async () => {
+    const app = await buildApp(
+      fakeContainer([], {
+        async login() {
+          return {
+            status: 'MFA_REQUIRED',
+            mfaChallengeToken: 'mfa-challenge-token',
+            availableMethods: ['TOTP', 'RECOVERY_CODE'],
+          };
+        },
+      }),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: {
+        identifier: 'a@example.com',
+        password: 'password',
+        clientType: 'WEB',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(response.json().data).toEqual({
+      status: 'MFA_REQUIRED',
+      mfaChallengeToken: 'mfa-challenge-token',
+      availableMethods: ['TOTP', 'RECOVERY_CODE'],
+    });
+    await app.close();
+  });
+
+  test('web mfa login completion sets refresh cookie and omits refresh token JSON', async () => {
+    const app = await buildApp(
+      fakeContainer([], {
+        async completeMfaLogin() {
+          return { ...tokenResult('mfa-refresh-token'), clientType: 'WEB' };
+        },
+      }),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/mfa/login/verify',
+      payload: {
+        mfaChallengeToken: 'mfa-challenge-token',
+        factorType: 'TOTP',
+        credential: '123456',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['set-cookie']).toContain('__Secure-gym_refresh=mfa-refresh-token');
+    expect(response.json().data.refreshToken).toBeUndefined();
+    expect(response.json().data.clientType).toBeUndefined();
+    await app.close();
+  });
+
+  test('mobile mfa login completion returns refresh token JSON', async () => {
+    const app = await buildApp(
+      fakeContainer([], {
+        async completeMfaLogin() {
+          return { ...tokenResult('mfa-refresh-token'), clientType: 'MOBILE' };
+        },
+      }),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/mfa/login/verify',
+      payload: {
+        mfaChallengeToken: 'mfa-challenge-token',
+        factorType: 'RECOVERY_CODE',
+        credential: 'RECOVERY-CODE',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(response.json().data.refreshToken).toBe('mfa-refresh-token');
+    expect(response.json().data.clientType).toBeUndefined();
+    await app.close();
+  });
+
   test('web refresh reads cookie, rotates it, and omits refresh token JSON', async () => {
     const app = await buildApp(fakeContainer());
 
@@ -105,7 +190,7 @@ describe('auth routes', () => {
   });
 });
 
-function fakeContainer(calls: string[] = []) {
+function fakeContainer(calls: string[] = [], authOverrides: Record<string, unknown> = {}) {
   return {
     config: testConfig(),
     database: {
@@ -156,6 +241,31 @@ function fakeContainer(calls: string[] = []) {
       async resetPassword() {
         return { success: true as const };
       },
+      async completeMfaLogin() {
+        return { ...tokenResult('refresh-token'), clientType: 'API' };
+      },
+      async mfaStatus() {
+        return { totpEnabled: false, mfaSatisfied: false, recoveryCodesRemaining: 0 };
+      },
+      async startTotpSetup() {
+        return { secret: 'SECRET', provisioningUri: 'otpauth://totp/test' };
+      },
+      async confirmTotpSetup() {
+        return { success: true as const, accessToken: 'access-token', recoveryCodes: [] };
+      },
+      async startStepUp() {
+        return { mfaChallengeToken: 'step-up-token', availableMethods: ['TOTP'] };
+      },
+      async verifyStepUp() {
+        return { success: true as const, accessToken: 'access-token' };
+      },
+      async regenerateRecoveryCodes() {
+        return { success: true as const, recoveryCodes: ['code'] };
+      },
+      async disableMfa() {
+        return { success: true as const };
+      },
+      ...authOverrides,
     },
   } as never;
 }
@@ -212,6 +322,9 @@ function testConfig(): AppConfig {
       challengeMaxAttempts: 5,
       challengeResendCooldownSeconds: 60,
       challengeMaxSendsPerHour: 5,
+      mfaChallengeTtlSeconds: 300,
+      mfaChallengeMaxAttempts: 5,
+      recoveryCodeCount: 10,
       passwordResetIdentifierMaxPerHour: 3,
       passwordResetIpMaxPerHour: 10,
     },

@@ -76,6 +76,11 @@ function authConfig(): AppConfig {
       outboxMaxAttempts: 8,
       jobLeaseMs: 30_000,
     },
+    subscriptions: {
+      trialExpiryAction: 'FROZEN',
+      paidGraceDays: 0,
+      frozenToExpiredDays: 30,
+    },
     support: {
       defaultSessionMinutes: 30,
       maxSessionMinutes: 60,

@@ -342,6 +342,7 @@ export class WorkspaceUsageRepository {
           activeStaff: counters.activeStaff ?? 0,
           storageBytes: counters.storageBytes ?? 0,
           reservedStorageBytes: 0,
+          revision: 0,
           calculatedAt: now,
           updatedAt: now,
         },
@@ -360,25 +361,25 @@ export class WorkspaceUsageRepository {
     return await this.usage.findOne({ workspaceId }, tx ? { session: tx.session } : undefined);
   }
 
-  async replaceCalculated(
+  async repairCalculatedIfRevision(
     workspaceId: ObjectId,
+    expectedRevision: number,
     counters: { activeTrainees: number; activeStaff: number; storageBytes: number },
     now = new Date(),
     tx?: TransactionContext,
-  ): Promise<WorkspaceUsageDocument> {
+  ): Promise<WorkspaceUsageDocument | null> {
     const result = await this.usage.findOneAndUpdate(
-      { workspaceId },
+      { workspaceId, revision: expectedRevision },
       {
         $set: {
           ...counters,
           calculatedAt: now,
           updatedAt: now,
         },
-        $setOnInsert: { _id: new ObjectId(), workspaceId, reservedStorageBytes: 0 },
+        $inc: { revision: 1 },
       },
-      { upsert: true, returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
     );
-    if (!result) throw notFound('WORKSPACE_USAGE_NOT_FOUND');
     return result;
   }
 
@@ -411,7 +412,7 @@ export class WorkspaceUsageRepository {
           $lte: [{ $add: ['$storageBytes', '$reservedStorageBytes', bytes] }, limit],
         },
       },
-      { $inc: { reservedStorageBytes: bytes }, $set: { updatedAt: new Date() } },
+      { $inc: { reservedStorageBytes: bytes, revision: 1 }, $set: { updatedAt: new Date() } },
       tx ? { session: tx.session } : undefined,
     );
     if (result.modifiedCount !== 1) throw limitExceeded('STORAGE_LIMIT_EXCEEDED', limit);
@@ -427,14 +428,14 @@ export class WorkspaceUsageRepository {
     if (limit === undefined) {
       await this.usage.updateOne(
         { workspaceId },
-        { $inc: { [field]: 1 }, $set: { updatedAt: new Date() } },
+        { $inc: { [field]: 1, revision: 1 }, $set: { updatedAt: new Date() } },
         tx ? { session: tx.session } : undefined,
       );
       return;
     }
     const result = await this.usage.updateOne(
       { workspaceId, [field]: { $lt: limit } },
-      { $inc: { [field]: 1 }, $set: { updatedAt: new Date() } },
+      { $inc: { [field]: 1, revision: 1 }, $set: { updatedAt: new Date() } },
       tx ? { session: tx.session } : undefined,
     );
     if (result.modifiedCount !== 1) throw limitExceeded(code, limit);

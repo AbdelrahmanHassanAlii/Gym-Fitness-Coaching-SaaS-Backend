@@ -95,6 +95,7 @@ export interface WorkspaceUsageDocument {
   activeStaff: number;
   storageBytes: number;
   reservedStorageBytes: number;
+  revision: number;
   calculatedAt: Date;
   updatedAt: Date;
 }

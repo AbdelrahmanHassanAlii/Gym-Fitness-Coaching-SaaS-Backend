@@ -342,7 +342,6 @@ export class SubscriptionApplicationService {
       planVersionId: string;
       billingPeriod: BillingPeriod;
       effectiveFrom: string;
-      trialDays?: number;
     },
     tx?: TransactionContext,
   ) {
@@ -354,7 +353,7 @@ export class SubscriptionApplicationService {
     );
     const now = new Date();
     const effectiveFrom = new Date(input.effectiveFrom);
-    const trialDays = input.trialDays ?? planVersion.trialDefaults?.days;
+    const trialDays = planVersion.trialDefaults?.days;
     if (!trialDays || trialDays < 1) throw invalid('SUBSCRIPTION_TRIAL_DAYS_REQUIRED');
     return await this.withTransaction(tx, async (tx) => {
       const subscription = await this.subscriptions.ensurePendingActivation(id, now, tx);
@@ -669,15 +668,22 @@ export class SubscriptionApplicationService {
     const workspaceIds = await this.workspaces.listIds();
     let repaired = 0;
     for (const workspaceId of workspaceIds) {
+      const snapshot = await this.usage.ensure(workspaceId, {}, now);
       const counters = await this.calculateUsage(workspaceId);
-      const current = await this.usage.ensure(workspaceId, counters, now);
       if (
-        current.activeStaff !== counters.activeStaff ||
-        current.activeTrainees !== counters.activeTrainees ||
-        current.storageBytes !== counters.storageBytes
+        snapshot.activeStaff !== counters.activeStaff ||
+        snapshot.activeTrainees !== counters.activeTrainees ||
+        snapshot.storageBytes !== counters.storageBytes
       ) {
-        await this.unitOfWork.withTransaction(async (tx) => {
-          await this.usage.replaceCalculated(workspaceId, counters, now, tx);
+        const repairedUsage = await this.unitOfWork.withTransaction(async (tx) => {
+          const result = await this.usage.repairCalculatedIfRevision(
+            workspaceId,
+            snapshot.revision,
+            counters,
+            now,
+            tx,
+          );
+          if (!result) return null;
           await this.writeAudit(
             { correlationId: `usage-reconcile-${now.toISOString()}` } as RequestContext,
             workspaceId,
@@ -686,8 +692,9 @@ export class SubscriptionApplicationService {
             'reconcile',
             tx,
           );
+          return result;
         });
-        repaired += 1;
+        if (repairedUsage) repaired += 1;
       }
     }
     return repaired;

@@ -71,7 +71,6 @@ export const StartTrialBody = Type.Object(
     planVersionId: Type.String(),
     billingPeriod: BillingPeriod,
     effectiveFrom: Type.String({ format: 'date-time' }),
-    trialDays: Type.Optional(Type.Number({ minimum: 1 })),
   },
   { additionalProperties: false },
 );

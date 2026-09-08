@@ -42,6 +42,7 @@ export interface CreateChallengeInput extends AuthSecurityMetadata {
   userId?: ObjectId;
   normalizedEmail?: string;
   normalizedPhone?: string;
+  authenticationMethods?: AuthenticationMethod[];
   challengeDigest: string;
   digestContext: string;
   expiresAt: Date;
@@ -316,6 +317,10 @@ export class AuthChallengeRepository {
       ...(input.userId ? { userId: input.userId } : {}),
       ...(input.normalizedEmail ? { normalizedEmail: input.normalizedEmail } : {}),
       ...(input.normalizedPhone ? { normalizedPhone: input.normalizedPhone } : {}),
+      ...(input.clientType ? { clientType: input.clientType } : {}),
+      ...(input.authenticationMethods
+        ? { authenticationMethods: input.authenticationMethods }
+        : {}),
       ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
       ...(input.userAgent ? { userAgent: input.userAgent } : {}),
     };
@@ -332,6 +337,51 @@ export class AuthChallengeRepository {
       { _id: challengeId },
       tx ? { session: tx.session } : undefined,
     );
+  }
+
+  async findActiveByDigest(
+    purpose: AuthChallengePurpose,
+    challengeDigest: string,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<AuthChallengeDocument | null> {
+    return await this.challenges.findOne(
+      {
+        purpose,
+        challengeDigest,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async incrementAttemptByDigest(
+    purpose: AuthChallengePurpose,
+    challengeDigest: string,
+    now = new Date(),
+  ): Promise<AuthChallengeDocument> {
+    const challenge = await this.challenges.findOneAndUpdate(
+      {
+        purpose,
+        challengeDigest,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+        $expr: { $lt: ['$attemptCount', '$maxAttempts'] },
+      },
+      { $inc: { attemptCount: 1 } },
+      { returnDocument: 'after' },
+    );
+
+    if (!challenge) {
+      throw new AppError({
+        code: 'MFA_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The MFA challenge is invalid or expired.',
+      });
+    }
+
+    return challenge;
   }
 
   async findLatestActive(
@@ -429,6 +479,24 @@ export class AuthChallengeRepository {
     );
   }
 
+  async invalidateActiveUserChallenges(
+    purpose: AuthChallengePurpose,
+    userId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<void> {
+    await this.challenges.updateMany(
+      {
+        purpose,
+        userId,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+      },
+      { $set: { consumedAt: now } },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
   async recordResend(
     challengeId: ObjectId,
     now = new Date(),
@@ -489,6 +557,31 @@ export class AuthMfaMethodRepository {
     );
   }
 
+  async findActiveTotp(
+    userId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<AuthMfaMethodDocument | null> {
+    return await this.mfaMethods.findOne(
+      { userId, type: 'TOTP', status: 'ACTIVE' },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async findPendingTotp(
+    userId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<AuthMfaMethodDocument | null> {
+    return await this.mfaMethods.findOne(
+      { userId, type: 'TOTP', status: 'PENDING' },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async countUnusedRecoveryCodes(userId: ObjectId): Promise<number> {
+    const method = await this.findActiveTotp(userId);
+    return method?.recoveryCodes.filter((code) => !code.consumedAt).length ?? 0;
+  }
+
   async activate(methodId: ObjectId, now = new Date(), tx?: TransactionContext): Promise<void> {
     await this.mfaMethods.updateOne(
       { _id: methodId, status: 'PENDING' },
@@ -497,10 +590,38 @@ export class AuthMfaMethodRepository {
     );
   }
 
+  async activateTotpWithRecoveryCodes(
+    methodId: ObjectId,
+    recoveryCodes: RecoveryCodeDigest[],
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<boolean> {
+    const result = await this.mfaMethods.updateOne(
+      { _id: methodId, type: 'TOTP', status: 'PENDING' },
+      {
+        $set: {
+          status: 'ACTIVE',
+          recoveryCodes,
+          activatedAt: now,
+          updatedAt: now,
+        },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+    return result.modifiedCount === 1;
+  }
+
   async disable(userId: ObjectId, now = new Date(), tx?: TransactionContext): Promise<void> {
     await this.mfaMethods.updateMany(
       { userId, status: { $ne: 'DISABLED' } },
-      { $set: { status: 'DISABLED', disabledAt: now, updatedAt: now } },
+      {
+        $set: {
+          status: 'DISABLED',
+          recoveryCodes: [],
+          disabledAt: now,
+          updatedAt: now,
+        },
+      },
       tx ? { session: tx.session } : undefined,
     );
   }

@@ -15,6 +15,7 @@ export const AuthChallengePurposes = [
   'EMAIL_VERIFICATION',
   'PHONE_VERIFICATION',
   'PASSWORD_RESET',
+  'MFA_LOGIN',
   'TOTP_SETUP',
   'MFA_STEP_UP',
 ] as const;
@@ -32,6 +33,8 @@ export const AuthRateLimitScopes = [
   'PASSWORD_RESET_IDENTIFIER',
   'PASSWORD_RESET_IP',
   'OTP_IDENTIFIER_SEND',
+  'MFA_CHALLENGE_CREATE',
+  'MFA_VERIFY',
 ] as const;
 export type AuthRateLimitScope = (typeof AuthRateLimitScopes)[number];
 
@@ -76,6 +79,8 @@ export interface AuthChallengeDocument {
   userId?: ObjectId | undefined;
   normalizedEmail?: string | undefined;
   normalizedPhone?: string | undefined;
+  clientType?: AuthClientType | undefined;
+  authenticationMethods?: AuthenticationMethod[] | undefined;
   challengeDigest: string;
   digestContext: string;
   expiresAt: Date;

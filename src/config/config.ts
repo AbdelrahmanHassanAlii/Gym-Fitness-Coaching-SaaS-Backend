@@ -198,6 +198,9 @@ export function loadConfig(): AppConfig {
       challengeMaxAttempts: integer('AUTH_CHALLENGE_MAX_ATTEMPTS', 5, 1),
       challengeResendCooldownSeconds: seconds('AUTH_CHALLENGE_RESEND_COOLDOWN_SECONDS', 60),
       challengeMaxSendsPerHour: integer('AUTH_CHALLENGE_MAX_SENDS_PER_HOUR', 5, 1),
+      mfaChallengeTtlSeconds: seconds('AUTH_MFA_CHALLENGE_TTL_SECONDS', 5 * 60),
+      mfaChallengeMaxAttempts: integer('AUTH_MFA_CHALLENGE_MAX_ATTEMPTS', 5, 1),
+      recoveryCodeCount: integer('AUTH_MFA_RECOVERY_CODE_COUNT', 10, 1),
       passwordResetIdentifierMaxPerHour: integer(
         'AUTH_PASSWORD_RESET_IDENTIFIER_MAX_PER_HOUR',
         3,

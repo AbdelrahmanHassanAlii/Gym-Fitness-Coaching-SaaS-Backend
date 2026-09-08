@@ -25,6 +25,7 @@ export async function registerAuthentication(
     request.ctx.userId = session.userId.toHexString();
     request.ctx.authSessionId = session._id.toHexString();
     request.ctx.authenticationMethods = session.authenticationMethods;
+    request.ctx.mfaSatisfied = Boolean(session.mfaSatisfiedAt);
     request.ctx.restrictedUntilVerified = session.restrictedUntilVerified;
   });
 }

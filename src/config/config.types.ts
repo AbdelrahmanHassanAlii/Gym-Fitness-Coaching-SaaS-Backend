@@ -35,6 +35,9 @@ export interface AppConfig {
     challengeMaxAttempts: number;
     challengeResendCooldownSeconds: number;
     challengeMaxSendsPerHour: number;
+    mfaChallengeTtlSeconds: number;
+    mfaChallengeMaxAttempts: number;
+    recoveryCodeCount: number;
     passwordResetIdentifierMaxPerHour: number;
     passwordResetIpMaxPerHour: number;
   };

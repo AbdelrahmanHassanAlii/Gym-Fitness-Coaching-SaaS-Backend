@@ -3,6 +3,7 @@ export interface RequestContext {
   userId?: string;
   authSessionId?: string;
   authenticationMethods?: string[];
+  mfaSatisfied?: boolean;
   restrictedUntilVerified?: boolean;
   platformMembershipId?: string;
   workspaceId?: string;

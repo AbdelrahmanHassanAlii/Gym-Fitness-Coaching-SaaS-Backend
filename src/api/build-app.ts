@@ -19,6 +19,11 @@ export async function buildApp(container: AppContainer) {
   const app = Fastify({
     logger: createLoggerOptions(config),
     trustProxy: config.app.trustProxy,
+    ajv: {
+      customOptions: {
+        removeAdditional: false,
+      },
+    },
   });
 
   await app.register(helmet, {

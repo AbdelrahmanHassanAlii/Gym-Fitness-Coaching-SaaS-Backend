@@ -52,6 +52,27 @@ export const CreateWorkspaceBody = Type.Object({
   governorate: Type.Optional(Type.String()),
 });
 
+export const UpdateMeBody = Type.Object(
+  {
+    firstName: Type.Optional(Type.String({ minLength: 1 })),
+    lastName: Type.Optional(Type.String({ minLength: 1 })),
+    preferredLanguage: Type.Optional(Language),
+    timezone: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+export const UpdateWorkspaceBody = Type.Object(
+  {
+    name: Type.Optional(Type.String({ minLength: 1 })),
+    timezone: Type.Optional(Type.String({ minLength: 1 })),
+    defaultLanguage: Type.Optional(Language),
+    city: Type.Optional(Type.String()),
+    governorate: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
 export const CreatePlatformMembershipBody = Type.Object({
   userId: Type.String(),
 });
@@ -64,6 +85,18 @@ export const CreateBranchBody = Type.Object({
   city: Type.Optional(Type.String()),
   governorate: Type.Optional(Type.String()),
 });
+
+export const UpdateBranchBody = Type.Object(
+  {
+    name: Type.Optional(Type.String({ minLength: 1 })),
+    code: Type.Optional(Type.String({ minLength: 1 })),
+    timezone: Type.Optional(Type.String({ minLength: 1 })),
+    address: Type.Optional(Type.String()),
+    city: Type.Optional(Type.String()),
+    governorate: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
 
 export const InviteStaffBody = Type.Object({
   email: Type.Optional(Type.String()),

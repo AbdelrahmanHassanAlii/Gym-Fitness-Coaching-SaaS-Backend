@@ -1,4 +1,4 @@
-import { type Collection, MongoServerError, ObjectId } from 'mongodb';
+import { type Collection, MongoServerError, ObjectId, type UpdateFilter } from 'mongodb';
 import type { Database } from '../../core/database/database';
 import type { TransactionContext } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -171,13 +171,19 @@ export class WorkspaceMembershipRepository {
   }
 
   async reactivate(
+    workspaceId: ObjectId,
     membershipId: ObjectId,
     roles: WorkspaceMembershipRole[],
     now = new Date(),
     tx?: TransactionContext,
   ): Promise<WorkspaceMembershipDocument> {
     const result = await this.memberships.findOneAndUpdate(
-      { _id: membershipId, status: { $in: ['SUSPENDED', 'ENDED'] } },
+      {
+        _id: membershipId,
+        workspaceId,
+        status: { $in: ['SUSPENDED', 'ENDED'] },
+        engagementPeriods: { $not: { $elemMatch: { endedAt: { $exists: false } } } },
+      },
       {
         $set: { status: 'ACTIVE', roles, updatedAt: now },
         $unset: { endedAt: '' },
@@ -203,26 +209,41 @@ export class WorkspaceMembershipRepository {
     now = new Date(),
     tx?: TransactionContext,
   ): Promise<WorkspaceMembershipDocument> {
-    const update =
-      to === 'ENDED'
-        ? {
-            $set: {
-              status: to,
-              endedAt: now,
-              updatedAt: now,
-              'engagementPeriods.$[activePeriod].endedAt': now,
-            },
-          }
-        : {
-            $set: { status: to, updatedAt: now },
-            ...(to === 'ACTIVE' ? { $push: { engagementPeriods: { startedAt: now } } } : {}),
-          };
+    const closesOpenPeriod = to === 'SUSPENDED' || to === 'ENDED';
+    const opensNewPeriod = to === 'ACTIVE';
+    const sourceRequiresOpenPeriod = from.includes('ACTIVE');
+    const update: UpdateFilter<WorkspaceMembershipDocument> = closesOpenPeriod
+      ? {
+          $set: {
+            status: to,
+            ...(to === 'ENDED' ? { endedAt: now } : {}),
+            updatedAt: now,
+            'engagementPeriods.$[activePeriod].endedAt': now,
+          },
+        }
+      : {
+          $set: { status: to, updatedAt: now },
+          $unset: { endedAt: '' },
+          $push: { engagementPeriods: { startedAt: now } },
+        };
     const result = await this.memberships.findOneAndUpdate(
-      { _id: membershipId, workspaceId, status: { $in: from } },
+      {
+        _id: membershipId,
+        workspaceId,
+        status: { $in: from },
+        ...(sourceRequiresOpenPeriod
+          ? { engagementPeriods: { $elemMatch: { endedAt: { $exists: false } } } }
+          : {}),
+        ...(opensNewPeriod
+          ? { engagementPeriods: { $not: { $elemMatch: { endedAt: { $exists: false } } } } }
+          : {}),
+      },
       update,
       {
         returnDocument: 'after',
-        arrayFilters: to === 'ENDED' ? [{ 'activePeriod.endedAt': { $exists: false } }] : [],
+        ...(closesOpenPeriod
+          ? { arrayFilters: [{ 'activePeriod.endedAt': { $exists: false } }] }
+          : {}),
         ...(tx ? { session: tx.session } : {}),
       },
     );
@@ -300,6 +321,51 @@ export class BranchRepository {
       { _id: branchId, workspaceId },
       tx ? { session: tx.session } : undefined,
     );
+  }
+
+  async update(
+    workspaceId: ObjectId,
+    branchId: ObjectId,
+    input: {
+      name?: string;
+      code?: string;
+      timezone?: string;
+      address?: string;
+      city?: string;
+      governorate?: string;
+      now?: Date;
+    },
+    tx?: TransactionContext,
+  ): Promise<BranchDocument> {
+    const now = input.now ?? new Date();
+    try {
+      const result = await this.branches.findOneAndUpdate(
+        { _id: branchId, workspaceId },
+        {
+          $set: compact({
+            name: input.name,
+            code: input.code,
+            timezone: input.timezone,
+            address: input.address,
+            city: input.city,
+            governorate: input.governorate,
+            updatedAt: now,
+          }),
+        },
+        { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+      );
+      if (!result) throw notFound('BRANCH_NOT_FOUND', 'Branch not found.');
+      return result;
+    } catch (error) {
+      if (error instanceof MongoServerError && error.code === 11000) {
+        throw new AppError({
+          code: 'BRANCH_CODE_CONFLICT',
+          httpStatus: 409,
+          message: 'The branch code is already used in this workspace.',
+        });
+      }
+      throw error;
+    }
   }
 
   async archive(

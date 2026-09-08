@@ -133,6 +133,41 @@ export class IdentityRepository {
       tx ? { session: tx.session } : undefined,
     );
   }
+
+  async updateProfile(
+    userId: ObjectId,
+    input: {
+      firstName?: string;
+      lastName?: string;
+      preferredLanguage?: string;
+      timezone?: string;
+      now?: Date;
+    },
+    tx?: TransactionContext,
+  ): Promise<UserDocument> {
+    const now = input.now ?? new Date();
+    const result = await this.users.findOneAndUpdate(
+      { _id: userId, status: 'ACTIVE' },
+      {
+        $set: compact({
+          firstName: input.firstName,
+          lastName: input.lastName,
+          preferredLanguage: input.preferredLanguage,
+          timezone: input.timezone,
+          updatedAt: now,
+        }),
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) {
+      throw new AppError({
+        code: 'USER_NOT_FOUND',
+        httpStatus: 404,
+        message: 'User not found.',
+      });
+    }
+    return result;
+  }
 }
 
 function assertValidOptionalIdentifier(name: string, value: string | undefined): void {
@@ -144,4 +179,10 @@ function assertValidOptionalIdentifier(name: string, value: string | undefined):
       message: `${name} must not be empty.`,
     });
   }
+}
+
+function compact<T extends Record<string, unknown>>(input: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
 }

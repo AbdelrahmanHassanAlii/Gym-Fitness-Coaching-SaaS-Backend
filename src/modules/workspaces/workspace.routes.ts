@@ -16,6 +16,9 @@ import {
   MembershipParams,
   PlatformMembershipParams,
   SuccessResponse,
+  UpdateBranchBody,
+  UpdateMeBody,
+  UpdateWorkspaceBody,
 } from './workspace.schemas';
 
 export async function registerWorkspaceRoutes(
@@ -29,6 +32,19 @@ export async function registerWorkspaceRoutes(
       schema: { tags: ['Me'], response: { 200: {}, 401: ErrorResponse } },
     },
     async (request) => ({ data: await container.workspaces.me(request.ctx) }),
+  );
+
+  app.patch<{ Body: Static<typeof UpdateMeBody> }>(
+    '/api/v1/me',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Me'],
+        body: UpdateMeBody,
+        response: { 200: {}, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse },
+      },
+    },
+    async (request) => ({ data: await container.workspaces.updateMe(request.ctx, request.body) }),
   );
 
   app.get(
@@ -121,6 +137,26 @@ export async function registerWorkspaceRoutes(
     }),
   );
 
+  app.patch<{ Params: Static<typeof IdParams>; Body: Static<typeof UpdateWorkspaceBody> }>(
+    '/api/v1/workspaces/:workspaceId',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Workspaces'],
+        params: IdParams,
+        body: UpdateWorkspaceBody,
+        response: { 200: {}, 400: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.updateWorkspace(
+        request.ctx,
+        request.params.workspaceId,
+        request.body,
+      ),
+    }),
+  );
+
   app.get<{ Params: Static<typeof IdParams> }>(
     '/api/v1/workspaces/:workspaceId/branches',
     {
@@ -129,6 +165,46 @@ export async function registerWorkspaceRoutes(
     },
     async (request) => ({
       data: await container.workspaces.listBranches(request.ctx, request.params.workspaceId),
+    }),
+  );
+
+  app.get<{ Params: Static<typeof BranchParams> }>(
+    '/api/v1/workspaces/:workspaceId/branches/:branchId',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Branches'],
+        params: BranchParams,
+        response: { 200: {}, 403: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.getBranch(
+        request.ctx,
+        request.params.workspaceId,
+        request.params.branchId,
+      ),
+    }),
+  );
+
+  app.patch<{ Params: Static<typeof BranchParams>; Body: Static<typeof UpdateBranchBody> }>(
+    '/api/v1/workspaces/:workspaceId/branches/:branchId',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Branches'],
+        params: BranchParams,
+        body: UpdateBranchBody,
+        response: { 200: {}, 400: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.updateBranch(
+        request.ctx,
+        request.params.workspaceId,
+        request.params.branchId,
+        request.body,
+      ),
     }),
   );
 
@@ -184,6 +260,25 @@ export async function registerWorkspaceRoutes(
     },
     async (request) => ({
       data: await container.workspaces.listMemberships(request.ctx, request.params.workspaceId),
+    }),
+  );
+
+  app.get<{ Params: Static<typeof MembershipParams> }>(
+    '/api/v1/workspaces/:workspaceId/memberships/:membershipId',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Memberships'],
+        params: MembershipParams,
+        response: { 200: {}, 403: ErrorResponse, 404: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.getMembership(
+        request.ctx,
+        request.params.workspaceId,
+        request.params.membershipId,
+      ),
     }),
   );
 

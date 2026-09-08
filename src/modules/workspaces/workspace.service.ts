@@ -55,6 +55,35 @@ export class WorkspaceApplicationService {
     };
   }
 
+  async updateMe(
+    ctx: RequestContext,
+    input: {
+      firstName?: string;
+      lastName?: string;
+      preferredLanguage?: 'ar' | 'en';
+      timezone?: string;
+    },
+  ) {
+    const { user, session } = await this.requireAuthenticatedUser(ctx);
+    const updated = await this.identity.updateProfile(
+      user._id,
+      compact({
+        firstName: input.firstName?.trim(),
+        lastName: input.lastName?.trim(),
+        preferredLanguage: input.preferredLanguage,
+        timezone: input.timezone,
+      }),
+    );
+    return {
+      user: safeUser(updated),
+      session: {
+        id: session.id,
+        restrictedUntilVerified: session.restrictedUntilVerified,
+        mfaSatisfied: session.mfaSatisfied,
+      },
+    };
+  }
+
   async listMyWorkspaces(ctx: RequestContext) {
     const { user } = await this.requireAuthenticatedUser(ctx);
     const memberships = await this.memberships.listActiveByUser(user._id);
@@ -115,7 +144,14 @@ export class WorkspaceApplicationService {
         },
         tx,
       );
-      await this.writeBusinessAudit(ctx, actor, 'WorkspaceCreated', workspace, 'create', tx);
+      await this.writeBusinessAudit(
+        ctx,
+        { ...actor, workspace },
+        'WorkspaceCreated',
+        workspace,
+        'create',
+        tx,
+      );
       await this.writeOutbox(
         ctx,
         workspace._id,
@@ -164,6 +200,15 @@ export class WorkspaceApplicationService {
         'create',
         tx,
       );
+      await this.writeOutbox(
+        ctx,
+        undefined,
+        'PlatformMembershipCreated',
+        'platform_membership',
+        membership._id,
+        { userId: targetUserId.toHexString() },
+        tx,
+      );
       return safePlatformMembership(membership);
     });
   }
@@ -189,12 +234,15 @@ export class WorkspaceApplicationService {
         new Date(),
         tx,
       );
-      await this.writeBusinessAudit(
+      const eventType = platformMembershipEvent(command);
+      await this.writeBusinessAudit(ctx, actor, eventType, membership, command, tx);
+      await this.writeOutbox(
         ctx,
-        actor,
-        'PlatformMembershipChanged',
-        membership,
-        command,
+        undefined,
+        eventType,
+        'platform_membership',
+        membership._id,
+        { userId: membership.userId.toHexString() },
         tx,
       );
       return safePlatformMembership(membership);
@@ -206,9 +254,55 @@ export class WorkspaceApplicationService {
     return { workspace: safeWorkspace(workspace), membership: safeMembership(membership) };
   }
 
+  async updateWorkspace(
+    ctx: RequestContext,
+    workspaceId: string,
+    input: {
+      name?: string;
+      timezone?: string;
+      defaultLanguage?: 'ar' | 'en';
+      city?: string;
+      governorate?: string;
+    },
+  ) {
+    const access = await this.requireWorkspaceAccess(ctx, workspaceId);
+    return await this.unitOfWork.withTransaction(async (tx) => {
+      const workspace = await this.workspaces.update(
+        access.workspace._id,
+        compact({
+          name: input.name?.trim(),
+          timezone: input.timezone,
+          defaultLanguage: input.defaultLanguage,
+          city: input.city,
+          governorate: input.governorate,
+        }),
+        tx,
+      );
+      await this.writeBusinessAudit(ctx, access, 'WorkspaceUpdated', workspace, 'update', tx);
+      await this.writeOutbox(
+        ctx,
+        access.workspace._id,
+        'WorkspaceUpdated',
+        'workspace',
+        workspace._id,
+        {},
+        tx,
+      );
+      return safeWorkspace(workspace);
+    });
+  }
+
   async listBranches(ctx: RequestContext, workspaceId: string) {
     const { workspace } = await this.requireWorkspaceAccess(ctx, workspaceId);
     return (await this.branches.listByWorkspace(workspace._id)).map(safeBranch);
+  }
+
+  async getBranch(ctx: RequestContext, workspaceId: string, branchId: string) {
+    const access = await this.requireWorkspaceAccess(ctx, workspaceId);
+    const branchObjectId = objectId(branchId, 'BRANCH_NOT_FOUND');
+    const branch = await this.branches.findByIdInWorkspace(access.workspace._id, branchObjectId);
+    if (!branch) throw notFound('BRANCH_NOT_FOUND', 'Branch not found.');
+    return safeBranch(branch);
   }
 
   async createBranch(
@@ -255,6 +349,49 @@ export class WorkspaceApplicationService {
     });
   }
 
+  async updateBranch(
+    ctx: RequestContext,
+    workspaceId: string,
+    branchId: string,
+    input: {
+      name?: string;
+      code?: string;
+      timezone?: string;
+      address?: string;
+      city?: string;
+      governorate?: string;
+    },
+  ) {
+    const access = await this.requireWorkspaceAccess(ctx, workspaceId);
+    const branchObjectId = objectId(branchId, 'BRANCH_NOT_FOUND');
+    return await this.unitOfWork.withTransaction(async (tx) => {
+      const branch = await this.branches.update(
+        access.workspace._id,
+        branchObjectId,
+        compact({
+          name: input.name?.trim(),
+          code: input.code?.trim(),
+          timezone: input.timezone,
+          address: input.address,
+          city: input.city,
+          governorate: input.governorate,
+        }),
+        tx,
+      );
+      await this.writeBusinessAudit(ctx, access, 'BranchUpdated', branch, 'update', tx);
+      await this.writeOutbox(
+        ctx,
+        access.workspace._id,
+        'BranchUpdated',
+        'branch',
+        branch._id,
+        {},
+        tx,
+      );
+      return safeBranch(branch);
+    });
+  }
+
   async archiveBranch(ctx: RequestContext, workspaceId: string, branchId: string) {
     const access = await this.requireWorkspaceAccess(ctx, workspaceId);
     const branchObjectId = objectId(branchId, 'BRANCH_NOT_FOUND');
@@ -282,6 +419,13 @@ export class WorkspaceApplicationService {
   async listMemberships(ctx: RequestContext, workspaceId: string) {
     const { workspace } = await this.requireWorkspaceAccess(ctx, workspaceId);
     return (await this.memberships.listByWorkspace(workspace._id)).map(safeMembership);
+  }
+
+  async getMembership(ctx: RequestContext, workspaceId: string, membershipId: string) {
+    const access = await this.requireWorkspaceAccess(ctx, workspaceId);
+    const id = objectId(membershipId, 'WORKSPACE_MEMBERSHIP_NOT_FOUND');
+    const membership = await this.requireMembershipInWorkspace(access.workspace._id, id);
+    return safeMembership(membership);
   }
 
   async transitionMembership(
@@ -539,6 +683,18 @@ export class WorkspaceApplicationService {
         'assign',
         tx,
       );
+      await this.writeOutbox(
+        ctx,
+        access.workspace._id,
+        'MembershipBranchAssigned',
+        'membership_branch_assignment',
+        assignment._id,
+        {
+          membershipId: assignment.membershipId.toHexString(),
+          branchId: assignment.branchId.toHexString(),
+        },
+        tx,
+      );
       return safeAssignment(assignment);
     });
   }
@@ -554,6 +710,12 @@ export class WorkspaceApplicationService {
     const branchObjectId = objectId(branchId, 'BRANCH_NOT_FOUND');
     return await this.unitOfWork.withTransaction(async (tx) => {
       await this.requireMembershipInWorkspace(access.workspace._id, memberId, tx);
+      const branch = await this.branches.findByIdInWorkspace(
+        access.workspace._id,
+        branchObjectId,
+        tx,
+      );
+      if (!branch) throw notFound('BRANCH_NOT_FOUND', 'Branch not found.');
       const removed = await this.branchAssignments.endActive(
         access.workspace._id,
         memberId,
@@ -568,6 +730,18 @@ export class WorkspaceApplicationService {
         'MembershipBranchAssignmentEnded',
         memberId,
         'remove',
+        tx,
+      );
+      await this.writeOutbox(
+        ctx,
+        access.workspace._id,
+        'MembershipBranchAssignmentEnded',
+        'membership_branch_assignment',
+        `${memberId.toHexString()}:${branchObjectId.toHexString()}`,
+        {
+          membershipId: memberId.toHexString(),
+          branchId: branchObjectId.toHexString(),
+        },
         tx,
       );
       return { success: true as const };
@@ -594,7 +768,13 @@ export class WorkspaceApplicationService {
     }
     if (existing.status === 'ACTIVE') return existing;
     if (existing.status === 'SUSPENDED' || existing.status === 'ENDED') {
-      return await this.memberships.reactivate(existing._id, invitation.intendedRoles, now, tx);
+      return await this.memberships.reactivate(
+        invitation.workspaceId,
+        existing._id,
+        invitation.intendedRoles,
+        now,
+        tx,
+      );
     }
     throw new AppError({
       code: 'WORKSPACE_MEMBERSHIP_REACTIVATION_INVALID',
@@ -723,10 +903,10 @@ export class WorkspaceApplicationService {
 
   private async writeOutbox(
     ctx: RequestContext,
-    workspaceId: ObjectId,
+    workspaceId: ObjectId | undefined,
     eventType: string,
     aggregateType: string,
-    aggregateId: ObjectId,
+    aggregateId: ObjectId | string,
     payload: Record<string, unknown>,
     tx: TransactionContext,
   ) {
@@ -735,7 +915,7 @@ export class WorkspaceApplicationService {
         eventType,
         aggregateType,
         aggregateId,
-        workspaceId,
+        ...compact({ workspaceId }),
         payload,
         correlationId: ctx.correlationId,
       },
@@ -831,6 +1011,10 @@ function safeMembership(membership: WorkspaceMembershipDocument) {
     status: membership.status,
     joinedAt: membership.joinedAt.toISOString(),
     endedAt: membership.endedAt?.toISOString(),
+    engagementPeriods: membership.engagementPeriods.map((period) => ({
+      startedAt: period.startedAt.toISOString(),
+      endedAt: period.endedAt?.toISOString(),
+    })),
   };
 }
 
@@ -877,6 +1061,12 @@ function safeAssignment(assignment: MembershipBranchAssignmentDocument) {
 function objectId(value: string, code: string): ObjectId {
   if (!ObjectId.isValid(value)) throw notFound(code, 'Resource not found.');
   return new ObjectId(value);
+}
+
+function platformMembershipEvent(command: 'suspend' | 'reactivate' | 'end'): string {
+  if (command === 'suspend') return 'PlatformMembershipSuspended';
+  if (command === 'reactivate') return 'PlatformMembershipReactivated';
+  return 'PlatformMembershipEnded';
 }
 
 function authRequired(): AppError {

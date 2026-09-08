@@ -17,7 +17,8 @@
     "verify:push": "bun scripts/pre-push-checks.ts",
     "prepare": "husky",
     "db:migrate": "bun src/cli/db-migrate.ts",
-    "db:migrate:status": "bun src/cli/db-migrate-status.ts"
+    "db:migrate:status": "bun src/cli/db-migrate-status.ts",
+    "platform-admin:create": "bun src/cli/platform-admin-create.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

@@ -8,6 +8,7 @@ import { TotpService } from '../core/auth/totp.service';
 import { Database } from '../core/database/database';
 import { UnitOfWork } from '../core/database/unit-of-work';
 import { OutboxWriter } from '../core/events/outbox.writer';
+import { IdempotencyService } from '../core/idempotency/idempotency.service';
 import { JobLeaseManager } from '../core/jobs/job-lease.manager';
 import {
   AuthChallengeRepository,
@@ -28,6 +29,16 @@ import {
 import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
 import {
+  ManualPaymentRepository,
+  SubscriptionPlanRepository,
+  SubscriptionRepository,
+  WorkspaceUsageRepository,
+} from '../modules/subscriptions/subscription.repository';
+import {
+  EntitlementService,
+  SubscriptionApplicationService,
+} from '../modules/subscriptions/subscription.service';
+import {
   BranchRepository,
   InvitationRepository,
   MembershipBranchAssignmentRepository,
@@ -43,6 +54,7 @@ export interface AppContainer {
   audit: AuditWriter;
   outbox: OutboxWriter;
   accessControl: AccessControlService;
+  idempotency: IdempotencyService;
   jobLeases: JobLeaseManager;
   identity: IdentityRepository;
   authSessions: AuthSessionRepository;
@@ -59,6 +71,10 @@ export interface AppContainer {
   branches: BranchRepository;
   membershipBranchAssignments: MembershipBranchAssignmentRepository;
   invitations: InvitationRepository;
+  subscriptionPlans: SubscriptionPlanRepository;
+  subscriptionsRepo: SubscriptionRepository;
+  workspaceUsage: WorkspaceUsageRepository;
+  manualPayments: ManualPaymentRepository;
   credentialDigests: CredentialDigests;
   passwordHasher: PasswordHasher;
   jwt: JwtService;
@@ -68,6 +84,8 @@ export interface AppContainer {
   auth: AuthApplicationService;
   workspaces: WorkspaceApplicationService;
   permissions: PermissionApplicationService;
+  entitlements: EntitlementService;
+  subscriptions: SubscriptionApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -96,6 +114,11 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const refreshTokens = new RefreshTokenService(database, credentialDigests);
   const audit = new AuditWriter(database);
   const outbox = new OutboxWriter(database);
+  const idempotency = new IdempotencyService(database);
+  const subscriptionPlans = new SubscriptionPlanRepository(database);
+  const subscriptionsRepo = new SubscriptionRepository(database);
+  const workspaceUsage = new WorkspaceUsageRepository(database);
+  const manualPayments = new ManualPaymentRepository(database);
   const accessControl = new AccessControlService(
     platformMemberships,
     workspaceRepo,
@@ -113,6 +136,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
     accessControl,
+    idempotency,
     jobLeases: new JobLeaseManager(database),
     identity,
     authSessions,
@@ -129,6 +153,10 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     branches,
     membershipBranchAssignments,
     invitations,
+    subscriptionPlans,
+    subscriptionsRepo,
+    workspaceUsage,
+    manualPayments,
     credentialDigests,
     passwordHasher,
     jwt,
@@ -172,6 +200,19 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       platformMemberships,
       workspaceRepo,
       branches,
+      workspaceMemberships,
+      audit,
+      outbox,
+    ),
+    entitlements: new EntitlementService(subscriptionsRepo, workspaceUsage),
+    subscriptions: new SubscriptionApplicationService(
+      config,
+      unitOfWork,
+      subscriptionPlans,
+      subscriptionsRepo,
+      workspaceUsage,
+      manualPayments,
+      workspaceRepo,
       workspaceMemberships,
       audit,
       outbox,

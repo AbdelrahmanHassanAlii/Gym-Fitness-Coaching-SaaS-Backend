@@ -2,11 +2,13 @@ import { createAppContainer } from '../bootstrap/app-container';
 import { loadConfig } from '../config/config';
 import { OutboxProcessor } from '../core/events/outbox.processor';
 import { createLogger } from '../core/logging/logger';
+import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
 
 const config = loadConfig();
 const logger = createLogger(config).child({ process: 'worker', workerId: config.worker.id });
 const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
+const subscriptionJobs = new SubscriptionJobRunner(container);
 
 let shuttingDown = false;
 
@@ -20,6 +22,7 @@ async function run(): Promise<void> {
   while (!shuttingDown) {
     try {
       const processed = await outbox.processOne();
+      await subscriptionJobs.runDueJobs();
       if (!processed && !shuttingDown) {
         await sleep(config.worker.outboxPollIntervalMs);
       }

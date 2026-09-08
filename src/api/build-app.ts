@@ -11,6 +11,7 @@ import { registerRequestContext } from '../core/request-context/request-context.
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
+import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
 import { registerWorkspaceRoutes } from '../modules/workspaces/workspace.routes';
 import { registerHealthRoutes } from './health.routes';
 
@@ -76,6 +77,7 @@ export async function buildApp(container: AppContainer) {
   await registerAuthRoutes(app, container);
   await registerWorkspaceRoutes(app, container);
   await registerPermissionRoutes(app, container);
+  await registerSubscriptionRoutes(app, container);
 
   return app;
 }

@@ -64,6 +64,11 @@ export class WorkspaceRepository {
     );
   }
 
+  async listIds(): Promise<ObjectId[]> {
+    const workspaces = await this.workspaces.find({}, { projection: { _id: 1 } }).toArray();
+    return workspaces.map((workspace) => workspace._id);
+  }
+
   async update(
     workspaceId: ObjectId,
     input: {

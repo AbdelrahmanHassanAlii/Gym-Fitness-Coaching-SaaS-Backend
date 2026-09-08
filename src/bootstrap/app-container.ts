@@ -19,6 +19,15 @@ import { AuthApplicationService } from '../modules/auth/auth.service';
 import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
+import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
+import {
+  BranchRepository,
+  InvitationRepository,
+  MembershipBranchAssignmentRepository,
+  WorkspaceMembershipRepository,
+  WorkspaceRepository,
+} from '../modules/workspaces/workspace.repository';
+import { WorkspaceApplicationService } from '../modules/workspaces/workspace.service';
 
 export interface AppContainer {
   config: AppConfig;
@@ -33,6 +42,12 @@ export interface AppContainer {
   authMfaMethods: AuthMfaMethodRepository;
   authRateLimits: AuthRateLimitRepository;
   authSecurityEvents: AuthSecurityEventWriter;
+  platformMemberships: PlatformMembershipRepository;
+  workspaceRepo: WorkspaceRepository;
+  workspaceMemberships: WorkspaceMembershipRepository;
+  branches: BranchRepository;
+  membershipBranchAssignments: MembershipBranchAssignmentRepository;
+  invitations: InvitationRepository;
   credentialDigests: CredentialDigests;
   passwordHasher: PasswordHasher;
   jwt: JwtService;
@@ -40,6 +55,7 @@ export interface AppContainer {
   refreshTokens: RefreshTokenService;
   mfa: MfaService;
   auth: AuthApplicationService;
+  workspaces: WorkspaceApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -53,6 +69,12 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const authMfaMethods = new AuthMfaMethodRepository(database);
   const authRateLimits = new AuthRateLimitRepository(database);
   const authSecurityEvents = new AuthSecurityEventWriter(database);
+  const platformMemberships = new PlatformMembershipRepository(database);
+  const workspaceRepo = new WorkspaceRepository(database);
+  const workspaceMemberships = new WorkspaceMembershipRepository(database);
+  const branches = new BranchRepository(database);
+  const membershipBranchAssignments = new MembershipBranchAssignmentRepository(database);
+  const invitations = new InvitationRepository(database);
   const passwordHasher = new PasswordHasher();
   const jwt = new JwtService(config);
   const totp = new TotpService(config);
@@ -71,6 +93,12 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     authMfaMethods,
     authRateLimits,
     authSecurityEvents,
+    platformMemberships,
+    workspaceRepo,
+    workspaceMemberships,
+    branches,
+    membershipBranchAssignments,
+    invitations,
     credentialDigests,
     passwordHasher,
     jwt,
@@ -91,6 +119,19 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       jwt,
       totp,
       refreshTokens,
+    ),
+    workspaces: new WorkspaceApplicationService(
+      unitOfWork,
+      identity,
+      platformMemberships,
+      workspaceRepo,
+      workspaceMemberships,
+      branches,
+      membershipBranchAssignments,
+      invitations,
+      credentialDigests,
+      new AuditWriter(database),
+      new OutboxWriter(database),
     ),
   };
 }

@@ -97,6 +97,43 @@ export class IdempotencyService {
     }
   }
 
+  async runInTransactionForActor<T>(
+    actorId: string,
+    input: {
+      key: string | undefined;
+      routeKey: string;
+      fingerprint: unknown;
+      unitOfWork: UnitOfWork;
+      ttlMs?: number;
+      operation: (
+        tx: TransactionContext,
+      ) => Promise<{ statusCode?: number; body: T; resourceId?: string }>;
+    },
+  ): Promise<IdempotencyResult<T>> {
+    const record = this.buildRecordForActor(actorId, input);
+
+    const owned = await this.reserveOrRecover(record);
+    if (!owned) return await this.resolveExisting<T>(record);
+
+    try {
+      const result = await input.unitOfWork.withTransaction(async (tx) => {
+        const operationResult = await input.operation(tx);
+        await this.completeWithinTransaction(
+          record,
+          operationResult.statusCode ?? 200,
+          operationResult.body,
+          tx,
+          operationResult.resourceId,
+        );
+        return operationResult;
+      });
+      return { statusCode: result.statusCode ?? 200, body: result.body, replayed: false };
+    } catch (error) {
+      await this.markFailed(record).catch(() => undefined);
+      throw error;
+    }
+  }
+
   async completeWithinTransaction(
     identity: { actorId: string; routeKey: string; key: string; requestHash?: string },
     responseStatus: number,
@@ -154,6 +191,38 @@ export class IdempotencyService {
     const now = new Date();
     return {
       actorId: ctx.userId,
+      routeKey: input.routeKey,
+      key: input.key.trim(),
+      requestHash: fingerprint(input.fingerprint),
+      state: 'PROCESSING',
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: new Date(now.getTime() + (input.ttlMs ?? 24 * 60 * 60 * 1000)),
+    };
+  }
+
+  private buildRecordForActor(
+    actorId: string,
+    input: { key: string | undefined; routeKey: string; fingerprint: unknown; ttlMs?: number },
+  ): IdempotencyRecordDocument {
+    if (!input.key?.trim()) {
+      throw new AppError({
+        code: 'IDEMPOTENCY_KEY_REQUIRED',
+        httpStatus: 400,
+        message: 'Idempotency-Key is required for this command.',
+      });
+    }
+    if (!actorId.trim()) {
+      throw new AppError({
+        code: 'IDEMPOTENCY_ACTOR_REQUIRED',
+        httpStatus: 401,
+        message: 'An idempotency actor is required.',
+      });
+    }
+
+    const now = new Date();
+    return {
+      actorId: actorId.trim(),
       routeKey: input.routeKey,
       key: input.key.trim(),
       requestHash: fingerprint(input.fingerprint),

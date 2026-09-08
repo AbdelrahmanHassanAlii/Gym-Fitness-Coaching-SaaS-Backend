@@ -203,7 +203,8 @@ export class AuthApplicationService {
     await this.enforcePublicIpLimit('LOGIN_IP', input.metadata.ipAddress);
 
     const user = identifier ? await this.identity.findByLoginIdentifier(identifier) : null;
-    const passwordMatches = user
+    const authenticatable = user?.status === 'ACTIVE' && Boolean(user.passwordHash);
+    const passwordMatches = authenticatable
       ? await this.passwordHasher.verify(input.password, user.passwordHash)
       : false;
 
@@ -868,6 +869,87 @@ export class AuthApplicationService {
     });
 
     return { success: true, ...(accessToken ? { accessToken } : {}) };
+  }
+
+  async verifyIdentifierChallengeForActivation(input: {
+    purpose: 'EMAIL_VERIFICATION' | 'PHONE_VERIFICATION';
+    challengeId: ObjectId;
+    code: string;
+    userId: ObjectId;
+    identifier: { normalizedEmail?: string; normalizedPhone?: string };
+    metadata: AuthRequestMetadata;
+    tx: TransactionContext;
+  }): Promise<void> {
+    const now = new Date();
+    const attempted = await this.challenges.incrementAttempt(input.challengeId, now);
+    const presentedDigest = this.digestForChallenge(attempted, input.code);
+    const expectedEmail =
+      input.purpose === 'EMAIL_VERIFICATION' &&
+      attempted.normalizedEmail &&
+      input.identifier.normalizedEmail === attempted.normalizedEmail;
+    const expectedPhone =
+      input.purpose === 'PHONE_VERIFICATION' &&
+      attempted.normalizedPhone &&
+      input.identifier.normalizedPhone === attempted.normalizedPhone;
+    const boundToSubject = attempted.userId?.equals(input.userId) === true;
+
+    if (
+      attempted.purpose !== input.purpose ||
+      !boundToSubject ||
+      (!expectedEmail && !expectedPhone) ||
+      !this.credentialDigests.matches(attempted.challengeDigest, presentedDigest)
+    ) {
+      await this.securityEvents.write({
+        type: 'OWNER_ACTIVATION_VERIFICATION_ATTEMPT',
+        userId: attempted.userId,
+        result: 'FAILURE',
+        reasonCode: 'CODE_MISMATCH',
+        ipAddress: input.metadata.ipAddress,
+        userAgent: input.metadata.userAgent,
+      });
+      throw new AppError({
+        code: 'AUTH_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The verification challenge is invalid or expired.',
+      });
+    }
+
+    const consumed = await this.challenges.consumeVerifiedChallenge(
+      input.challengeId,
+      input.purpose,
+      now,
+      input.tx,
+    );
+    if (!consumed?.userId?.equals(input.userId)) {
+      throw new AppError({
+        code: 'AUTH_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The verification challenge is invalid or expired.',
+      });
+    }
+    const verified = await this.identity.markIdentifierVerified(
+      input.userId,
+      input.identifier,
+      now,
+      input.tx,
+    );
+    if (!verified) {
+      throw new AppError({
+        code: 'AUTH_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The verification challenge is invalid or expired.',
+      });
+    }
+    await this.securityEvents.write(
+      {
+        type: 'OWNER_ACTIVATION_VERIFICATION_COMPLETED',
+        userId: input.userId,
+        result: 'SUCCESS',
+        ipAddress: input.metadata.ipAddress,
+        userAgent: input.metadata.userAgent,
+      },
+      input.tx,
+    );
   }
 
   async resendVerification(input: {

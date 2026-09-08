@@ -12,6 +12,10 @@ import type { UserDocument } from '../identity/identity.types';
 import type { PlatformMembershipRepository } from '../platform/platform.repository';
 import type { PlatformMembershipDocument } from '../platform/platform.types';
 import type {
+  EntitlementService,
+  SubscriptionApplicationService,
+} from '../subscriptions/subscription.service';
+import type {
   BranchRepository,
   InvitationRepository,
   MembershipBranchAssignmentRepository,
@@ -41,6 +45,8 @@ export class WorkspaceApplicationService {
     private readonly credentialDigests: CredentialDigests,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly entitlements?: EntitlementService,
+    private readonly subscriptions?: SubscriptionApplicationService,
   ) {}
 
   async me(ctx: RequestContext) {
@@ -555,6 +561,11 @@ export class WorkspaceApplicationService {
       const freshInvitation = await this.invitations.findPendingByDigest(digest, now, tx);
       if (!freshInvitation?.workspaceId) throw invalidInvitation();
       const workspace = await this.workspaces.findById(freshInvitation.workspaceId, tx);
+      if (freshInvitation.type === 'OWNER_ACTIVATION') {
+        if (!workspace?.ownerUserId.equals(user._id)) throw invalidInvitation();
+        const membership = await this.completeOwnerActivation(ctx, freshInvitation, user._id, tx);
+        return { workspace: safeWorkspace(workspace), membership: safeMembership(membership) };
+      }
       if (workspace?.status !== 'ACTIVE') {
         throw new AppError({
           code: 'WORKSPACE_INACTIVE',
@@ -595,6 +606,80 @@ export class WorkspaceApplicationService {
       );
       return { workspace: safeWorkspace(workspace), membership: safeMembership(membership) };
     });
+  }
+
+  async completeOwnerActivation(
+    ctx: RequestContext,
+    invitation: InvitationDocument,
+    userId: ObjectId,
+    tx: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    if (!invitation.workspaceId || invitation.type !== 'OWNER_ACTIVATION') {
+      throw invalidInvitation();
+    }
+    if (!this.entitlements || !this.subscriptions) {
+      throw new AppError({
+        code: 'OWNER_ACTIVATION_UNAVAILABLE',
+        httpStatus: 500,
+        message: 'Owner activation dependencies are not configured.',
+      });
+    }
+    const now = new Date();
+    const freshInvitation = await this.invitations.findPendingByDigest(
+      invitation.tokenDigest,
+      now,
+      tx,
+    );
+    if (!freshInvitation?._id.equals(invitation._id) || !freshInvitation.workspaceId) {
+      throw invalidInvitation();
+    }
+    const workspace = await this.workspaces.findById(freshInvitation.workspaceId, tx);
+    if (!workspace?.ownerUserId.equals(userId)) throw invalidInvitation();
+    const existing = await this.memberships.findByUserInWorkspace(workspace._id, userId, tx);
+    if (existing?.status !== 'INVITED') {
+      throw new AppError({
+        code: 'OWNER_ACTIVATION_MEMBERSHIP_INVALID',
+        httpStatus: 409,
+        message: 'The owner membership cannot be activated.',
+      });
+    }
+    const subscriptionResult = await this.subscriptions.activatePendingIntentOnOwnerActivation(
+      ctx,
+      workspace._id,
+      tx,
+    );
+    await this.entitlements.assertAndReserveStaffSlot(workspace._id, tx);
+    const membership = await this.memberships.activateInvitedOwner(
+      workspace._id,
+      userId,
+      existing.roles,
+      now,
+      tx,
+    );
+    const accepted = await this.invitations.acceptPending(freshInvitation._id, userId, now, tx);
+    if (!accepted) throw invalidInvitation();
+    if (workspace.status === 'PENDING_ACTIVATION') {
+      await this.workspaces.activatePending(workspace._id, userId, now, tx);
+    }
+    const access = {
+      user: (await this.identity.findById(userId, tx)) as UserDocument,
+      workspace,
+      membership,
+    };
+    await this.writeBusinessAudit(ctx, access, 'OwnerActivated', membership, 'owner_activate', tx);
+    await this.writeOutbox(
+      ctx,
+      workspace._id,
+      'OwnerActivated',
+      'workspace_membership',
+      membership._id,
+      {
+        invitationId: freshInvitation._id.toHexString(),
+        subscription: subscriptionResult.subscription,
+      },
+      tx,
+    );
+    return membership;
   }
 
   async revokeInvitation(ctx: RequestContext, workspaceId: string, invitationId: string) {

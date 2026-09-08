@@ -30,6 +30,7 @@ export class WorkspaceRepository {
       country?: string;
       city?: string;
       governorate?: string;
+      createdFromLeadId?: ObjectId;
       status?: WorkspaceStatus;
       now?: Date;
     },
@@ -49,6 +50,7 @@ export class WorkspaceRepository {
       ...(input.country ? { country: input.country } : {}),
       ...(input.city ? { city: input.city } : {}),
       ...(input.governorate ? { governorate: input.governorate } : {}),
+      ...(input.createdFromLeadId ? { createdFromLeadId: input.createdFromLeadId } : {}),
     };
     await this.workspaces.insertOne(workspace, tx ? { session: tx.session } : undefined);
     return workspace;
@@ -98,6 +100,27 @@ export class WorkspaceRepository {
     if (!result) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
     return result;
   }
+
+  async activatePending(
+    workspaceId: ObjectId,
+    ownerUserId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceDocument> {
+    const result = await this.workspaces.findOneAndUpdate(
+      { _id: workspaceId, ownerUserId, status: 'PENDING_ACTIVATION' },
+      { $set: { status: 'ACTIVE', updatedAt: now } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) {
+      throw new AppError({
+        code: 'WORKSPACE_ACTIVATION_INVALID',
+        httpStatus: 409,
+        message: 'The workspace cannot be activated.',
+      });
+    }
+    return result;
+  }
 }
 
 export class WorkspaceMembershipRepository {
@@ -144,6 +167,77 @@ export class WorkspaceMembershipRepository {
       }
       throw error;
     }
+  }
+
+  async createInvited(
+    input: {
+      workspaceId: ObjectId;
+      userId: ObjectId;
+      roles: WorkspaceMembershipRole[];
+      permissionProfileIds?: ObjectId[];
+      now?: Date;
+    },
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const now = input.now ?? new Date();
+    const membership: WorkspaceMembershipDocument = {
+      _id: new ObjectId(),
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      roles: input.roles,
+      status: 'INVITED',
+      joinedAt: now,
+      engagementPeriods: [],
+      permissionProfileIds: input.permissionProfileIds ?? [],
+      accessVersion: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      await this.memberships.insertOne(membership, tx ? { session: tx.session } : undefined);
+      return membership;
+    } catch (error) {
+      if (error instanceof MongoServerError && error.code === 11000) {
+        throw new AppError({
+          code: 'WORKSPACE_MEMBERSHIP_EXISTS',
+          httpStatus: 409,
+          message: 'The user already has a membership in this workspace.',
+        });
+      }
+      throw error;
+    }
+  }
+
+  async activateInvitedOwner(
+    workspaceId: ObjectId,
+    userId: ObjectId,
+    roles: WorkspaceMembershipRole[],
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const result = await this.memberships.findOneAndUpdate(
+      {
+        workspaceId,
+        userId,
+        status: 'INVITED',
+        engagementPeriods: { $not: { $elemMatch: { endedAt: { $exists: false } } } },
+      },
+      {
+        $set: { status: 'ACTIVE', roles, joinedAt: now, updatedAt: now },
+        $push: { engagementPeriods: { startedAt: now } },
+        $inc: { accessVersion: 1 },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) {
+      throw new AppError({
+        code: 'OWNER_ACTIVATION_MEMBERSHIP_INVALID',
+        httpStatus: 409,
+        message: 'The owner membership cannot be activated.',
+      });
+    }
+    return result;
   }
 
   async listActiveByUser(userId: ObjectId): Promise<WorkspaceMembershipDocument[]> {

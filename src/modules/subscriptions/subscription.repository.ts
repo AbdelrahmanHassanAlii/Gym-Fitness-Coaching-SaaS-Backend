@@ -286,6 +286,28 @@ export class SubscriptionRepository {
     return { subscription, terms };
   }
 
+  async setPendingActivationIntent(
+    workspaceId: ObjectId,
+    expectedVersion: number,
+    intent: NonNullable<SubscriptionDocument['pendingActivationIntent']>,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<SubscriptionDocument> {
+    const result = await this.subscriptions.findOneAndUpdate(
+      { workspaceId, version: expectedVersion, lifecycleStatus: 'PENDING_ACTIVATION' },
+      {
+        $set: {
+          pendingActivationIntent: intent,
+          updatedAt: now,
+        },
+        $inc: { version: 1 },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) throw conflict('SUBSCRIPTION_VERSION_CONFLICT');
+    return result;
+  }
+
   async findCurrentTerms(
     subscription: SubscriptionDocument,
     tx?: TransactionContext,

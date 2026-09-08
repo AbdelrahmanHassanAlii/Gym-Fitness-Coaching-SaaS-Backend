@@ -61,11 +61,16 @@ export class EntitlementService {
     private readonly usage: WorkspaceUsageRepository,
   ) {}
 
-  async evaluate(workspaceId: ObjectId, action: EntitlementAction, feature?: string) {
-    const subscription = await this.subscriptions.findByWorkspaceId(workspaceId);
+  async evaluate(
+    workspaceId: ObjectId,
+    action: EntitlementAction,
+    feature?: string,
+    tx?: TransactionContext,
+  ) {
+    const subscription = await this.subscriptions.findByWorkspaceId(workspaceId, tx);
     if (!subscription) throw notFound('SUBSCRIPTION_NOT_FOUND');
-    const terms = await this.subscriptions.findCurrentTerms(subscription);
-    const usage = await this.usage.ensure(workspaceId);
+    const terms = await this.subscriptions.findCurrentTerms(subscription, tx);
+    const usage = await this.usage.ensure(workspaceId, {}, new Date(), tx);
     const accessMode = accessModeFor(subscription.lifecycleStatus);
     const allowedByLifecycle =
       action === 'READ' ||
@@ -85,8 +90,13 @@ export class EntitlementService {
     };
   }
 
-  async assert(workspaceId: ObjectId, action: EntitlementAction, feature?: string) {
-    const result = await this.evaluate(workspaceId, action, feature);
+  async assert(
+    workspaceId: ObjectId,
+    action: EntitlementAction,
+    feature?: string,
+    tx?: TransactionContext,
+  ) {
+    const result = await this.evaluate(workspaceId, action, feature, tx);
     if (!result.allowed) {
       throw new AppError({
         code: result.featureAllowed ? 'SUBSCRIPTION_FROZEN' : 'FEATURE_NOT_AVAILABLE',
@@ -98,12 +108,12 @@ export class EntitlementService {
   }
 
   async assertAndReserveTraineeSlot(workspaceId: ObjectId, tx?: TransactionContext): Promise<void> {
-    const result = await this.assert(workspaceId, 'ACTIVATE_TRAINEE');
+    const result = await this.assert(workspaceId, 'ACTIVATE_TRAINEE', undefined, tx);
     await this.usage.reserveTrainee(workspaceId, result.terms?.limits.activeTrainees, tx);
   }
 
   async assertAndReserveStaffSlot(workspaceId: ObjectId, tx?: TransactionContext): Promise<void> {
-    const result = await this.assert(workspaceId, 'ACTIVATE_STAFF');
+    const result = await this.assert(workspaceId, 'ACTIVATE_STAFF', undefined, tx);
     await this.usage.reserveStaff(workspaceId, result.terms?.limits.activeStaff, tx);
   }
 
@@ -785,6 +795,162 @@ export class SubscriptionApplicationService {
     };
   }
 
+  async createPendingActivationIntent(
+    ctx: RequestContext,
+    workspaceId: ObjectId,
+    input: {
+      planVersionId: string;
+      billingPeriod: BillingPeriod;
+      startMode: 'TRIAL' | 'PENDING_ACTIVATION';
+      effectiveFrom?: string;
+      limits?: SubscriptionLimits;
+      enabledFeatures?: string[];
+    },
+    tx: TransactionContext,
+  ) {
+    const planVersion = await this.requireEligiblePlanVersion(
+      objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
+      input.billingPeriod,
+      tx,
+    );
+    if (input.startMode === 'TRIAL' && !planVersion.trialDefaults?.days) {
+      throw invalid('SUBSCRIPTION_TRIAL_DAYS_REQUIRED');
+    }
+    const now = new Date();
+    const subscription = await this.subscriptions.ensurePendingActivation(workspaceId, now, tx);
+    const saved = await this.subscriptions.setPendingActivationIntent(
+      workspaceId,
+      subscription.version,
+      {
+        startMode: input.startMode,
+        planVersionId: planVersion._id,
+        billingPeriod: input.billingPeriod,
+        limits: input.limits ?? planVersion.defaultLimits,
+        enabledFeatures: input.enabledFeatures ?? enabledFeatures(planVersion.features),
+        ...(input.effectiveFrom ? { effectiveFrom: new Date(input.effectiveFrom) } : {}),
+        createdBy: actorObjectId(ctx),
+        createdAt: now,
+      },
+      now,
+      tx,
+    );
+    await this.usage.ensure(workspaceId, {}, now, tx);
+    return { subscription: safeSubscription(saved) };
+  }
+
+  async activatePendingIntentOnOwnerActivation(
+    ctx: RequestContext,
+    workspaceId: ObjectId,
+    tx: TransactionContext,
+  ) {
+    const subscription = await this.subscriptions.ensurePendingActivation(
+      workspaceId,
+      new Date(),
+      tx,
+    );
+    const intent = subscription.pendingActivationIntent;
+    if (!intent) {
+      return { subscription: safeSubscription(subscription) };
+    }
+    if (intent.startMode === 'PENDING_ACTIVATION') {
+      const now = new Date();
+      const result = await this.subscriptions.attachTerms(
+        workspaceId,
+        subscription.version,
+        ['PENDING_ACTIVATION'],
+        {
+          subscriptionId: subscription._id,
+          workspaceId,
+          planVersionId: intent.planVersionId,
+          billingPeriod: intent.billingPeriod,
+          limits: intent.limits,
+          enabledFeatures: intent.enabledFeatures,
+          effectiveFrom: now,
+          source: 'PURCHASE',
+          createdBy: actorObjectId(ctx),
+          now,
+        },
+        'ACTIVE',
+        { startedAt: now },
+        ['pendingActivationIntent', ...activeLifecycleMarkers],
+        tx,
+      );
+      await this.writeAudit(
+        ctx,
+        workspaceId,
+        'SubscriptionActivated',
+        result.subscription._id,
+        'activate',
+        tx,
+      );
+      await this.writeOutbox(
+        ctx,
+        workspaceId,
+        'SubscriptionActivated',
+        'subscription',
+        result.subscription._id,
+        tx,
+      );
+      return {
+        subscription: safeSubscription(result.subscription),
+        currentTerms: safeTerms(result.terms),
+      };
+    }
+    const planVersion = await this.requireEligiblePlanVersion(
+      intent.planVersionId,
+      intent.billingPeriod,
+      tx,
+    );
+    const trialDays = planVersion.trialDefaults?.days;
+    if (!trialDays || trialDays < 1) throw invalid('SUBSCRIPTION_TRIAL_DAYS_REQUIRED');
+    const now = new Date();
+    const result = await this.subscriptions.attachTerms(
+      workspaceId,
+      subscription.version,
+      ['PENDING_ACTIVATION'],
+      {
+        subscriptionId: subscription._id,
+        workspaceId,
+        planVersionId: intent.planVersionId,
+        billingPeriod: intent.billingPeriod,
+        limits: intent.limits,
+        enabledFeatures: intent.enabledFeatures,
+        effectiveFrom: now,
+        effectiveTo: addDays(now, trialDays),
+        source: 'TRIAL',
+        createdBy: actorObjectId(ctx),
+        now,
+      },
+      'TRIAL',
+      {
+        startedAt: now,
+        expiresAt: addDays(now, trialDays),
+      },
+      ['pendingActivationIntent', ...activeLifecycleMarkers],
+      tx,
+    );
+    await this.writeAudit(
+      ctx,
+      workspaceId,
+      'TrialStarted',
+      result.subscription._id,
+      'start_trial',
+      tx,
+    );
+    await this.writeOutbox(
+      ctx,
+      workspaceId,
+      'TrialStarted',
+      'subscription',
+      result.subscription._id,
+      tx,
+    );
+    return {
+      subscription: safeSubscription(result.subscription),
+      currentTerms: safeTerms(result.terms),
+    };
+  }
+
   private async transitionSubscription(
     ctx: RequestContext,
     workspaceId: ObjectId,
@@ -866,8 +1032,12 @@ export class SubscriptionApplicationService {
     return plan;
   }
 
-  private async requireEligiblePlanVersion(versionId: ObjectId, billingPeriod: BillingPeriod) {
-    const result = await this.plans.findVersionWithPlan(versionId);
+  private async requireEligiblePlanVersion(
+    versionId: ObjectId,
+    billingPeriod: BillingPeriod,
+    tx?: TransactionContext,
+  ) {
+    const result = await this.plans.findVersionWithPlan(versionId, tx);
     if (!result) throw notFound('SUBSCRIPTION_PLAN_VERSION_NOT_FOUND');
     if (!result.plan.active) throw invalid('SUBSCRIPTION_PLAN_NOT_ELIGIBLE');
     if (!result.version.billingOptions.includes(billingPeriod)) {

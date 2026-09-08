@@ -62,6 +62,16 @@ export interface SubscriptionDocument {
   workspaceId: ObjectId;
   lifecycleStatus: SubscriptionLifecycleStatus;
   currentTermsId?: ObjectId;
+  pendingActivationIntent?: {
+    startMode: 'TRIAL' | 'PENDING_ACTIVATION';
+    planVersionId: ObjectId;
+    billingPeriod: BillingPeriod;
+    limits: SubscriptionLimits;
+    enabledFeatures: string[];
+    effectiveFrom?: Date;
+    createdBy: ObjectId;
+    createdAt: Date;
+  };
   startedAt?: Date;
   expiresAt?: Date;
   graceEndsAt?: Date;

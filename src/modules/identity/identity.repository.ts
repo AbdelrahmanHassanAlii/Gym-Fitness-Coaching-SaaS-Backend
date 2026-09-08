@@ -2,7 +2,11 @@ import { type Collection, MongoServerError, ObjectId } from 'mongodb';
 import type { Database } from '../../core/database/database';
 import type { TransactionContext } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
-import type { CreateUserInput, UserDocument } from './identity.types';
+import type {
+  CreatePendingActivationUserInput,
+  CreateUserInput,
+  UserDocument,
+} from './identity.types';
 
 export class IdentityRepository {
   private readonly users: Collection<UserDocument>;
@@ -49,6 +53,46 @@ export class IdentityRepository {
     return user;
   }
 
+  async createPendingActivation(
+    input: CreatePendingActivationUserInput,
+    tx?: TransactionContext,
+  ): Promise<UserDocument> {
+    assertValidOptionalIdentifier('normalizedEmail', input.normalizedEmail);
+    assertValidOptionalIdentifier('normalizedPhone', input.normalizedPhone);
+
+    const now = input.now ?? new Date();
+    const user: UserDocument = {
+      _id: new ObjectId(),
+      firstName: input.firstName,
+      lastName: input.lastName,
+      preferredLanguage: input.preferredLanguage,
+      timezone: input.timezone,
+      status: 'PENDING_ACTIVATION',
+      createdAt: now,
+      updatedAt: now,
+      ...(input.email ? { email: input.email } : {}),
+      ...(input.normalizedEmail ? { normalizedEmail: input.normalizedEmail } : {}),
+      ...(input.phone ? { phone: input.phone } : {}),
+      ...(input.normalizedPhone ? { normalizedPhone: input.normalizedPhone } : {}),
+    };
+
+    try {
+      await this.users.insertOne(user, tx ? { session: tx.session } : undefined);
+    } catch (error) {
+      if (error instanceof MongoServerError && error.code === 11000) {
+        throw new AppError({
+          code: 'AUTH_IDENTIFIER_CONFLICT',
+          httpStatus: 409,
+          message: 'The supplied login identifier cannot be used.',
+          expose: true,
+        });
+      }
+      throw error;
+    }
+
+    return user;
+  }
+
   async findById(userId: ObjectId, tx?: TransactionContext): Promise<UserDocument | null> {
     return await this.users.findOne({ _id: userId }, tx ? { session: tx.session } : undefined);
   }
@@ -69,10 +113,13 @@ export class IdentityRepository {
     return await this.users.findOne({ normalizedPhone }, tx ? { session: tx.session } : undefined);
   }
 
-  async findByLoginIdentifier(identifier: {
-    normalizedEmail?: string;
-    normalizedPhone?: string;
-  }): Promise<UserDocument | null> {
+  async findByLoginIdentifier(
+    identifier: {
+      normalizedEmail?: string;
+      normalizedPhone?: string;
+    },
+    tx?: TransactionContext,
+  ): Promise<UserDocument | null> {
     assertValidOptionalIdentifier('normalizedEmail', identifier.normalizedEmail);
     assertValidOptionalIdentifier('normalizedPhone', identifier.normalizedPhone);
 
@@ -81,7 +128,7 @@ export class IdentityRepository {
       ...(identifier.normalizedPhone ? [{ normalizedPhone: identifier.normalizedPhone }] : []),
     ];
     if (conditions.length === 0) return null;
-    return await this.users.findOne({ $or: conditions });
+    return await this.users.findOne({ $or: conditions }, tx ? { session: tx.session } : undefined);
   }
 
   async hasVerifiedLoginIdentifier(userId: ObjectId, tx?: TransactionContext): Promise<boolean> {
@@ -132,6 +179,34 @@ export class IdentityRepository {
       { $set: { passwordHash, passwordUpdatedAt: now, updatedAt: now } },
       tx ? { session: tx.session } : undefined,
     );
+  }
+
+  async activatePending(
+    userId: ObjectId,
+    passwordHash: string,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<UserDocument> {
+    const result = await this.users.findOneAndUpdate(
+      { _id: userId, status: 'PENDING_ACTIVATION', passwordHash: { $exists: false } },
+      {
+        $set: {
+          status: 'ACTIVE',
+          passwordHash,
+          passwordUpdatedAt: now,
+          updatedAt: now,
+        },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) {
+      throw new AppError({
+        code: 'USER_ACTIVATION_INVALID',
+        httpStatus: 409,
+        message: 'The pending user cannot be activated.',
+      });
+    }
+    return result;
   }
 
   async updateProfile(

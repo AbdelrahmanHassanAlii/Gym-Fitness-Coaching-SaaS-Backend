@@ -77,6 +77,22 @@ export class PermissionProfileRepository {
       .toArray();
   }
 
+  async findSystemDefault(
+    input: { context: PermissionContext; roleKey: string; workspaceId?: ObjectId },
+    tx?: TransactionContext,
+  ): Promise<PermissionProfileDocument | null> {
+    return await this.profiles.findOne(
+      {
+        context: input.context,
+        roleKey: input.roleKey,
+        isSystemDefault: true,
+        status: 'ACTIVE',
+        ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
   async create(
     input: {
       context: PermissionContext;

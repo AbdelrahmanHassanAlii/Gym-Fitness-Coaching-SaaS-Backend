@@ -401,7 +401,11 @@ export class AuthChallengeRepository {
     );
   }
 
-  async incrementAttempt(challengeId: ObjectId, now = new Date()): Promise<AuthChallengeDocument> {
+  async incrementAttempt(
+    challengeId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<AuthChallengeDocument> {
     const challenge = await this.challenges.findOneAndUpdate(
       {
         _id: challengeId,
@@ -410,7 +414,7 @@ export class AuthChallengeRepository {
         $expr: { $lt: ['$attemptCount', '$maxAttempts'] },
       },
       { $inc: { attemptCount: 1 } },
-      { returnDocument: 'after' },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
     );
 
     if (!challenge) {

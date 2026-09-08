@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config/config.types';
+import { AccessControlService } from '../core/access-control/access-control.service';
 import { AuditWriter } from '../core/audit/audit.writer';
 import { CredentialDigests } from '../core/auth/credential-digests';
 import { JwtService } from '../core/auth/jwt.service';
@@ -19,6 +20,12 @@ import { AuthApplicationService } from '../modules/auth/auth.service';
 import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
+import {
+  AccessGrantRepository,
+  PermissionDefinitionRepository,
+  PermissionProfileRepository,
+} from '../modules/permissions/permission.repository';
+import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
 import {
   BranchRepository,
@@ -35,6 +42,7 @@ export interface AppContainer {
   unitOfWork: UnitOfWork;
   audit: AuditWriter;
   outbox: OutboxWriter;
+  accessControl: AccessControlService;
   jobLeases: JobLeaseManager;
   identity: IdentityRepository;
   authSessions: AuthSessionRepository;
@@ -43,6 +51,9 @@ export interface AppContainer {
   authRateLimits: AuthRateLimitRepository;
   authSecurityEvents: AuthSecurityEventWriter;
   platformMemberships: PlatformMembershipRepository;
+  permissionDefinitions: PermissionDefinitionRepository;
+  permissionProfiles: PermissionProfileRepository;
+  accessGrants: AccessGrantRepository;
   workspaceRepo: WorkspaceRepository;
   workspaceMemberships: WorkspaceMembershipRepository;
   branches: BranchRepository;
@@ -56,6 +67,7 @@ export interface AppContainer {
   mfa: MfaService;
   auth: AuthApplicationService;
   workspaces: WorkspaceApplicationService;
+  permissions: PermissionApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -70,6 +82,9 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const authRateLimits = new AuthRateLimitRepository(database);
   const authSecurityEvents = new AuthSecurityEventWriter(database);
   const platformMemberships = new PlatformMembershipRepository(database);
+  const permissionDefinitions = new PermissionDefinitionRepository(database);
+  const permissionProfiles = new PermissionProfileRepository(database);
+  const accessGrants = new AccessGrantRepository(database);
   const workspaceRepo = new WorkspaceRepository(database);
   const workspaceMemberships = new WorkspaceMembershipRepository(database);
   const branches = new BranchRepository(database);
@@ -79,13 +94,24 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const jwt = new JwtService(config);
   const totp = new TotpService(config);
   const refreshTokens = new RefreshTokenService(database, credentialDigests);
+  const audit = new AuditWriter(database);
+  const outbox = new OutboxWriter(database);
+  const accessControl = new AccessControlService(
+    platformMemberships,
+    workspaceRepo,
+    workspaceMemberships,
+    membershipBranchAssignments,
+    permissionProfiles,
+    accessGrants,
+  );
 
   return {
     config,
     database,
     unitOfWork,
-    audit: new AuditWriter(database),
-    outbox: new OutboxWriter(database),
+    audit,
+    outbox,
+    accessControl,
     jobLeases: new JobLeaseManager(database),
     identity,
     authSessions,
@@ -94,6 +120,9 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     authRateLimits,
     authSecurityEvents,
     platformMemberships,
+    permissionDefinitions,
+    permissionProfiles,
+    accessGrants,
     workspaceRepo,
     workspaceMemberships,
     branches,
@@ -130,8 +159,19 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       membershipBranchAssignments,
       invitations,
       credentialDigests,
-      new AuditWriter(database),
-      new OutboxWriter(database),
+      audit,
+      outbox,
+    ),
+    permissions: new PermissionApplicationService(
+      unitOfWork,
+      permissionDefinitions,
+      permissionProfiles,
+      accessGrants,
+      platformMemberships,
+      workspaceRepo,
+      workspaceMemberships,
+      audit,
+      outbox,
     ),
   };
 }

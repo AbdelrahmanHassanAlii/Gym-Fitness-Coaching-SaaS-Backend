@@ -133,6 +133,14 @@ function sameSite(): 'LAX' | 'STRICT' | 'NONE' {
   return value as 'LAX' | 'STRICT' | 'NONE';
 }
 
+function trialExpiryAction(): 'FROZEN' | 'GRACE_PERIOD' {
+  const value = process.env.SUBSCRIPTION_TRIAL_EXPIRY_ACTION?.trim().toUpperCase() || 'FROZEN';
+  if (value !== 'FROZEN' && value !== 'GRACE_PERIOD') {
+    throw new Error(`Invalid SUBSCRIPTION_TRIAL_EXPIRY_ACTION: ${value}`);
+  }
+  return value;
+}
+
 export function loadConfig(): AppConfig {
   const env = environment();
   const maxSupportMinutes = integer('SUPPORT_SESSION_MAX_MINUTES', 60, 1);
@@ -214,6 +222,11 @@ export function loadConfig(): AppConfig {
       outboxLockMs: integer('OUTBOX_LOCK_MS', 30_000, 1_000),
       outboxMaxAttempts: integer('OUTBOX_MAX_ATTEMPTS', 8, 1),
       jobLeaseMs: integer('JOB_LEASE_MS', 30_000, 1_000),
+    },
+    subscriptions: {
+      trialExpiryAction: trialExpiryAction(),
+      paidGraceDays: integer('SUBSCRIPTION_PAID_GRACE_DAYS', 0, 0),
+      frozenToExpiredDays: integer('SUBSCRIPTION_FROZEN_TO_EXPIRED_DAYS', 30, 1),
     },
     support: {
       defaultSessionMinutes: defaultSupportMinutes,

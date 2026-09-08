@@ -48,6 +48,11 @@ export interface AppConfig {
     outboxMaxAttempts: number;
     jobLeaseMs: number;
   };
+  subscriptions: {
+    trialExpiryAction: 'FROZEN' | 'GRACE_PERIOD';
+    paidGraceDays: number;
+    frozenToExpiredDays: number;
+  };
   support: {
     defaultSessionMinutes: number;
     maxSessionMinutes: number;

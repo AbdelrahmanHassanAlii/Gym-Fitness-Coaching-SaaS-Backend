@@ -35,6 +35,7 @@ function scopeFromParams(
   return {
     type: requirement.scope.type,
     ...(resourceId ? { resourceIds: [resourceId] } : {}),
+    ...(requirement.scope.requiresAssignment === false ? { requiresAssignment: false } : {}),
   };
 }
 

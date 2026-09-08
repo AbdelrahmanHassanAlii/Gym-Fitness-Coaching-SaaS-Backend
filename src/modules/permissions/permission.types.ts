@@ -28,6 +28,7 @@ export type AccessGrantSubjectType = (typeof AccessGrantSubjectTypes)[number];
 export interface PermissionScope {
   type: PermissionScopeType;
   resourceIds?: ObjectId[];
+  requiresAssignment?: boolean;
 }
 
 export interface PermissionDefinitionDocument {

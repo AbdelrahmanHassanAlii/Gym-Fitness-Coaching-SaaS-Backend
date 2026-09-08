@@ -99,6 +99,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const accessControl = new AccessControlService(
     platformMemberships,
     workspaceRepo,
+    branches,
     workspaceMemberships,
     membershipBranchAssignments,
     permissionProfiles,
@@ -167,8 +168,10 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       permissionDefinitions,
       permissionProfiles,
       accessGrants,
+      accessControl,
       platformMemberships,
       workspaceRepo,
+      branches,
       workspaceMemberships,
       audit,
       outbox,

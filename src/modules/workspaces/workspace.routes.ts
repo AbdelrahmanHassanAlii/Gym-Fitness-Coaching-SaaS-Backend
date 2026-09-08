@@ -1,7 +1,9 @@
 import type { Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
+import { requireAccess } from '../../core/access-control/access-control.middleware';
 import { requireAuth } from '../auth/auth.middleware';
+import { Permissions } from '../permissions/permission.registry';
 import {
   AcceptInvitationBody,
   BranchParams,
@@ -59,7 +61,13 @@ export async function registerWorkspaceRoutes(
   app.post<{ Body: Static<typeof CreateWorkspaceBody> }>(
     '/api/v1/platform/workspaces',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
       schema: {
         tags: ['Workspaces'],
         body: CreateWorkspaceBody,
@@ -75,7 +83,13 @@ export async function registerWorkspaceRoutes(
   app.get(
     '/api/v1/platform/memberships',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformMembershipsRead,
+        }),
+      ],
       schema: {
         tags: ['Platform'],
         response: { 200: {}, 401: ErrorResponse, 403: ErrorResponse },
@@ -89,7 +103,13 @@ export async function registerWorkspaceRoutes(
   app.post<{ Body: Static<typeof CreatePlatformMembershipBody> }>(
     '/api/v1/platform/memberships',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformMembershipsManage,
+        }),
+      ],
       schema: {
         tags: ['Platform'],
         body: CreatePlatformMembershipBody,
@@ -109,7 +129,13 @@ export async function registerWorkspaceRoutes(
     app.post<{ Params: Static<typeof PlatformMembershipParams> }>(
       `/api/v1/platform/memberships/:platformMembershipId/${command}`,
       {
-        preHandler: requireAuth(),
+        preHandler: [
+          requireAuth(),
+          requireAccess(container, {
+            context: 'PLATFORM',
+            permission: Permissions.PlatformMembershipsManage,
+          }),
+        ],
         schema: {
           tags: ['Platform'],
           params: PlatformMembershipParams,
@@ -129,7 +155,10 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof IdParams> }>(
     '/api/v1/workspaces/:workspaceId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.WorkspacesRead }),
+      ],
       schema: { tags: ['Workspaces'], params: IdParams, response: { 200: {}, 404: ErrorResponse } },
     },
     async (request) => ({
@@ -140,7 +169,13 @@ export async function registerWorkspaceRoutes(
   app.patch<{ Params: Static<typeof IdParams>; Body: Static<typeof UpdateWorkspaceBody> }>(
     '/api/v1/workspaces/:workspaceId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.WorkspacesUpdate,
+        }),
+      ],
       schema: {
         tags: ['Workspaces'],
         params: IdParams,
@@ -160,7 +195,10 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof IdParams> }>(
     '/api/v1/workspaces/:workspaceId/branches',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.BranchesRead }),
+      ],
       schema: { tags: ['Branches'], params: IdParams, response: { 200: {}, 404: ErrorResponse } },
     },
     async (request) => ({
@@ -171,7 +209,14 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof BranchParams> }>(
     '/api/v1/workspaces/:workspaceId/branches/:branchId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.BranchesRead,
+          scope: { type: 'BRANCH', resourceIdParam: 'branchId', requiresAssignment: false },
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: BranchParams,
@@ -190,7 +235,14 @@ export async function registerWorkspaceRoutes(
   app.patch<{ Params: Static<typeof BranchParams>; Body: Static<typeof UpdateBranchBody> }>(
     '/api/v1/workspaces/:workspaceId/branches/:branchId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.BranchesUpdate,
+          scope: { type: 'BRANCH', resourceIdParam: 'branchId', requiresAssignment: false },
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: BranchParams,
@@ -211,7 +263,10 @@ export async function registerWorkspaceRoutes(
   app.post<{ Params: Static<typeof IdParams>; Body: Static<typeof CreateBranchBody> }>(
     '/api/v1/workspaces/:workspaceId/branches',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.BranchesCreate }),
+      ],
       schema: {
         tags: ['Branches'],
         params: IdParams,
@@ -232,7 +287,14 @@ export async function registerWorkspaceRoutes(
   app.post<{ Params: Static<typeof BranchParams> }>(
     '/api/v1/workspaces/:workspaceId/branches/:branchId/archive',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.BranchesArchive,
+          scope: { type: 'BRANCH', resourceIdParam: 'branchId', requiresAssignment: false },
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: BranchParams,
@@ -251,7 +313,10 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof IdParams> }>(
     '/api/v1/workspaces/:workspaceId/memberships',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.StaffRead }),
+      ],
       schema: {
         tags: ['Memberships'],
         params: IdParams,
@@ -266,7 +331,10 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof MembershipParams> }>(
     '/api/v1/workspaces/:workspaceId/memberships/:membershipId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.StaffRead }),
+      ],
       schema: {
         tags: ['Memberships'],
         params: MembershipParams,
@@ -286,7 +354,10 @@ export async function registerWorkspaceRoutes(
     app.post<{ Params: Static<typeof MembershipParams> }>(
       `/api/v1/workspaces/:workspaceId/memberships/:membershipId/${command}`,
       {
-        preHandler: requireAuth(),
+        preHandler: [
+          requireAuth(),
+          requireAccess(container, { context: 'WORKSPACE', permission: Permissions.StaffManage }),
+        ],
         schema: {
           tags: ['Memberships'],
           params: MembershipParams,
@@ -307,7 +378,10 @@ export async function registerWorkspaceRoutes(
   app.post<{ Params: Static<typeof IdParams>; Body: Static<typeof InviteStaffBody> }>(
     '/api/v1/workspaces/:workspaceId/staff/invitations',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, { context: 'WORKSPACE', permission: Permissions.StaffInvite }),
+      ],
       schema: {
         tags: ['Invitations'],
         params: IdParams,
@@ -343,7 +417,13 @@ export async function registerWorkspaceRoutes(
   app.post<{ Params: Static<typeof InvitationParams> }>(
     '/api/v1/workspaces/:workspaceId/invitations/:invitationId/revoke',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.StaffInvitesRevoke,
+        }),
+      ],
       schema: {
         tags: ['Invitations'],
         params: InvitationParams,
@@ -362,7 +442,13 @@ export async function registerWorkspaceRoutes(
   app.get<{ Params: Static<typeof MembershipParams> }>(
     '/api/v1/workspaces/:workspaceId/memberships/:membershipId/branches',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.StaffBranchesManage,
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: MembershipParams,
@@ -381,7 +467,14 @@ export async function registerWorkspaceRoutes(
   app.post<{ Params: Static<typeof MembershipBranchParams> }>(
     '/api/v1/workspaces/:workspaceId/memberships/:membershipId/branches/:branchId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.StaffBranchesManage,
+          scope: { type: 'BRANCH', resourceIdParam: 'branchId', requiresAssignment: false },
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: MembershipBranchParams,
@@ -402,7 +495,14 @@ export async function registerWorkspaceRoutes(
   app.delete<{ Params: Static<typeof MembershipBranchParams> }>(
     '/api/v1/workspaces/:workspaceId/memberships/:membershipId/branches/:branchId',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'WORKSPACE',
+          permission: Permissions.StaffBranchesManage,
+          scope: { type: 'BRANCH', resourceIdParam: 'branchId', requiresAssignment: false },
+        }),
+      ],
       schema: {
         tags: ['Branches'],
         params: MembershipBranchParams,

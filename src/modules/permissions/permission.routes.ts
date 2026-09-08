@@ -370,6 +370,55 @@ export async function registerPermissionRoutes(
       ),
     }),
   );
+
+  app.get<{ Params: Static<typeof PlatformMembershipParams> }>(
+    '/api/v1/platform/memberships/:membershipId/access',
+    {
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformPermissionsManage,
+        }),
+      ],
+      schema: { tags: ['Permissions'], params: PlatformMembershipParams, response: { 200: {} } },
+    },
+    async (request) => ({
+      data: await container.permissions.listPlatformAccess(
+        request.ctx,
+        request.params.membershipId,
+      ),
+    }),
+  );
+
+  app.put<{
+    Params: Static<typeof PlatformMembershipParams>;
+    Body: Static<typeof ReplaceAccessGrantsBody>;
+  }>(
+    '/api/v1/platform/memberships/:membershipId/access',
+    {
+      preHandler: [
+        requireAuth(),
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformPermissionsManage,
+        }),
+      ],
+      schema: {
+        tags: ['Permissions'],
+        params: PlatformMembershipParams,
+        body: ReplaceAccessGrantsBody,
+        response: { 200: {}, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.permissions.replacePlatformAccess(
+        request.ctx,
+        request.params.membershipId,
+        request.body,
+      ),
+    }),
+  );
 }
 
 function objectId(value: string): ObjectId {

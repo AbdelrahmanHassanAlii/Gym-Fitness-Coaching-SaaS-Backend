@@ -1,5 +1,8 @@
 import { ObjectId } from 'mongodb';
-import { permissionKeys } from '../../modules/permissions/permission.registry';
+import {
+  permissionDefinitions,
+  permissionKeys,
+} from '../../modules/permissions/permission.registry';
 import type {
   AccessGrantRepository,
   PermissionProfileRepository,
@@ -10,6 +13,7 @@ import type {
 } from '../../modules/permissions/permission.types';
 import type { PlatformMembershipRepository } from '../../modules/platform/platform.repository';
 import type {
+  BranchRepository,
   MembershipBranchAssignmentRepository,
   WorkspaceMembershipRepository,
   WorkspaceRepository,
@@ -31,6 +35,7 @@ export class AccessControlService {
   constructor(
     private readonly platformMemberships: PlatformMembershipRepository,
     private readonly workspaces: WorkspaceRepository,
+    private readonly branches: BranchRepository,
     private readonly workspaceMemberships: WorkspaceMembershipRepository,
     private readonly branchAssignments: MembershipBranchAssignmentRepository,
     private readonly profiles: PermissionProfileRepository,
@@ -58,6 +63,15 @@ export class AccessControlService {
     return await this.authorizeWorkspace(ctx, input, now);
   }
 
+  async canDelegate(ctx: RequestContext, input: AuthorizationRequest): Promise<boolean> {
+    try {
+      await this.authorize(ctx, input);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async effectiveAccessForWorkspaceMembership(
     ctx: RequestContext,
     workspaceId: ObjectId,
@@ -75,6 +89,12 @@ export class AccessControlService {
     );
     if (!membership) throw notFound('WORKSPACE_MEMBERSHIP_NOT_FOUND');
     const profiles = await this.profiles.findManyByIds(membership.permissionProfileIds);
+    const eligibleProfiles = profiles.filter(
+      (profile) =>
+        profile.context === 'WORKSPACE' &&
+        profile.status === 'ACTIVE' &&
+        profile.workspaceId?.equals(workspaceId),
+    );
     const grants = await this.grants.listCurrent(
       'WORKSPACE_MEMBERSHIP',
       membership._id,
@@ -82,6 +102,7 @@ export class AccessControlService {
       workspaceId,
     );
     const now = new Date();
+    const activeGrants = grants.filter((grant) => !grant.expiresAt || grant.expiresAt > now);
     return {
       membershipId: membership._id.toHexString(),
       workspaceId: membership.workspaceId.toHexString(),
@@ -91,8 +112,28 @@ export class AccessControlService {
         name: profile.name,
         roleKey: profile.roleKey,
         version: profile.version,
+        status: profile.status,
+        contributes: eligibleProfiles.some((eligibleProfile) =>
+          eligibleProfile._id.equals(profile._id),
+        ),
       })),
-      grants: grants.filter((grant) => !grant.expiresAt || grant.expiresAt > now).map(safeGrant),
+      grants: activeGrants.map(safeGrant),
+      permissions: permissionDefinitions
+        .filter((definition) => definition.allowedContexts.includes('WORKSPACE'))
+        .map((definition) => {
+          const decision = this.evaluateDecision(
+            {
+              context: 'WORKSPACE',
+              workspaceId,
+              permission: definition.key,
+              scope: { type: 'WORKSPACE' },
+            },
+            eligibleProfiles,
+            activeGrants,
+            now,
+          );
+          return safePermissionDecision(decision);
+        }),
     };
   }
 
@@ -110,7 +151,7 @@ export class AccessControlService {
       (profile) => profile.context === 'PLATFORM' && profile.status === 'ACTIVE',
     );
     const grants = await this.grants.listCurrent('PLATFORM_MEMBERSHIP', membership._id, 'PLATFORM');
-    return this.evaluate(input, eligibleProfiles, grants, now);
+    return this.assertAllowed(this.evaluateDecision(input, eligibleProfiles, grants, now));
   }
 
   private async authorizeWorkspace(
@@ -150,7 +191,7 @@ export class AccessControlService {
       'WORKSPACE',
       workspace._id,
     );
-    return this.evaluate(input, eligibleProfiles, grants, now);
+    return this.assertAllowed(this.evaluateDecision(input, eligibleProfiles, grants, now));
   }
 
   private async assertStructuralScope(
@@ -159,18 +200,33 @@ export class AccessControlService {
   ): Promise<void> {
     if (!input.scope || !input.workspaceId) return;
     if (input.scope.type !== 'BRANCH' && input.scope.type !== 'MULTIPLE_BRANCHES') return;
-    for (const branchId of input.scope.resourceIds ?? []) {
-      const activeAssignments = await this.branchAssignments.listActive(
-        input.workspaceId,
-        membershipId,
-      );
-      if (!activeAssignments.some((assignment) => assignment.branchId.equals(branchId))) {
+    const branchIds = input.scope.resourceIds ?? [];
+    if (branchIds.length === 0) throw notFound('SCOPE_RESOURCE_NOT_FOUND');
+
+    const [branches, activeAssignments] = await Promise.all([
+      this.branches.listByIdsInWorkspace(input.workspaceId, branchIds),
+      this.branchAssignments.listActive(input.workspaceId, membershipId),
+    ]);
+    const activeBranchIds = new Set(
+      branches
+        .filter((branch) => branch.status === 'ACTIVE')
+        .map((branch) => branch._id.toHexString()),
+    );
+    const assignedBranchIds = new Set(
+      activeAssignments.map((assignment) => assignment.branchId.toHexString()),
+    );
+
+    for (const branchId of branchIds) {
+      const key = branchId.toHexString();
+      const assignmentSatisfied =
+        input.scope.requiresAssignment === false || assignedBranchIds.has(key);
+      if (!activeBranchIds.has(key) || !assignmentSatisfied) {
         throw permissionDenied('SCOPE_DENIED');
       }
     }
   }
 
-  private evaluate(
+  private evaluateDecision(
     input: AuthorizationRequest,
     profiles: Array<{ permissions: Array<{ permission: string; effect: PermissionEffect }> }>,
     grants: AccessGrantDocument[],
@@ -212,7 +268,7 @@ export class AccessControlService {
       reasons.push(`explicit-${effect.toLowerCase()}`);
     }
 
-    const decision = {
+    return {
       allowed: effect === 'ALLOW',
       permission: input.permission,
       context: input.context,
@@ -221,8 +277,10 @@ export class AccessControlService {
       effect,
       reasons: reasons.length > 0 ? reasons : ['default-deny'],
     };
-    if (!decision.allowed)
-      throw permissionDenied(source === 'NONE' ? 'PERMISSION_DENIED' : 'PERMISSION_DENIED');
+  }
+
+  private assertAllowed(decision: AuthorizationDecision): AuthorizationDecision {
+    if (!decision.allowed) throw permissionDenied('PERMISSION_DENIED');
     return decision;
   }
 }
@@ -253,6 +311,25 @@ function safeGrant(grant: AccessGrantDocument) {
     },
     expiresAt: grant.expiresAt?.toISOString(),
     createdAt: grant.createdAt.toISOString(),
+  };
+}
+
+function safePermissionDecision(decision: AuthorizationDecision) {
+  return {
+    permission: decision.permission,
+    effect: decision.effect,
+    allowed: decision.allowed,
+    source: decision.source,
+    explicitOverrideApplied: decision.source === 'EXPLICIT_GRANT',
+    explicitDeny: decision.source === 'EXPLICIT_GRANT' && decision.effect === 'DENY',
+    profileBaselineApplied: decision.reasons.some((reason) => reason.startsWith('profile-')),
+    scope: decision.scope
+      ? {
+          type: decision.scope.type,
+          resourceIds: decision.scope.resourceIds?.map((id) => id.toHexString()),
+        }
+      : undefined,
+    reasons: decision.reasons,
   };
 }
 

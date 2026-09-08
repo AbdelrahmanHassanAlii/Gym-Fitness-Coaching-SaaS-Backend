@@ -11,6 +11,7 @@ export interface AuthorizationRequirement {
   scope?: {
     type: PermissionScopeType;
     resourceIdParam?: string;
+    requiresAssignment?: boolean;
   };
   mfaRequired?: boolean;
 }

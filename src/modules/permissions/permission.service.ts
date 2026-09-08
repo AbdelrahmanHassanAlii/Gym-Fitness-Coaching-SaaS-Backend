@@ -1,4 +1,5 @@
 import { ObjectId } from 'mongodb';
+import type { AccessControlService } from '../../core/access-control/access-control.service';
 import type { AuditWriter } from '../../core/audit/audit.writer';
 import type { TransactionContext, UnitOfWork } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -6,6 +7,7 @@ import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import type { PlatformMembershipRepository } from '../platform/platform.repository';
 import type {
+  BranchRepository,
   WorkspaceMembershipRepository,
   WorkspaceRepository,
 } from '../workspaces/workspace.repository';
@@ -31,8 +33,10 @@ export class PermissionApplicationService {
     private readonly definitions: PermissionDefinitionRepository,
     private readonly profiles: PermissionProfileRepository,
     private readonly grants: AccessGrantRepository,
+    private readonly accessControl: AccessControlService,
     private readonly platformMemberships: PlatformMembershipRepository,
     private readonly workspaces: WorkspaceRepository,
+    private readonly branches: BranchRepository,
     private readonly workspaceMemberships: WorkspaceMembershipRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
@@ -68,7 +72,7 @@ export class PermissionApplicationService {
   ) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     await this.assertWorkspaceExists(id);
-    await this.validateProfileEntries('WORKSPACE', input.permissions);
+    await this.validateProfileEntries(ctx, 'WORKSPACE', input.permissions, id);
     return await this.unitOfWork.withTransaction(async (tx) => {
       const createInput: {
         context: 'WORKSPACE';
@@ -101,7 +105,7 @@ export class PermissionApplicationService {
     ctx: RequestContext,
     input: { name: string; roleKey?: string; permissions: PermissionProfileEntry[] },
   ) {
-    await this.validateProfileEntries('PLATFORM', input.permissions);
+    await this.validateProfileEntries(ctx, 'PLATFORM', input.permissions);
     return await this.unitOfWork.withTransaction(async (tx) => {
       const createInput: {
         context: 'PLATFORM';
@@ -139,7 +143,13 @@ export class PermissionApplicationService {
       ? objectId(workspaceId, 'WORKSPACE_NOT_FOUND')
       : undefined;
     const existing = await this.requireProfileContext(id, workspaceObjectId);
-    if (input.permissions) await this.validateProfileEntries(existing.context, input.permissions);
+    if (input.permissions)
+      await this.validateProfileEntries(
+        ctx,
+        existing.context,
+        input.permissions,
+        workspaceObjectId,
+      );
     return await this.unitOfWork.withTransaction(async (tx) => {
       const updateInput: { name?: string; permissions?: PermissionProfileEntry[] } = {};
       if (input.name) updateInput.name = input.name.trim();
@@ -213,6 +223,7 @@ export class PermissionApplicationService {
     );
     if (!membership) throw notFound('WORKSPACE_MEMBERSHIP_NOT_FOUND');
     await this.assertAssignableProfiles('WORKSPACE', profileIds, workspaceObjectId);
+    await this.assertCanDelegateProfiles(ctx, 'WORKSPACE', profileIds, workspaceObjectId);
     return await this.unitOfWork.withTransaction(async (tx) => {
       const updated = await this.workspaceMemberships.replacePermissionProfiles(
         workspaceObjectId,
@@ -252,6 +263,7 @@ export class PermissionApplicationService {
     const membership = await this.platformMemberships.findById(membershipObjectId);
     if (!membership) throw notFound('PLATFORM_MEMBERSHIP_NOT_FOUND');
     await this.assertAssignableProfiles('PLATFORM', profileIds);
+    await this.assertCanDelegateProfiles(ctx, 'PLATFORM', profileIds);
     return await this.unitOfWork.withTransaction(async (tx) => {
       const updated = await this.platformMemberships.replacePermissionProfiles(
         membershipObjectId,
@@ -283,6 +295,11 @@ export class PermissionApplicationService {
   async listWorkspaceAccess(_ctx: RequestContext, workspaceId: string, membershipId: string) {
     const workspaceObjectId = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     const membershipObjectId = objectId(membershipId, 'WORKSPACE_MEMBERSHIP_NOT_FOUND');
+    const membership = await this.workspaceMemberships.findByIdInWorkspace(
+      workspaceObjectId,
+      membershipObjectId,
+    );
+    if (!membership) throw notFound('WORKSPACE_MEMBERSHIP_NOT_FOUND');
     return (
       await this.grants.listCurrent(
         'WORKSPACE_MEMBERSHIP',
@@ -306,13 +323,58 @@ export class PermissionApplicationService {
       membershipObjectId,
     );
     if (!membership) throw notFound('WORKSPACE_MEMBERSHIP_NOT_FOUND');
-    const grants = await this.validateGrants('WORKSPACE', input.grants);
+    const grants = await this.validateGrants(ctx, 'WORKSPACE', input.grants, workspaceObjectId);
+    await this.assertCanReplaceAccessSet(
+      ctx,
+      'WORKSPACE_MEMBERSHIP',
+      membershipObjectId,
+      'WORKSPACE',
+      workspaceObjectId,
+      grants,
+    );
     return await this.replaceAccessSet(
       ctx,
       'WORKSPACE_MEMBERSHIP',
       membershipObjectId,
       'WORKSPACE',
       workspaceObjectId,
+      input.expectedVersion,
+      grants,
+    );
+  }
+
+  async listPlatformAccess(_ctx: RequestContext, membershipId: string) {
+    const membershipObjectId = objectId(membershipId, 'PLATFORM_MEMBERSHIP_NOT_FOUND');
+    const membership = await this.platformMemberships.findById(membershipObjectId);
+    if (!membership) throw notFound('PLATFORM_MEMBERSHIP_NOT_FOUND');
+    return (
+      await this.grants.listCurrent('PLATFORM_MEMBERSHIP', membershipObjectId, 'PLATFORM')
+    ).map(safeGrant);
+  }
+
+  async replacePlatformAccess(
+    ctx: RequestContext,
+    membershipId: string,
+    input: { expectedVersion: number; grants: GrantInput[] },
+  ) {
+    const membershipObjectId = objectId(membershipId, 'PLATFORM_MEMBERSHIP_NOT_FOUND');
+    const membership = await this.platformMemberships.findById(membershipObjectId);
+    if (!membership) throw notFound('PLATFORM_MEMBERSHIP_NOT_FOUND');
+    const grants = await this.validateGrants(ctx, 'PLATFORM', input.grants);
+    await this.assertCanReplaceAccessSet(
+      ctx,
+      'PLATFORM_MEMBERSHIP',
+      membershipObjectId,
+      'PLATFORM',
+      undefined,
+      grants,
+    );
+    return await this.replaceAccessSet(
+      ctx,
+      'PLATFORM_MEMBERSHIP',
+      membershipObjectId,
+      'PLATFORM',
+      undefined,
       input.expectedVersion,
       grants,
     );
@@ -361,6 +423,8 @@ export class PermissionApplicationService {
         subjectId,
         'replace',
         tx,
+        undefined,
+        { grants: grants.map(safeValidatedGrant), accessVersionIncremented: true },
       );
       await this.writeOutbox(
         ctx,
@@ -369,6 +433,7 @@ export class PermissionApplicationService {
         'access_grants',
         subjectId,
         tx,
+        { subjectType, context, grantCount: grants.length },
       );
       return { grants: created.map(safeGrant) };
     });
@@ -414,25 +479,35 @@ export class PermissionApplicationService {
   }
 
   private async validateProfileEntries(
+    ctx: RequestContext,
     context: PermissionContext,
     entries: PermissionProfileEntry[],
+    workspaceId?: ObjectId,
   ) {
     const seen = new Set<string>();
     for (const entry of entries) {
       if (seen.has(entry.permission)) throw duplicate('PERMISSION_PROFILE_PERMISSION_DUPLICATE');
       seen.add(entry.permission);
-      await this.assertPermissionAllowed(entry.permission, context);
+      await this.assertPermissionAllowed(entry.permission, context, { type: 'WORKSPACE' });
+      await this.assertCanDelegate(
+        ctx,
+        context,
+        entry.permission,
+        { type: 'WORKSPACE' },
+        workspaceId,
+      );
     }
   }
 
   private async validateGrants(
+    ctx: RequestContext,
     context: PermissionContext,
     grants: GrantInput[],
+    workspaceId?: ObjectId,
   ): Promise<ValidatedGrant[]> {
     const seen = new Set<string>();
     const validated: ValidatedGrant[] = [];
     for (const grant of grants) {
-      await this.assertPermissionAllowed(grant.permission, context);
       const scope: PermissionScope = {
         type: grant.scope.type,
         ...(grant.scope.resourceIds
@@ -443,6 +518,9 @@ export class PermissionApplicationService {
             }
           : {}),
       };
+      await this.assertPermissionAllowed(grant.permission, context, scope);
+      await this.validateScopeResources(context, scope, workspaceId);
+      await this.assertCanDelegate(ctx, context, grant.permission, scope, workspaceId);
       const key = grantKey(grant.permission, scope);
       if (seen.has(key)) throw duplicate('ACCESS_GRANT_DUPLICATE');
       seen.add(key);
@@ -456,11 +534,114 @@ export class PermissionApplicationService {
     return validated;
   }
 
-  private async assertPermissionAllowed(permission: string, context: PermissionContext) {
+  private async assertPermissionAllowed(
+    permission: string,
+    context: PermissionContext,
+    scope: PermissionScope,
+  ) {
     if (!permissionKeys.has(permission)) throw invalid('PERMISSION_UNKNOWN');
     const definition = await this.definitions.findActiveByKey(permission);
     if (!definition?.allowedContexts.includes(context)) {
       throw invalid('PERMISSION_CONTEXT_INVALID');
+    }
+    if (!definition.allowedScopes.includes(scope.type)) {
+      throw invalid('PERMISSION_SCOPE_INVALID');
+    }
+    return definition;
+  }
+
+  private async validateScopeResources(
+    context: PermissionContext,
+    scope: PermissionScope,
+    workspaceId?: ObjectId,
+  ) {
+    const ids = scope.resourceIds ?? [];
+    if (scope.type === 'WORKSPACE' || scope.type === 'SELF' || scope.type === 'ASSIGNED_TRAINEES') {
+      if (ids.length > 0) throw invalid('PERMISSION_SCOPE_RESOURCE_INVALID');
+      return;
+    }
+    if (ids.length === 0) throw invalid('PERMISSION_SCOPE_RESOURCE_REQUIRED');
+    if (scope.type !== 'BRANCH' && scope.type !== 'MULTIPLE_BRANCHES') return;
+    if (context !== 'WORKSPACE' || !workspaceId) throw invalid('PERMISSION_SCOPE_INVALID');
+    const branches = await this.branches.listByIdsInWorkspace(workspaceId, ids);
+    const activeBranchIds = new Set(
+      branches
+        .filter((branch) => branch.status === 'ACTIVE')
+        .map((branch) => branch._id.toHexString()),
+    );
+    if (!ids.every((id) => activeBranchIds.has(id.toHexString()))) {
+      throw notFound('SCOPE_RESOURCE_NOT_FOUND');
+    }
+  }
+
+  private async assertCanReplaceAccessSet(
+    ctx: RequestContext,
+    subjectType: AccessGrantSubjectType,
+    subjectId: ObjectId,
+    context: PermissionContext,
+    workspaceId: ObjectId | undefined,
+    nextGrants: ValidatedGrant[],
+  ) {
+    const previousGrants = await this.grants.listCurrent(
+      subjectType,
+      subjectId,
+      context,
+      workspaceId,
+    );
+    const nextKeys = new Set(nextGrants.map((grant) => grantKey(grant.permission, grant.scope)));
+    for (const previousGrant of previousGrants) {
+      const key = grantKey(previousGrant.permission, previousGrant.scope);
+      if (!nextKeys.has(key)) {
+        await this.assertCanDelegate(
+          ctx,
+          context,
+          previousGrant.permission,
+          previousGrant.scope,
+          workspaceId,
+        );
+      }
+    }
+  }
+
+  private async assertCanDelegateProfiles(
+    ctx: RequestContext,
+    context: PermissionContext,
+    profileIds: ObjectId[],
+    workspaceId?: ObjectId,
+  ) {
+    const profiles = await this.profiles.findManyByIds(profileIds);
+    for (const profile of profiles) {
+      for (const entry of profile.permissions) {
+        await this.assertCanDelegate(
+          ctx,
+          context,
+          entry.permission,
+          { type: 'WORKSPACE' },
+          workspaceId,
+        );
+      }
+    }
+  }
+
+  private async assertCanDelegate(
+    ctx: RequestContext,
+    context: PermissionContext,
+    permission: string,
+    scope: PermissionScope,
+    workspaceId?: ObjectId,
+  ) {
+    const allowed = await this.accessControl.canDelegate(ctx, {
+      context,
+      permission,
+      ...(workspaceId ? { workspaceId } : {}),
+      scope,
+    });
+    if (!allowed) {
+      throw new AppError({
+        code: 'DELEGATION_DENIED',
+        httpStatus: 403,
+        message: 'Permission delegation is denied.',
+      });
     }
   }
 
@@ -471,6 +652,8 @@ export class PermissionApplicationService {
     entityId: ObjectId,
     action: string,
     tx: TransactionContext,
+    before?: Record<string, unknown>,
+    after?: Record<string, unknown>,
   ) {
     await this.audit.write(
       {
@@ -487,6 +670,8 @@ export class PermissionApplicationService {
         },
         entity: { type: eventType, id: entityId },
         action,
+        ...(before ? { before } : {}),
+        ...(after ? { after } : {}),
         ipAddress: ctx.ipAddress,
         ...(ctx.userAgent ? { userAgent: ctx.userAgent } : {}),
         correlationId: ctx.correlationId,
@@ -502,6 +687,7 @@ export class PermissionApplicationService {
     aggregateType: string,
     aggregateId: ObjectId,
     tx: TransactionContext,
+    payload: Record<string, unknown> = {},
   ) {
     await this.outbox.write(
       {
@@ -509,7 +695,11 @@ export class PermissionApplicationService {
         aggregateType,
         aggregateId,
         ...(workspaceId ? { workspaceId } : {}),
-        payload: {},
+        payload: {
+          context: workspaceId ? 'WORKSPACE' : 'PLATFORM',
+          aggregateId: aggregateId.toHexString(),
+          ...payload,
+        },
         correlationId: ctx.correlationId,
       },
       tx,
@@ -564,6 +754,18 @@ function safeGrant(grant: AccessGrantDocument) {
     },
     expiresAt: grant.expiresAt?.toISOString(),
     createdAt: grant.createdAt.toISOString(),
+  };
+}
+
+function safeValidatedGrant(grant: ValidatedGrant) {
+  return {
+    permission: grant.permission,
+    effect: grant.effect,
+    scope: {
+      type: grant.scope.type,
+      resourceIds: grant.scope.resourceIds?.map((id) => id.toHexString()),
+    },
+    expiresAt: grant.expiresAt?.toISOString(),
   };
 }
 

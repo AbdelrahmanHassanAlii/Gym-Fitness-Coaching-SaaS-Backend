@@ -376,6 +376,17 @@ export class BranchRepository {
     );
   }
 
+  async listByIdsInWorkspace(
+    workspaceId: ObjectId,
+    branchIds: ObjectId[],
+    tx?: TransactionContext,
+  ): Promise<BranchDocument[]> {
+    if (branchIds.length === 0) return [];
+    return await this.branches
+      .find({ _id: { $in: branchIds }, workspaceId }, tx ? { session: tx.session } : undefined)
+      .toArray();
+  }
+
   async update(
     workspaceId: ObjectId,
     branchId: ObjectId,

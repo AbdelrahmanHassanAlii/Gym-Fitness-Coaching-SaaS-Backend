@@ -53,6 +53,22 @@ export class IdentityRepository {
     return await this.users.findOne({ _id: userId }, tx ? { session: tx.session } : undefined);
   }
 
+  async findByNormalizedEmail(
+    normalizedEmail: string,
+    tx?: TransactionContext,
+  ): Promise<UserDocument | null> {
+    assertValidOptionalIdentifier('normalizedEmail', normalizedEmail);
+    return await this.users.findOne({ normalizedEmail }, tx ? { session: tx.session } : undefined);
+  }
+
+  async findByNormalizedPhone(
+    normalizedPhone: string,
+    tx?: TransactionContext,
+  ): Promise<UserDocument | null> {
+    assertValidOptionalIdentifier('normalizedPhone', normalizedPhone);
+    return await this.users.findOne({ normalizedPhone }, tx ? { session: tx.session } : undefined);
+  }
+
   async findByLoginIdentifier(identifier: {
     normalizedEmail?: string;
     normalizedPhone?: string;

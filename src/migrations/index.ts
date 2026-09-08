@@ -3,6 +3,7 @@ import { migration002Stage2AuthIndexes } from './002-stage2-auth-indexes';
 import { migration003Stage2MfaIndexes } from './003-stage2-mfa-indexes';
 import { migration004Stage3WorkspacesIndexes } from './004-stage3-workspaces-indexes';
 import { migration005Stage4AccessControlIndexes } from './005-stage4-access-control-indexes';
+import { migration006Stage4AccessControlCompatibilityFix } from './006-stage4-access-control-compatibility-fix';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -11,4 +12,5 @@ export const migrations: Migration[] = [
   migration003Stage2MfaIndexes,
   migration004Stage3WorkspacesIndexes,
   migration005Stage4AccessControlIndexes,
+  migration006Stage4AccessControlCompatibilityFix,
 ];

@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { createAppContainer } from '../bootstrap/app-container';
 import { loadConfig } from '../config/config';
 import { normalizePhoneToE164 } from '../core/auth/phone-normalizer';
@@ -11,6 +12,9 @@ try {
   const args = parseArgs(Bun.argv.slice(2));
   const normalizedEmail = args.email ? normalizeEmail(args.email) : undefined;
   const normalizedPhone = args.phone ? normalizePhoneToE164(args.phone) : undefined;
+  const permissionProfileId = args.permissionProfileId
+    ? objectId(args.permissionProfileId, 'BOOTSTRAP_PERMISSION_PROFILE_INVALID')
+    : undefined;
   if (!normalizedEmail && !normalizedPhone) {
     throw new AppError({
       code: 'BOOTSTRAP_IDENTIFIER_REQUIRED',
@@ -64,11 +68,40 @@ try {
       ));
 
     const existing = await container.platformMemberships.findByUserId(user._id, tx);
+    if (permissionProfileId) {
+      const profile = await container.permissionProfiles.findById(permissionProfileId, tx);
+      if (profile?.context !== 'PLATFORM' || profile.status !== 'ACTIVE') {
+        throw new AppError({
+          code: 'BOOTSTRAP_PERMISSION_PROFILE_INVALID',
+          httpStatus: 422,
+          message: 'The permission profile must be an active Platform profile.',
+        });
+      }
+    }
+
     if (existing?.status === 'ACTIVE') {
+      if (permissionProfileId) {
+        const updated = await container.platformMemberships.replacePermissionProfiles(
+          existing._id,
+          existing.accessVersion ?? 0,
+          [permissionProfileId],
+          new Date(),
+          tx,
+        );
+        return {
+          status: 'PROFILE_ASSIGNED',
+          userId: user._id.toHexString(),
+          platformMembershipId: updated._id.toHexString(),
+          permissionProfileIds: updated.permissionProfileIds.map((id) => id.toHexString()),
+          accessVersion: updated.accessVersion ?? 0,
+        };
+      }
       return {
         status: 'UNCHANGED_ACTIVE',
         userId: user._id.toHexString(),
         platformMembershipId: existing._id.toHexString(),
+        permissionProfileIds: existing.permissionProfileIds.map((id) => id.toHexString()),
+        accessVersion: existing.accessVersion ?? 0,
       };
     }
     if (existing) {
@@ -82,10 +115,21 @@ try {
     }
 
     const membership = await container.platformMemberships.createActive(user._id, new Date(), tx);
+    const assignedMembership = permissionProfileId
+      ? await container.platformMemberships.replacePermissionProfiles(
+          membership._id,
+          membership.accessVersion ?? 0,
+          [permissionProfileId],
+          new Date(),
+          tx,
+        )
+      : membership;
     return {
       status: 'CREATED',
       userId: user._id.toHexString(),
-      platformMembershipId: membership._id.toHexString(),
+      platformMembershipId: assignedMembership._id.toHexString(),
+      permissionProfileIds: assignedMembership.permissionProfileIds.map((id) => id.toHexString()),
+      accessVersion: assignedMembership.accessVersion ?? 0,
     };
   });
 
@@ -111,6 +155,7 @@ function parseArgs(argv: string[]): {
   lastName?: string;
   preferredLanguage?: 'ar' | 'en';
   timezone?: string;
+  permissionProfileId?: string;
 } {
   const parsed: Record<string, string> = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -137,7 +182,19 @@ function parseArgs(argv: string[]): {
     lastName: parsed['last-name'],
     preferredLanguage: language(parsed['preferred-language']),
     timezone: parsed.timezone,
+    permissionProfileId: parsed['permission-profile-id'],
   });
+}
+
+function objectId(value: string, code: string) {
+  if (!ObjectId.isValid(value)) {
+    throw new AppError({
+      code,
+      httpStatus: 422,
+      message: 'The supplied ObjectId is invalid.',
+    });
+  }
+  return new ObjectId(value);
 }
 
 function language(value: string | undefined): 'ar' | 'en' | undefined {

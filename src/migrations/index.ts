@@ -8,6 +8,7 @@ import { migration007Stage5CommercialPermissions } from './007-stage5-commercial
 import { migration008Stage5SubscriptionsAndBillingIndexes } from './008-stage5-subscriptions-and-billing-indexes';
 import { migration009Stage5ExistingWorkspaceBackfill } from './009-stage5-existing-workspace-backfill';
 import { migration010Stage5WorkspaceUsageRevision } from './010-stage5-workspace-usage-revision';
+import { migration011Stage6Leads } from './011-stage6-leads';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -21,4 +22,5 @@ export const migrations: Migration[] = [
   migration008Stage5SubscriptionsAndBillingIndexes,
   migration009Stage5ExistingWorkspaceBackfill,
   migration010Stage5WorkspaceUsageRevision,
+  migration011Stage6Leads,
 ];

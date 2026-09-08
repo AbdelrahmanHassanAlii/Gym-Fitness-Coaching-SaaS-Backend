@@ -68,6 +68,8 @@ export const Permissions = {
   LeadsRead: 'leads.read',
   LeadsUpdate: 'leads.update',
   LeadsConvert: 'leads.convert',
+  LeadsMarkDuplicate: 'leads.mark_duplicate',
+  LeadsMerge: 'leads.merge',
   SupportSessionsStart: 'support.sessions.start',
   SystemExercisesRead: 'system_exercises.read',
   SystemExercisesCreate: 'system_exercises.create',
@@ -140,6 +142,8 @@ export const permissionDefinitions: PermissionDefinition[] = [
   platform(Permissions.LeadsRead, 'Leads', 'Read platform leads.'),
   platform(Permissions.LeadsUpdate, 'Leads', 'Update platform leads.'),
   platform(Permissions.LeadsConvert, 'Leads', 'Convert leads into workspaces.'),
+  platform(Permissions.LeadsMarkDuplicate, 'Leads', 'Mark duplicate leads.'),
+  platform(Permissions.LeadsMerge, 'Leads', 'Merge duplicate leads.'),
   platform(Permissions.SupportSessionsStart, 'Support', 'Start support sessions.'),
   platform(Permissions.SystemExercisesRead, 'System exercises', 'Read system exercises.'),
   platform(Permissions.SystemExercisesCreate, 'System exercises', 'Create system exercises.'),
@@ -163,6 +167,18 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
     permissions: permissionDefinitions
       .filter((definition) => definition.allowedContexts.includes('PLATFORM'))
       .map((definition) => ({ permission: definition.key as PermissionKey, effect: 'ALLOW' })),
+  },
+  {
+    context: 'PLATFORM',
+    name: 'Sales/Lead Admin',
+    roleKey: 'SALES_LEAD_ADMIN',
+    permissions: [
+      Permissions.LeadsRead,
+      Permissions.LeadsUpdate,
+      Permissions.LeadsConvert,
+      Permissions.LeadsMarkDuplicate,
+      Permissions.LeadsMerge,
+    ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
     context: 'PLATFORM',

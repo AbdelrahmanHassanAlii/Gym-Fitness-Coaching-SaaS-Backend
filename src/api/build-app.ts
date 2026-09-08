@@ -10,6 +10,7 @@ import { createLoggerOptions } from '../core/logging/logger';
 import { registerRequestContext } from '../core/request-context/request-context.plugin';
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
+import { registerLeadRoutes } from '../modules/leads/lead.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
 import { registerWorkspaceRoutes } from '../modules/workspaces/workspace.routes';
@@ -78,6 +79,7 @@ export async function buildApp(container: AppContainer) {
   await registerWorkspaceRoutes(app, container);
   await registerPermissionRoutes(app, container);
   await registerSubscriptionRoutes(app, container);
+  await registerLeadRoutes(app, container);
 
   return app;
 }

@@ -21,6 +21,8 @@ import { AuthApplicationService } from '../modules/auth/auth.service';
 import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
+import { LeadRepository } from '../modules/leads/lead.repository';
+import { LeadApplicationService } from '../modules/leads/lead.service';
 import {
   AccessGrantRepository,
   PermissionDefinitionRepository,
@@ -75,6 +77,7 @@ export interface AppContainer {
   subscriptionsRepo: SubscriptionRepository;
   workspaceUsage: WorkspaceUsageRepository;
   manualPayments: ManualPaymentRepository;
+  leadsRepo: LeadRepository;
   credentialDigests: CredentialDigests;
   passwordHasher: PasswordHasher;
   jwt: JwtService;
@@ -86,6 +89,7 @@ export interface AppContainer {
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
+  leads: LeadApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -119,6 +123,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const subscriptionsRepo = new SubscriptionRepository(database);
   const workspaceUsage = new WorkspaceUsageRepository(database);
   const manualPayments = new ManualPaymentRepository(database);
+  const leadsRepo = new LeadRepository(database);
   const accessControl = new AccessControlService(
     platformMemberships,
     workspaceRepo,
@@ -127,6 +132,67 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     membershipBranchAssignments,
     permissionProfiles,
     accessGrants,
+  );
+
+  const entitlements = new EntitlementService(subscriptionsRepo, workspaceUsage);
+  const subscriptions = new SubscriptionApplicationService(
+    config,
+    unitOfWork,
+    subscriptionPlans,
+    subscriptionsRepo,
+    workspaceUsage,
+    manualPayments,
+    workspaceRepo,
+    workspaceMemberships,
+    audit,
+    outbox,
+  );
+  const workspaces = new WorkspaceApplicationService(
+    unitOfWork,
+    identity,
+    platformMemberships,
+    workspaceRepo,
+    workspaceMemberships,
+    branches,
+    membershipBranchAssignments,
+    invitations,
+    credentialDigests,
+    audit,
+    outbox,
+    entitlements,
+    subscriptions,
+  );
+  const auth = new AuthApplicationService(
+    config,
+    unitOfWork,
+    identity,
+    authSessions,
+    authChallenges,
+    authMfaMethods,
+    authRateLimits,
+    authSecurityEvents,
+    passwordHasher,
+    credentialDigests,
+    jwt,
+    totp,
+    refreshTokens,
+  );
+  const leads = new LeadApplicationService(
+    unitOfWork,
+    leadsRepo,
+    identity,
+    workspaceRepo,
+    workspaceMemberships,
+    invitations,
+    permissionProfiles,
+    workspaces,
+    subscriptions,
+    accessControl,
+    auth,
+    credentialDigests,
+    passwordHasher,
+    audit,
+    outbox,
   );
 
   return {
@@ -157,40 +223,15 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     subscriptionsRepo,
     workspaceUsage,
     manualPayments,
+    leadsRepo,
     credentialDigests,
     passwordHasher,
     jwt,
     totp,
     refreshTokens,
     mfa: new MfaService(unitOfWork, authMfaMethods, authSecurityEvents, credentialDigests),
-    auth: new AuthApplicationService(
-      config,
-      unitOfWork,
-      identity,
-      authSessions,
-      authChallenges,
-      authMfaMethods,
-      authRateLimits,
-      authSecurityEvents,
-      passwordHasher,
-      credentialDigests,
-      jwt,
-      totp,
-      refreshTokens,
-    ),
-    workspaces: new WorkspaceApplicationService(
-      unitOfWork,
-      identity,
-      platformMemberships,
-      workspaceRepo,
-      workspaceMemberships,
-      branches,
-      membershipBranchAssignments,
-      invitations,
-      credentialDigests,
-      audit,
-      outbox,
-    ),
+    auth,
+    workspaces,
     permissions: new PermissionApplicationService(
       unitOfWork,
       permissionDefinitions,
@@ -204,18 +245,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       audit,
       outbox,
     ),
-    entitlements: new EntitlementService(subscriptionsRepo, workspaceUsage),
-    subscriptions: new SubscriptionApplicationService(
-      config,
-      unitOfWork,
-      subscriptionPlans,
-      subscriptionsRepo,
-      workspaceUsage,
-      manualPayments,
-      workspaceRepo,
-      workspaceMemberships,
-      audit,
-      outbox,
-    ),
+    entitlements,
+    subscriptions,
+    leads,
   };
 }

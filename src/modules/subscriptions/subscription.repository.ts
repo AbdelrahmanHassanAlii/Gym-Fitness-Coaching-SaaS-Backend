@@ -1,4 +1,4 @@
-import { type Collection, MongoServerError, ObjectId } from 'mongodb';
+import { type Collection, MongoServerError, ObjectId, type UpdateFilter } from 'mongodb';
 import type { Database } from '../../core/database/database';
 import type { TransactionContext } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -147,6 +147,20 @@ export class SubscriptionPlanRepository {
   async listVersions(planId: ObjectId): Promise<SubscriptionPlanVersionDocument[]> {
     return await this.versions.find({ planId }).sort({ version: -1 }).toArray();
   }
+
+  async findVersionWithPlan(
+    versionId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<{
+    version: SubscriptionPlanVersionDocument;
+    plan: SubscriptionPlanDocument;
+  } | null> {
+    const version = await this.findVersionById(versionId, tx);
+    if (!version) return null;
+    const plan = await this.findById(version.planId, tx);
+    if (!plan) return null;
+    return { version, plan };
+  }
 }
 
 export class SubscriptionRepository {
@@ -193,15 +207,20 @@ export class SubscriptionRepository {
     from: SubscriptionLifecycleStatus[],
     to: SubscriptionLifecycleStatus,
     patch: Partial<SubscriptionDocument>,
+    unset: Array<keyof SubscriptionDocument> = [],
     now = new Date(),
     tx?: TransactionContext,
   ): Promise<SubscriptionDocument> {
+    const update: UpdateFilter<SubscriptionDocument> = {
+      $set: { ...patch, lifecycleStatus: to, updatedAt: now },
+      $inc: { version: 1 },
+      ...(unset.length > 0
+        ? { $unset: Object.fromEntries(unset.map((field) => [field, ''])) }
+        : {}),
+    };
     const result = await this.subscriptions.findOneAndUpdate(
       { workspaceId, lifecycleStatus: { $in: from }, version: expectedVersion },
-      {
-        $set: { ...patch, lifecycleStatus: to, updatedAt: now },
-        $inc: { version: 1 },
-      },
+      update,
       { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
     );
     if (!result) throw conflict('SUBSCRIPTION_VERSION_CONFLICT');
@@ -211,9 +230,11 @@ export class SubscriptionRepository {
   async attachTerms(
     workspaceId: ObjectId,
     expectedVersion: number,
+    allowedSources: SubscriptionLifecycleStatus[],
     term: Omit<SubscriptionTermDocument, '_id' | 'createdAt'> & { now?: Date },
     status: SubscriptionLifecycleStatus,
     patch: Partial<SubscriptionDocument>,
+    unset: Array<keyof SubscriptionDocument> = [],
     tx?: TransactionContext,
   ): Promise<{ subscription: SubscriptionDocument; terms: SubscriptionTermDocument }> {
     const now = term.now ?? new Date();
@@ -233,17 +254,26 @@ export class SubscriptionRepository {
       createdBy: term.createdBy,
       createdAt: now,
     };
-    const subscription = await this.subscriptions.findOneAndUpdate(
-      { _id: existing._id, workspaceId, version: expectedVersion },
-      {
-        $set: {
-          ...patch,
-          lifecycleStatus: status,
-          currentTermsId: terms._id,
-          updatedAt: now,
-        },
-        $inc: { version: 1 },
+    const update: UpdateFilter<SubscriptionDocument> = {
+      $set: {
+        ...patch,
+        lifecycleStatus: status,
+        currentTermsId: terms._id,
+        updatedAt: now,
       },
+      $inc: { version: 1 },
+      ...(unset.length > 0
+        ? { $unset: Object.fromEntries(unset.map((field) => [field, ''])) }
+        : {}),
+    };
+    const subscription = await this.subscriptions.findOneAndUpdate(
+      {
+        _id: existing._id,
+        workspaceId,
+        version: expectedVersion,
+        lifecycleStatus: { $in: allowedSources },
+      },
+      update,
       { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
     );
     if (!subscription) throw conflict('SUBSCRIPTION_VERSION_CONFLICT');

@@ -2,6 +2,7 @@ import type { Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
 import { requireAccess } from '../../core/access-control/access-control.middleware';
+import type { TransactionContext } from '../../core/database/unit-of-work';
 import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import type { RequestContext } from '../../core/request-context/request-context';
 import { requireAuth } from '../auth/auth.middleware';
@@ -96,16 +97,18 @@ export async function registerSubscriptionRoutes(
       },
     },
     async (request, reply) => {
-      const result = await container.idempotency.run(request.ctx, {
+      const result = await container.idempotency.runInTransaction(request.ctx, {
         routeKey: 'POST /workspaces/:workspaceId/payments',
         key: idempotencyKey(request.headers),
         fingerprint: { params: request.params, body: request.body },
-        operation: async () => ({
+        unitOfWork: container.unitOfWork,
+        operation: async (tx) => ({
           statusCode: 201,
           body: await container.subscriptions.createManualPayment(
             request.ctx,
             request.params.workspaceId,
             request.body,
+            tx,
           ),
         }),
       });
@@ -159,13 +162,14 @@ export async function registerSubscriptionRoutes(
       },
     },
     async (request, reply) => {
-      const result = await container.idempotency.run(request.ctx, {
+      const result = await container.idempotency.runInTransaction(request.ctx, {
         routeKey: 'POST /platform/subscription-plans',
         key: idempotencyKey(request.headers),
         fingerprint: { body: request.body },
-        operation: async () => ({
+        unitOfWork: container.unitOfWork,
+        operation: async (tx) => ({
           statusCode: 201,
-          body: await container.subscriptions.createPlan(request.ctx, request.body),
+          body: await container.subscriptions.createPlan(request.ctx, request.body, tx),
         }),
       });
       return reply.status(result.statusCode).send({ data: result.body });
@@ -231,16 +235,18 @@ export async function registerSubscriptionRoutes(
       },
     },
     async (request, reply) => {
-      const result = await container.idempotency.run(request.ctx, {
+      const result = await container.idempotency.runInTransaction(request.ctx, {
         routeKey: 'POST /platform/subscription-plans/:planId/versions',
         key: idempotencyKey(request.headers),
         fingerprint: { params: request.params, body: request.body },
-        operation: async () => ({
+        unitOfWork: container.unitOfWork,
+        operation: async (tx) => ({
           statusCode: 201,
           body: await container.subscriptions.createPlanVersion(
             request.ctx,
             request.params.planId,
             request.body,
+            tx,
           ),
         }),
       });
@@ -299,8 +305,13 @@ export async function registerSubscriptionRoutes(
     '/api/v1/platform/workspaces/:workspaceId/subscription/start-trial',
     commandOptions(container, Permissions.SubscriptionsStartTrial, StartTrialBody),
     async (request, reply) =>
-      await idempotent(reply, container, request, 'start-trial', () =>
-        container.subscriptions.startTrial(request.ctx, request.params.workspaceId, request.body),
+      await idempotent(reply, container, request, 'start-trial', (tx) =>
+        container.subscriptions.startTrial(
+          request.ctx,
+          request.params.workspaceId,
+          request.body,
+          tx,
+        ),
       ),
   );
 
@@ -309,12 +320,13 @@ export async function registerSubscriptionRoutes(
       `/api/v1/platform/workspaces/:workspaceId/subscription/${command}`,
       commandOptions(container, Permissions.SubscriptionsChangePlan, ChangeTermsBody),
       async (request, reply) =>
-        await idempotent(reply, container, request, command, () =>
+        await idempotent(reply, container, request, command, (tx) =>
           container.subscriptions.changePlan(
             request.ctx,
             request.params.workspaceId,
             request.body,
             command === 'upgrade' ? 'UPGRADE' : 'DOWNGRADE',
+            tx,
           ),
         ),
     );
@@ -327,8 +339,8 @@ export async function registerSubscriptionRoutes(
     '/api/v1/platform/workspaces/:workspaceId/subscription/freeze',
     commandOptions(container, Permissions.SubscriptionsFreeze, TransitionSubscriptionBody),
     async (request, reply) =>
-      await idempotent(reply, container, request, 'freeze', () =>
-        container.subscriptions.freeze(request.ctx, request.params.workspaceId, request.body),
+      await idempotent(reply, container, request, 'freeze', (tx) =>
+        container.subscriptions.freeze(request.ctx, request.params.workspaceId, request.body, tx),
       ),
   );
 
@@ -336,8 +348,13 @@ export async function registerSubscriptionRoutes(
     '/api/v1/platform/workspaces/:workspaceId/subscription/reactivate',
     commandOptions(container, Permissions.SubscriptionsReactivate, ChangeTermsBody),
     async (request, reply) =>
-      await idempotent(reply, container, request, 'reactivate', () =>
-        container.subscriptions.reactivate(request.ctx, request.params.workspaceId, request.body),
+      await idempotent(reply, container, request, 'reactivate', (tx) =>
+        container.subscriptions.reactivate(
+          request.ctx,
+          request.params.workspaceId,
+          request.body,
+          tx,
+        ),
       ),
   );
 
@@ -348,8 +365,8 @@ export async function registerSubscriptionRoutes(
     '/api/v1/platform/workspaces/:workspaceId/subscription/cancel',
     commandOptions(container, Permissions.SubscriptionsCancel, TransitionSubscriptionBody),
     async (request, reply) =>
-      await idempotent(reply, container, request, 'cancel', () =>
-        container.subscriptions.cancel(request.ctx, request.params.workspaceId, request.body),
+      await idempotent(reply, container, request, 'cancel', (tx) =>
+        container.subscriptions.cancel(request.ctx, request.params.workspaceId, request.body, tx),
       ),
   );
 
@@ -398,8 +415,13 @@ export async function registerSubscriptionRoutes(
       },
     },
     async (request, reply) =>
-      await idempotent(reply, container, request, 'approve-payment', () =>
-        container.subscriptions.approvePayment(request.ctx, request.params.paymentId, request.body),
+      await idempotent(reply, container, request, 'approve-payment', (tx) =>
+        container.subscriptions.approvePayment(
+          request.ctx,
+          request.params.paymentId,
+          request.body,
+          tx,
+        ),
       ),
   );
 
@@ -418,8 +440,13 @@ export async function registerSubscriptionRoutes(
       },
     },
     async (request, reply) =>
-      await idempotent(reply, container, request, 'reject-payment', () =>
-        container.subscriptions.rejectPayment(request.ctx, request.params.paymentId, request.body),
+      await idempotent(reply, container, request, 'reject-payment', (tx) =>
+        container.subscriptions.rejectPayment(
+          request.ctx,
+          request.params.paymentId,
+          request.body,
+          tx,
+        ),
       ),
   );
 }
@@ -446,13 +473,14 @@ async function idempotent(
     body: unknown;
   },
   command: string,
-  operation: () => Promise<unknown>,
+  operation: (tx: TransactionContext) => Promise<unknown>,
 ) {
-  const result = await container.idempotency.run(request.ctx, {
+  const result = await container.idempotency.runInTransaction(request.ctx, {
     routeKey: `POST /platform/subscription/${command}`,
     key: idempotencyKey(request.headers),
     fingerprint: { params: request.params, body: request.body },
-    operation: async () => ({ body: await operation() }),
+    unitOfWork: container.unitOfWork,
+    operation: async (tx) => ({ body: await operation(tx) }),
   });
   return reply.status(result.statusCode).send({ data: result.body });
 }

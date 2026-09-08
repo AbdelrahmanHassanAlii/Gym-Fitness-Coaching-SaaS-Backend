@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { type Collection, MongoServerError } from 'mongodb';
 import type { Database } from '../database/database';
-import type { TransactionContext } from '../database/unit-of-work';
+import type { TransactionContext, UnitOfWork } from '../database/unit-of-work';
 import { AppError } from '../errors/app-error';
 import type { RequestContext } from '../request-context/request-context';
 
@@ -29,6 +29,7 @@ export interface IdempotencyResult<T> {
 
 export class IdempotencyService {
   private readonly records: Collection<IdempotencyRecordDocument>;
+  private readonly processingStaleMs = 5 * 60 * 1000;
 
   constructor(database: Database) {
     this.records = database.db.collection<IdempotencyRecordDocument>('idempotency_records');
@@ -44,6 +45,97 @@ export class IdempotencyService {
       operation: () => Promise<{ statusCode?: number; body: T; resourceId?: string }>;
     },
   ): Promise<IdempotencyResult<T>> {
+    const record = this.buildRecord(ctx, input);
+
+    const owned = await this.reserveOrRecover(record);
+    if (!owned) return await this.resolveExisting<T>(record);
+
+    try {
+      const result = await input.operation();
+      await this.complete(record, result.statusCode ?? 200, result.body, result.resourceId);
+      return { statusCode: result.statusCode ?? 200, body: result.body, replayed: false };
+    } catch (error) {
+      await this.markFailed(record).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async runInTransaction<T>(
+    ctx: RequestContext,
+    input: {
+      key: string | undefined;
+      routeKey: string;
+      fingerprint: unknown;
+      unitOfWork: UnitOfWork;
+      ttlMs?: number;
+      operation: (
+        tx: TransactionContext,
+      ) => Promise<{ statusCode?: number; body: T; resourceId?: string }>;
+    },
+  ): Promise<IdempotencyResult<T>> {
+    const record = this.buildRecord(ctx, input);
+
+    const owned = await this.reserveOrRecover(record);
+    if (!owned) return await this.resolveExisting<T>(record);
+
+    try {
+      const result = await input.unitOfWork.withTransaction(async (tx) => {
+        const operationResult = await input.operation(tx);
+        await this.completeWithinTransaction(
+          record,
+          operationResult.statusCode ?? 200,
+          operationResult.body,
+          tx,
+          operationResult.resourceId,
+        );
+        return operationResult;
+      });
+      return { statusCode: result.statusCode ?? 200, body: result.body, replayed: false };
+    } catch (error) {
+      await this.markFailed(record).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async completeWithinTransaction(
+    identity: { actorId: string; routeKey: string; key: string; requestHash?: string },
+    responseStatus: number,
+    responseBody: unknown,
+    tx: TransactionContext,
+    resourceId?: string,
+  ): Promise<void> {
+    const result = await this.records.updateOne(
+      {
+        actorId: identity.actorId,
+        routeKey: identity.routeKey,
+        key: identity.key,
+        state: 'PROCESSING',
+        ...(identity.requestHash ? { requestHash: identity.requestHash } : {}),
+      },
+      {
+        $set: {
+          state: 'COMPLETED',
+          responseStatus,
+          responseBody,
+          ...(resourceId ? { resourceId } : {}),
+          updatedAt: new Date(),
+        },
+      },
+      { session: tx.session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new AppError({
+        code: 'IDEMPOTENCY_COMPLETION_CONFLICT',
+        httpStatus: 409,
+        message: 'The idempotency command state changed before completion.',
+      });
+    }
+  }
+
+  private buildRecord(
+    ctx: RequestContext,
+    input: { key: string | undefined; routeKey: string; fingerprint: unknown; ttlMs?: number },
+  ): IdempotencyRecordDocument {
     if (!input.key?.trim()) {
       throw new AppError({
         code: 'IDEMPOTENCY_KEY_REQUIRED',
@@ -60,8 +152,7 @@ export class IdempotencyService {
     }
 
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + (input.ttlMs ?? 24 * 60 * 60 * 1000));
-    const record: IdempotencyRecordDocument = {
+    return {
       actorId: ctx.userId,
       routeKey: input.routeKey,
       key: input.key.trim(),
@@ -69,44 +160,14 @@ export class IdempotencyService {
       state: 'PROCESSING',
       createdAt: now,
       updatedAt: now,
-      expiresAt,
+      expiresAt: new Date(now.getTime() + (input.ttlMs ?? 24 * 60 * 60 * 1000)),
     };
-
-    const reserved = await this.reserve(record);
-    if (!reserved) {
-      return await this.resolveExisting<T>(record);
-    }
-
-    try {
-      const result = await input.operation();
-      await this.complete(record, result.statusCode ?? 200, result.body, result.resourceId);
-      return { statusCode: result.statusCode ?? 200, body: result.body, replayed: false };
-    } catch (error) {
-      await this.markFailed(record).catch(() => undefined);
-      throw error;
-    }
   }
 
-  async completeWithinTransaction(
-    identity: { actorId: string; routeKey: string; key: string },
-    responseStatus: number,
-    responseBody: unknown,
-    tx: TransactionContext,
-    resourceId?: string,
-  ): Promise<void> {
-    await this.records.updateOne(
-      identity,
-      {
-        $set: {
-          state: 'COMPLETED',
-          responseStatus,
-          responseBody,
-          ...(resourceId ? { resourceId } : {}),
-          updatedAt: new Date(),
-        },
-      },
-      { session: tx.session },
-    );
+  private async reserveOrRecover(record: IdempotencyRecordDocument): Promise<boolean> {
+    const reserved = await this.reserve(record);
+    if (reserved) return true;
+    return (await this.recoverFailed(record)) || (await this.recoverStaleProcessing(record));
   }
 
   private async reserve(record: IdempotencyRecordDocument): Promise<boolean> {
@@ -165,6 +226,49 @@ export class IdempotencyService {
       httpStatus: 409,
       message: 'The previous idempotent attempt failed. Use a new Idempotency-Key.',
     });
+  }
+
+  private async recoverStaleProcessing(record: IdempotencyRecordDocument): Promise<boolean> {
+    const now = new Date();
+    const staleBefore = new Date(now.getTime() - this.processingStaleMs);
+    const result = await this.records.updateOne(
+      {
+        actorId: record.actorId,
+        routeKey: record.routeKey,
+        key: record.key,
+        requestHash: record.requestHash,
+        state: 'PROCESSING',
+        updatedAt: { $lte: staleBefore },
+      },
+      {
+        $set: {
+          updatedAt: now,
+          expiresAt: record.expiresAt,
+        },
+      },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  private async recoverFailed(record: IdempotencyRecordDocument): Promise<boolean> {
+    const now = new Date();
+    const result = await this.records.updateOne(
+      {
+        actorId: record.actorId,
+        routeKey: record.routeKey,
+        key: record.key,
+        requestHash: record.requestHash,
+        state: 'FAILED',
+      },
+      {
+        $set: {
+          state: 'PROCESSING',
+          updatedAt: now,
+          expiresAt: record.expiresAt,
+        },
+      },
+    );
+    return result.modifiedCount === 1;
   }
 
   private async complete(

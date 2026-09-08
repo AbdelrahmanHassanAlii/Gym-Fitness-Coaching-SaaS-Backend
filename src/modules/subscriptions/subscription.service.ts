@@ -31,6 +31,29 @@ import type {
 } from './subscription.types';
 
 const activeStaffRoles = new Set(['GYM_MANAGER', 'TRAINER', 'ASSISTANT_TRAINER', 'NUTRITIONIST']);
+const activeLifecycleMarkers: Array<keyof SubscriptionDocument> = [
+  'frozenAt',
+  'graceEndsAt',
+  'expiredAt',
+];
+
+const transitionsToActive = {
+  planChange: ['TRIAL', 'ACTIVE', 'GRACE_PERIOD'] as SubscriptionLifecycleStatus[],
+  reactivation: [
+    'PENDING_ACTIVATION',
+    'FROZEN',
+    'EXPIRED',
+    'GRACE_PERIOD',
+  ] as SubscriptionLifecycleStatus[],
+  paymentApproval: [
+    'PENDING_ACTIVATION',
+    'TRIAL',
+    'ACTIVE',
+    'GRACE_PERIOD',
+    'FROZEN',
+    'EXPIRED',
+  ] as SubscriptionLifecycleStatus[],
+};
 
 export class EntitlementService {
   constructor(
@@ -147,12 +170,13 @@ export class SubscriptionApplicationService {
       paidAt?: string;
       notes?: string;
     },
+    tx?: TransactionContext,
   ) {
     const actorId = actorObjectId(ctx);
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     await this.assertWorkspaceExists(id);
     const now = new Date();
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const subscription = await this.subscriptions.ensurePendingActivation(id, now, tx);
       const payment = await this.payments.create(
         {
@@ -188,8 +212,9 @@ export class SubscriptionApplicationService {
   async createPlan(
     ctx: RequestContext,
     input: { key: string; customerType: 'INDIVIDUAL_TRAINER' | 'GYM'; name: string },
+    tx?: TransactionContext,
   ) {
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const plan = await this.plans.create(
         {
           key: input.key.trim(),
@@ -252,9 +277,10 @@ export class SubscriptionApplicationService {
       trialDays?: number;
       effectiveFrom: string;
     },
+    tx?: TransactionContext,
   ) {
     const id = objectId(planId, 'SUBSCRIPTION_PLAN_NOT_FOUND');
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const version = await this.plans.createVersion(
         compact({
           planId: id,
@@ -318,16 +344,19 @@ export class SubscriptionApplicationService {
       effectiveFrom: string;
       trialDays?: number;
     },
+    tx?: TransactionContext,
   ) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
-    const planVersion = await this.requirePlanVersion(
+    await this.assertWorkspaceExists(id);
+    const planVersion = await this.requireEligiblePlanVersion(
       objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
+      input.billingPeriod,
     );
     const now = new Date();
     const effectiveFrom = new Date(input.effectiveFrom);
     const trialDays = input.trialDays ?? planVersion.trialDefaults?.days;
     if (!trialDays || trialDays < 1) throw invalid('SUBSCRIPTION_TRIAL_DAYS_REQUIRED');
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const subscription = await this.subscriptions.ensurePendingActivation(id, now, tx);
       if (subscription.lifecycleStatus !== 'PENDING_ACTIVATION') {
         throw conflict('SUBSCRIPTION_TRIAL_INVALID');
@@ -335,6 +364,7 @@ export class SubscriptionApplicationService {
       const result = await this.subscriptions.attachTerms(
         id,
         input.expectedVersion,
+        ['PENDING_ACTIVATION'],
         {
           subscriptionId: subscription._id,
           workspaceId: id,
@@ -353,6 +383,7 @@ export class SubscriptionApplicationService {
           startedAt: effectiveFrom,
           expiresAt: addDays(effectiveFrom, trialDays),
         },
+        activeLifecycleMarkers,
         tx,
       );
       await this.writeAudit(ctx, id, 'TrialStarted', result.subscription._id, 'start_trial', tx);
@@ -369,10 +400,13 @@ export class SubscriptionApplicationService {
     workspaceId: string,
     input: ChangeTermsInput,
     source: 'UPGRADE' | 'DOWNGRADE' | 'ADMIN_OVERRIDE',
+    tx?: TransactionContext,
   ) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
-    const planVersion = await this.requirePlanVersion(
+    await this.assertWorkspaceExists(id);
+    const planVersion = await this.requireEligiblePlanVersion(
       objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
+      input.billingPeriod,
     );
     return await this.createTermsSnapshot(
       ctx,
@@ -381,26 +415,43 @@ export class SubscriptionApplicationService {
       input,
       source,
       'SubscriptionTermsChanged',
+      transitionsToActive.planChange,
+      tx,
     );
   }
 
-  async freeze(ctx: RequestContext, workspaceId: string, input: { expectedVersion: number }) {
+  async freeze(
+    ctx: RequestContext,
+    workspaceId: string,
+    input: { expectedVersion: number },
+    tx?: TransactionContext,
+  ) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    await this.assertWorkspaceExists(id);
     return await this.transitionSubscription(
       ctx,
-      workspaceId,
+      id,
       input.expectedVersion,
       ['TRIAL', 'ACTIVE', 'GRACE_PERIOD'],
       'FROZEN',
       { frozenAt: new Date() },
       'SubscriptionFrozen',
       'freeze',
+      tx,
     );
   }
 
-  async reactivate(ctx: RequestContext, workspaceId: string, input: ChangeTermsInput) {
+  async reactivate(
+    ctx: RequestContext,
+    workspaceId: string,
+    input: ChangeTermsInput,
+    tx?: TransactionContext,
+  ) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
-    const planVersion = await this.requirePlanVersion(
+    await this.assertWorkspaceExists(id);
+    const planVersion = await this.requireEligiblePlanVersion(
       objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
+      input.billingPeriod,
     );
     return await this.createTermsSnapshot(
       ctx,
@@ -409,19 +460,29 @@ export class SubscriptionApplicationService {
       input,
       'PURCHASE',
       'SubscriptionActivated',
+      transitionsToActive.reactivation,
+      tx,
     );
   }
 
-  async cancel(ctx: RequestContext, workspaceId: string, input: { expectedVersion: number }) {
+  async cancel(
+    ctx: RequestContext,
+    workspaceId: string,
+    input: { expectedVersion: number },
+    tx?: TransactionContext,
+  ) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    await this.assertWorkspaceExists(id);
     return await this.transitionSubscription(
       ctx,
-      workspaceId,
+      id,
       input.expectedVersion,
       ['PENDING_ACTIVATION', 'TRIAL', 'ACTIVE', 'GRACE_PERIOD', 'FROZEN', 'EXPIRED'],
       'CANCELLED',
       { cancelledAt: new Date() },
       'SubscriptionCancelled',
       'cancel',
+      tx,
     );
   }
 
@@ -439,14 +500,17 @@ export class SubscriptionApplicationService {
     ctx: RequestContext,
     paymentId: string,
     input: ChangeTermsInput & { paymentExpectedVersion: number },
+    tx?: TransactionContext,
   ) {
     const id = objectId(paymentId, 'PAYMENT_NOT_FOUND');
     const existing = await this.payments.findById(id);
     if (!existing) throw notFound('PAYMENT_NOT_FOUND');
-    const planVersion = await this.requirePlanVersion(
+    const planVersion = await this.requireEligiblePlanVersion(
       objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
+      input.billingPeriod,
     );
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    await this.assertWorkspaceExists(existing.workspaceId);
+    return await this.withTransaction(tx, async (tx) => {
       const payment = await this.payments.approve(
         id,
         input.paymentExpectedVersion,
@@ -461,6 +525,7 @@ export class SubscriptionApplicationService {
         input,
         'PURCHASE',
         'PaymentApproved',
+        transitionsToActive.paymentApproval,
         tx,
       );
       await this.writeAudit(
@@ -499,9 +564,10 @@ export class SubscriptionApplicationService {
     ctx: RequestContext,
     paymentId: string,
     input: { expectedVersion: number; reason: string },
+    tx?: TransactionContext,
   ) {
     const id = objectId(paymentId, 'PAYMENT_NOT_FOUND');
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const payment = await this.payments.reject(
         id,
         input.expectedVersion,
@@ -634,19 +700,22 @@ export class SubscriptionApplicationService {
     input: ChangeTermsInput,
     source: SubscriptionTermSource,
     eventType: string,
+    allowedSources: SubscriptionLifecycleStatus[],
+    tx?: TransactionContext,
   ) {
-    return await this.unitOfWork.withTransaction(
-      async (tx) =>
-        await this.createTermsSnapshotInTransaction(
-          ctx,
-          workspaceId,
-          planVersion,
-          input,
-          source,
-          eventType,
-          tx,
-        ),
-    );
+    return await this.withTransaction(tx, async (tx) => {
+      const result = await this.createTermsSnapshotInTransaction(
+        ctx,
+        workspaceId,
+        planVersion,
+        input,
+        source,
+        eventType,
+        allowedSources,
+        tx,
+      );
+      return result.response;
+    });
   }
 
   private async createTermsSnapshotInTransaction(
@@ -656,6 +725,7 @@ export class SubscriptionApplicationService {
     input: ChangeTermsInput,
     source: SubscriptionTermSource,
     eventType: string,
+    allowedSources: SubscriptionLifecycleStatus[],
     tx: TransactionContext,
   ) {
     const subscription = await this.subscriptions.ensurePendingActivation(
@@ -668,6 +738,7 @@ export class SubscriptionApplicationService {
     const result = await this.subscriptions.attachTerms(
       workspaceId,
       input.expectedVersion,
+      allowedSources,
       {
         subscriptionId: subscription._id,
         workspaceId,
@@ -685,6 +756,7 @@ export class SubscriptionApplicationService {
         startedAt: subscription.startedAt ?? effectiveFrom,
         ...(effectiveTo ? { expiresAt: effectiveTo } : {}),
       },
+      effectiveTo ? activeLifecycleMarkers : [...activeLifecycleMarkers, 'expiresAt'],
       tx,
     );
     await this.writeAudit(ctx, workspaceId, eventType, result.subscription._id, 'change_terms', tx);
@@ -708,27 +780,28 @@ export class SubscriptionApplicationService {
 
   private async transitionSubscription(
     ctx: RequestContext,
-    workspaceId: string,
+    workspaceId: ObjectId,
     expectedVersion: number,
     from: SubscriptionLifecycleStatus[],
     to: SubscriptionLifecycleStatus,
     patch: Partial<SubscriptionDocument>,
     eventType: string,
     action: string,
+    tx?: TransactionContext,
   ) {
-    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    return await this.withTransaction(tx, async (tx) => {
       const subscription = await this.subscriptions.transition(
-        id,
+        workspaceId,
         expectedVersion,
         from,
         to,
         patch,
+        [],
         new Date(),
         tx,
       );
-      await this.writeAudit(ctx, id, eventType, subscription._id, action, tx);
-      await this.writeOutbox(ctx, id, eventType, 'subscription', subscription._id, tx);
+      await this.writeAudit(ctx, workspaceId, eventType, subscription._id, action, tx);
+      await this.writeOutbox(ctx, workspaceId, eventType, 'subscription', subscription._id, tx);
       return { subscription: safeSubscription(subscription) };
     });
   }
@@ -747,6 +820,7 @@ export class SubscriptionApplicationService {
         [subscription.lifecycleStatus],
         to,
         patch,
+        [],
         now,
         tx,
       );
@@ -785,15 +859,27 @@ export class SubscriptionApplicationService {
     return plan;
   }
 
-  private async requirePlanVersion(versionId: ObjectId) {
-    const version = await this.plans.findVersionById(versionId);
-    if (!version) throw notFound('SUBSCRIPTION_PLAN_VERSION_NOT_FOUND');
-    return version;
+  private async requireEligiblePlanVersion(versionId: ObjectId, billingPeriod: BillingPeriod) {
+    const result = await this.plans.findVersionWithPlan(versionId);
+    if (!result) throw notFound('SUBSCRIPTION_PLAN_VERSION_NOT_FOUND');
+    if (!result.plan.active) throw invalid('SUBSCRIPTION_PLAN_NOT_ELIGIBLE');
+    if (!result.version.billingOptions.includes(billingPeriod)) {
+      throw invalid('SUBSCRIPTION_BILLING_PERIOD_NOT_AVAILABLE');
+    }
+    return result.version;
   }
 
   private async assertWorkspaceExists(workspaceId: ObjectId) {
     const workspace = await this.workspaces.findById(workspaceId);
     if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+  }
+
+  private async withTransaction<T>(
+    tx: TransactionContext | undefined,
+    operation: (tx: TransactionContext) => Promise<T>,
+  ): Promise<T> {
+    if (tx) return await operation(tx);
+    return await this.unitOfWork.withTransaction(operation);
   }
 
   private async writeAudit(

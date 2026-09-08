@@ -11,6 +11,7 @@ import { OutboxWriter } from '../src/core/events/outbox.writer';
 import { IdempotencyService } from '../src/core/idempotency/idempotency.service';
 import { migrations } from '../src/migrations';
 import { migration009Stage5ExistingWorkspaceBackfill } from '../src/migrations/009-stage5-existing-workspace-backfill';
+import { migration010Stage5WorkspaceUsageRevision } from '../src/migrations/010-stage5-workspace-usage-revision';
 import { MigrationRunner } from '../src/migrations/migration-runner';
 import {
   Permissions,
@@ -112,6 +113,7 @@ describe('Stage 5 quota concurrency', () => {
       activeStaff: 0,
       storageBytes: 0,
       reservedStorageBytes: 0,
+      revision: 0,
       calculatedAt: new Date(),
       updatedAt: new Date(),
     });
@@ -294,6 +296,27 @@ describe('Stage 5 existing workspace backfill', () => {
       lifecycleStatus: 'PENDING_ACTIVATION',
     });
   });
+
+  test('workspace usage revision migration initializes existing Stage 5 usage rows', async () => {
+    const workspaceId = new ObjectId();
+    const db = new FakeMigrationDb({
+      workspace_usage: [
+        {
+          _id: new ObjectId(),
+          workspaceId,
+          activeTrainees: 0,
+          activeStaff: 1,
+          storageBytes: 0,
+          reservedStorageBytes: 0,
+        },
+      ],
+    });
+
+    await migration010Stage5WorkspaceUsageRevision.up(db as never);
+    await migration010Stage5WorkspaceUsageRevision.up(db as never);
+
+    expect(db.collections.workspace_usage?.[0]).toMatchObject({ workspaceId, revision: 0 });
+  });
 });
 
 describe('Stage 5 corrective integration coverage', () => {
@@ -328,6 +351,7 @@ describe('Stage 5 corrective integration coverage', () => {
       activeStaff: 0,
       storageBytes: 0,
       reservedStorageBytes: 0,
+      revision: 0,
       calculatedAt: new Date(),
       updatedAt: new Date(),
     });
@@ -342,6 +366,7 @@ describe('Stage 5 corrective integration coverage', () => {
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
     expect(saved?.activeStaff).toBe(1);
+    expect(saved?.revision).toBe(1);
   });
 
   test('quota reservation rolls back with its surrounding transaction', async () => {
@@ -353,6 +378,7 @@ describe('Stage 5 corrective integration coverage', () => {
       activeStaff: 0,
       storageBytes: 0,
       reservedStorageBytes: 0,
+      revision: 0,
       calculatedAt: new Date(),
       updatedAt: new Date(),
     });
@@ -368,6 +394,71 @@ describe('Stage 5 corrective integration coverage', () => {
 
     const saved = await db.collection('workspace_usage').findOne({ workspaceId });
     expect(saved?.activeStaff).toBe(0);
+    expect(saved?.revision).toBe(0);
+  });
+
+  test('reconciliation stale repair cannot overwrite a live quota reservation', async () => {
+    const workspaceId = new ObjectId();
+    await db.collection('workspace_usage').insertOne({
+      _id: new ObjectId(),
+      workspaceId,
+      activeTrainees: 0,
+      activeStaff: 0,
+      storageBytes: 0,
+      reservedStorageBytes: 0,
+      revision: 0,
+      calculatedAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const usage = new WorkspaceUsageRepository(database);
+
+    const snapshot = await usage.findByWorkspaceId(workspaceId);
+    expect(snapshot?.revision).toBe(0);
+    const staleCounters = { activeTrainees: 0, activeStaff: 0, storageBytes: 0 };
+
+    await usage.reserveStaff(workspaceId, 1);
+    const staleRepair = await usage.repairCalculatedIfRevision(
+      workspaceId,
+      snapshot?.revision ?? -1,
+      staleCounters,
+    );
+    const saved = await db.collection('workspace_usage').findOne({ workspaceId });
+
+    expect(staleRepair).toBeNull();
+    expect(saved).toMatchObject({ activeStaff: 1, revision: 1 });
+    await expect(usage.reserveStaff(workspaceId, 1)).rejects.toMatchObject({
+      code: 'STAFF_LIMIT_EXCEEDED',
+    });
+    expect((await db.collection('workspace_usage').findOne({ workspaceId }))?.activeStaff).toBe(1);
+  });
+
+  test('successful reconciliation repair advances revision without touching reservations', async () => {
+    const workspaceId = new ObjectId();
+    await db.collection('workspace_usage').insertOne({
+      _id: new ObjectId(),
+      workspaceId,
+      activeTrainees: 0,
+      activeStaff: 2,
+      storageBytes: 0,
+      reservedStorageBytes: 12,
+      revision: 0,
+      calculatedAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const usage = new WorkspaceUsageRepository(database);
+    const snapshot = await usage.findByWorkspaceId(workspaceId);
+
+    const repaired = await usage.repairCalculatedIfRevision(workspaceId, snapshot?.revision ?? -1, {
+      activeTrainees: 0,
+      activeStaff: 0,
+      storageBytes: 0,
+    });
+
+    expect(repaired).toMatchObject({
+      activeStaff: 0,
+      reservedStorageBytes: 12,
+      revision: 1,
+    });
   });
 
   test('idempotent transaction commits commercial state and replay result together', async () => {
@@ -927,6 +1018,94 @@ describe('Stage 5 corrective integration coverage', () => {
       }),
     ).resolves.toMatchObject({ subscription: { lifecycleStatus: 'TRIAL' } });
   });
+
+  test('start trial uses only plan-version trial duration and snapshots commercial terms', async () => {
+    const service = subscriptionService(database);
+    const seeded = await seedWorkspacePlanSubscription(database, 'PENDING_ACTIVATION', {
+      trialDays: 7,
+    });
+    const effectiveFrom = new Date('2026-09-08T00:00:00.000Z');
+
+    await expect(
+      service.startTrial(ctxFixture(), seeded.workspaceId.toHexString(), {
+        expectedVersion: 0,
+        planVersionId: seeded.versionId.toHexString(),
+        billingPeriod: 'MONTHLY',
+        effectiveFrom: effectiveFrom.toISOString(),
+      }),
+    ).resolves.toMatchObject({
+      subscription: {
+        lifecycleStatus: 'TRIAL',
+        expiresAt: '2026-09-15T00:00:00.000Z',
+      },
+      currentTerms: {
+        planVersionId: seeded.versionId.toHexString(),
+        billingPeriod: 'MONTHLY',
+        effectiveFrom: '2026-09-08T00:00:00.000Z',
+        effectiveTo: '2026-09-15T00:00:00.000Z',
+        source: 'TRIAL',
+        enabledFeatures: ['training'],
+        limits: { activeTrainees: 10, activeStaff: 5, storageBytes: 1000 },
+      },
+    });
+  });
+
+  test('public start-trial route rejects arbitrary trialDays override before service execution', async () => {
+    const ids = idsFixture();
+    let called = false;
+    const app = await buildApp(
+      routeContainer(ids, {
+        async authorize() {
+          return { allowed: true };
+        },
+        subscriptions: {
+          async startTrial() {
+            called = true;
+            return {};
+          },
+        },
+      }),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/platform/workspaces/${ids.workspaceId}/subscription/start-trial`,
+      headers: {
+        authorization: 'Bearer valid',
+        'idempotency-key': 'trial-days-override',
+      },
+      payload: {
+        expectedVersion: 0,
+        planVersionId: new ObjectId().toHexString(),
+        billingPeriod: 'MONTHLY',
+        effectiveFrom: new Date().toISOString(),
+        trialDays: 365,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(called).toBe(false);
+    await app.close();
+  });
+
+  test('plan version without trial defaults rejects startTrial', async () => {
+    const service = subscriptionService(database);
+    const seeded = await seedWorkspacePlanSubscription(database, 'PENDING_ACTIVATION', {
+      trialDays: null,
+    });
+
+    await expect(
+      service.startTrial(ctxFixture(), seeded.workspaceId.toHexString(), {
+        expectedVersion: 0,
+        planVersionId: seeded.versionId.toHexString(),
+        billingPeriod: 'MONTHLY',
+        effectiveFrom: new Date().toISOString(),
+      }),
+    ).rejects.toMatchObject({ code: 'SUBSCRIPTION_TRIAL_DAYS_REQUIRED' });
+    expect(
+      await db.collection('subscription_terms').countDocuments({ workspaceId: seeded.workspaceId }),
+    ).toBe(0);
+  });
 });
 
 function entitlementFor(
@@ -964,6 +1143,7 @@ function entitlementFor(
     activeStaff: 0,
     storageBytes: 0,
     reservedStorageBytes: 0,
+    revision: 0,
     calculatedAt: new Date(),
     updatedAt: new Date(),
   };
@@ -1090,7 +1270,11 @@ function subscriptionService(
 
 async function seedPlan(
   database: Pick<Database, 'db'>,
-  options: { billingOptions?: Array<'MONTHLY' | 'YEARLY'>; active?: boolean } = {},
+  options: {
+    billingOptions?: Array<'MONTHLY' | 'YEARLY'>;
+    active?: boolean;
+    trialDays?: number | null;
+  } = {},
 ) {
   const planId = new ObjectId();
   const versionId = new ObjectId();
@@ -1113,7 +1297,7 @@ async function seedPlan(
     billingOptions: options.billingOptions ?? ['MONTHLY', 'YEARLY'],
     defaultLimits: { activeTrainees: 10, activeStaff: 5, storageBytes: 1000 },
     features: { training: true },
-    trialDefaults: { days: 7 },
+    ...(options.trialDays !== null ? { trialDefaults: { days: options.trialDays ?? 7 } } : {}),
     effectiveFrom: now,
     createdBy: new ObjectId(),
     createdAt: now,
@@ -1130,15 +1314,21 @@ async function seedWorkspacePlanSubscription(
     expiredAt?: Date;
     planActive?: boolean;
     billingOptions?: Array<'MONTHLY' | 'YEARLY'>;
+    trialDays?: number | null;
   } = {},
 ) {
   const workspaceId = new ObjectId();
   const ownerUserId = new ObjectId();
   const subscriptionId = new ObjectId();
   const now = new Date();
-  const planInput: { active?: boolean; billingOptions?: Array<'MONTHLY' | 'YEARLY'> } = {};
+  const planInput: {
+    active?: boolean;
+    billingOptions?: Array<'MONTHLY' | 'YEARLY'>;
+    trialDays?: number | null;
+  } = {};
   if (options.planActive !== undefined) planInput.active = options.planActive;
   if (options.billingOptions !== undefined) planInput.billingOptions = options.billingOptions;
+  if (options.trialDays !== undefined) planInput.trialDays = options.trialDays;
   const plan = await seedPlan(database, planInput);
   await database.db.collection('workspaces').insertOne({
     _id: workspaceId,
@@ -1169,6 +1359,7 @@ async function seedWorkspacePlanSubscription(
     activeStaff: 0,
     storageBytes: 0,
     reservedStorageBytes: 0,
+    revision: 0,
     calculatedAt: now,
     updatedAt: now,
   });
@@ -1259,6 +1450,7 @@ class FakeUsageCollection {
       if (!(this.document.activeStaff < lt)) return { modifiedCount: 0 };
     }
     if (update.$inc?.activeStaff) this.document.activeStaff += update.$inc.activeStaff;
+    if (update.$inc?.revision) this.document.revision += update.$inc.revision;
     return { modifiedCount: 1 };
   }
 
@@ -1334,6 +1526,23 @@ class FakeMigrationDb {
           ),
         );
         if (!existing && options?.upsert && update.$setOnInsert) rows.push(update.$setOnInsert);
+      },
+      updateMany: async (
+        filter: Record<string, unknown>,
+        update: { $set?: Record<string, unknown> },
+      ) => {
+        for (const row of rows) {
+          if (
+            Object.entries(filter).every(([key, value]) => {
+              if (typeof value === 'object' && value !== null && '$exists' in value) {
+                return (row[key] !== undefined) === Boolean(value.$exists);
+              }
+              return row[key]?.toString() === value?.toString();
+            })
+          ) {
+            Object.assign(row, update.$set);
+          }
+        }
       },
     };
   }

@@ -50,10 +50,12 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const identity = new IdentityRepository(database);
   const authSessions = new AuthSessionRepository(database);
   const authChallenges = new AuthChallengeRepository(database);
+  const authMfaMethods = new AuthMfaMethodRepository(database);
   const authRateLimits = new AuthRateLimitRepository(database);
   const authSecurityEvents = new AuthSecurityEventWriter(database);
   const passwordHasher = new PasswordHasher();
   const jwt = new JwtService(config);
+  const totp = new TotpService(config);
   const refreshTokens = new RefreshTokenService(database, credentialDigests);
 
   return {
@@ -66,31 +68,28 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     identity,
     authSessions,
     authChallenges,
-    authMfaMethods: new AuthMfaMethodRepository(database),
+    authMfaMethods,
     authRateLimits,
     authSecurityEvents,
     credentialDigests,
     passwordHasher,
     jwt,
-    totp: new TotpService(config),
+    totp,
     refreshTokens,
-    mfa: new MfaService(
-      new UnitOfWork(database),
-      new AuthMfaMethodRepository(database),
-      new AuthSecurityEventWriter(database),
-      credentialDigests,
-    ),
+    mfa: new MfaService(unitOfWork, authMfaMethods, authSecurityEvents, credentialDigests),
     auth: new AuthApplicationService(
       config,
       unitOfWork,
       identity,
       authSessions,
       authChallenges,
+      authMfaMethods,
       authRateLimits,
       authSecurityEvents,
       passwordHasher,
       credentialDigests,
       jwt,
+      totp,
       refreshTokens,
     ),
   };

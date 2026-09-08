@@ -9,16 +9,26 @@ import {
   refreshCookieName,
   setRefreshCookie,
 } from './auth.cookies';
+import { requireAuth } from './auth.middleware';
 import {
   AuthTokenResponse,
   ErrorResponse,
   ForgotPasswordBody,
   LoginBody,
+  LoginResponse,
+  MfaDisableBody,
+  MfaLoginVerifyBody,
+  MfaRecoveryCodesRegenerateBody,
+  MfaStatusResponse,
+  MfaStepUpStartResponse,
+  MfaStepUpVerifyBody,
   RefreshBody,
   RegisterBody,
   ResendVerificationBody,
   ResetPasswordBody,
   SuccessResponse,
+  TotpConfirmBody,
+  TotpSetupResponse,
   VerifyBody,
 } from './auth.schemas';
 
@@ -61,7 +71,7 @@ export async function registerAuthRoutes(
       schema: {
         tags: ['Auth'],
         body: LoginBody,
-        response: { 200: AuthTokenResponse, 401: ErrorResponse, 429: ErrorResponse },
+        response: { 200: LoginResponse, 401: ErrorResponse, 429: ErrorResponse },
       },
     },
     async (request, reply) => {
@@ -69,6 +79,9 @@ export async function registerAuthRoutes(
         ...request.body,
         metadata: metadata(request),
       });
+      if ('mfaChallengeToken' in result) {
+        return reply.send({ data: result });
+      }
       if (request.body.clientType === 'WEB' && result.refreshToken) {
         setRefreshCookie(reply, container.config, result.refreshToken);
       }
@@ -77,6 +90,184 @@ export async function registerAuthRoutes(
         data: request.body.clientType === 'WEB' ? body : result,
       });
     },
+  );
+
+  app.post<{ Body: Static<typeof MfaLoginVerifyBody> }>(
+    '/api/v1/auth/mfa/login/verify',
+    {
+      schema: {
+        tags: ['Auth'],
+        body: MfaLoginVerifyBody,
+        response: { 200: AuthTokenResponse, 401: ErrorResponse, 409: ErrorResponse },
+      },
+    },
+    async (request, reply) => {
+      const result = await container.auth.completeMfaLogin({
+        ...request.body,
+        metadata: metadata(request),
+      });
+      const { clientType, refreshToken: _refreshToken, ...body } = result;
+      if (clientType === 'WEB' && result.refreshToken) {
+        setRefreshCookie(reply, container.config, result.refreshToken);
+      }
+      return reply.send({
+        data: clientType === 'WEB' ? body : stripInternalClientType(result),
+      });
+    },
+  );
+
+  app.get(
+    '/api/v1/auth/mfa',
+    {
+      preHandler: requireAuth({ allowRestricted: true }),
+      schema: {
+        tags: ['Auth'],
+        response: { 200: MfaStatusResponse, 401: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.mfaStatus(request.ctx),
+    }),
+  );
+
+  app.post(
+    '/api/v1/auth/mfa/totp/setup',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        response: {
+          200: TotpSetupResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.startTotpSetup({
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
+  );
+
+  app.post<{ Body: Static<typeof TotpConfirmBody> }>(
+    '/api/v1/auth/mfa/totp/confirm',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        body: TotpConfirmBody,
+        response: {
+          200: SuccessResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.confirmTotpSetup({
+        ...request.body,
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
+  );
+
+  app.post(
+    '/api/v1/auth/mfa/step-up',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        response: {
+          200: MfaStepUpStartResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.startStepUp({
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
+  );
+
+  app.post<{ Body: Static<typeof MfaStepUpVerifyBody> }>(
+    '/api/v1/auth/mfa/step-up/verify',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        body: MfaStepUpVerifyBody,
+        response: {
+          200: SuccessResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.verifyStepUp({
+        ...request.body,
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
+  );
+
+  app.post<{ Body: Static<typeof MfaRecoveryCodesRegenerateBody> }>(
+    '/api/v1/auth/mfa/recovery-codes/regenerate',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        body: MfaRecoveryCodesRegenerateBody,
+        response: {
+          200: SuccessResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.regenerateRecoveryCodes({
+        ...request.body,
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
+  );
+
+  app.post<{ Body: Static<typeof MfaDisableBody> }>(
+    '/api/v1/auth/mfa/disable',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Auth'],
+        body: MfaDisableBody,
+        response: {
+          200: SuccessResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.auth.disableMfa({
+        ...request.body,
+        ctx: request.ctx,
+        metadata: metadata(request),
+      }),
+    }),
   );
 
   app.post<{ Body: Static<typeof RefreshBody> }>(
@@ -232,4 +423,11 @@ function invalidRefresh(): AppError {
     httpStatus: 401,
     message: 'The refresh token is invalid.',
   });
+}
+
+function stripInternalClientType<T extends { clientType?: unknown }>(
+  result: T,
+): Omit<T, 'clientType'> {
+  const { clientType: _clientType, ...body } = result;
+  return body;
 }

@@ -39,10 +39,24 @@ export const AuthTokenResponse = Type.Object({
   }),
 });
 
+export const LoginResponse = Type.Object({
+  data: Type.Union([
+    AuthTokenResponse.properties.data,
+    Type.Object({
+      status: Type.Literal('MFA_REQUIRED'),
+      mfaChallengeToken: Type.String(),
+      availableMethods: Type.Array(
+        Type.Union([Type.Literal('TOTP'), Type.Literal('RECOVERY_CODE')]),
+      ),
+    }),
+  ]),
+});
+
 export const SuccessResponse = Type.Object({
   data: Type.Object({
     success: Type.Literal(true),
     accessToken: Type.Optional(Type.String()),
+    recoveryCodes: Type.Optional(Type.Array(Type.String())),
     debugChallenge: Type.Optional(
       Type.Object({
         challengeId: Type.String(),
@@ -97,4 +111,49 @@ export const ResetPasswordBody = Type.Object({
   challengeId: Type.String(),
   code: Type.String({ minLength: 1 }),
   newPassword: Type.String({ minLength: 8 }),
+});
+
+const MfaFactorType = Type.Union([Type.Literal('TOTP'), Type.Literal('RECOVERY_CODE')]);
+
+export const MfaLoginVerifyBody = Type.Object({
+  mfaChallengeToken: Type.String({ minLength: 1 }),
+  factorType: MfaFactorType,
+  credential: Type.String({ minLength: 1 }),
+});
+
+export const TotpSetupResponse = Type.Object({
+  data: Type.Object({
+    secret: Type.String(),
+    provisioningUri: Type.String(),
+  }),
+});
+
+export const TotpConfirmBody = Type.Object({
+  code: Type.String({ minLength: 1 }),
+});
+
+export const MfaStatusResponse = Type.Object({
+  data: Type.Object({
+    totpEnabled: Type.Boolean(),
+    mfaSatisfied: Type.Boolean(),
+    recoveryCodesRemaining: Type.Number(),
+  }),
+});
+
+export const MfaStepUpStartResponse = Type.Object({
+  data: Type.Object({
+    mfaChallengeToken: Type.String(),
+    availableMethods: Type.Array(MfaFactorType),
+  }),
+});
+
+export const MfaStepUpVerifyBody = MfaLoginVerifyBody;
+
+export const MfaRecoveryCodesRegenerateBody = Type.Object({
+  code: Type.String({ minLength: 1 }),
+});
+
+export const MfaDisableBody = Type.Object({
+  factorType: MfaFactorType,
+  credential: Type.String({ minLength: 1 }),
 });

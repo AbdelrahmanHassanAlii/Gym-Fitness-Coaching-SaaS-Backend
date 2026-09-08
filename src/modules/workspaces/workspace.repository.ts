@@ -121,6 +121,7 @@ export class WorkspaceMembershipRepository {
       joinedAt: now,
       engagementPeriods: [{ startedAt: now }],
       permissionProfileIds: [],
+      accessVersion: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -254,6 +255,58 @@ export class WorkspaceMembershipRepository {
         message: 'The workspace membership cannot make the requested transition.',
       });
     }
+    return result;
+  }
+
+  async replacePermissionProfiles(
+    workspaceId: ObjectId,
+    membershipId: ObjectId,
+    expectedVersion: number,
+    permissionProfileIds: ObjectId[],
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: membershipId, workspaceId, status: 'ACTIVE', accessVersion: expectedVersion },
+      {
+        $set: { permissionProfileIds, updatedAt: now },
+        $inc: { accessVersion: 1 },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+
+    if (!result) {
+      throw new AppError({
+        code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'The workspace membership permission profile set has changed.',
+      });
+    }
+
+    return result;
+  }
+
+  async bumpAccessVersion(
+    workspaceId: ObjectId,
+    membershipId: ObjectId,
+    expectedVersion: number,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: membershipId, workspaceId, status: 'ACTIVE', accessVersion: expectedVersion },
+      { $set: { updatedAt: now }, $inc: { accessVersion: 1 } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+
+    if (!result) {
+      throw new AppError({
+        code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'The workspace membership access state has changed.',
+      });
+    }
+
     return result;
   }
 }

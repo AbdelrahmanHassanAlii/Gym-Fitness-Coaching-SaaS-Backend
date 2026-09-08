@@ -76,6 +76,7 @@ export interface WorkspaceMembershipDocument {
   endedAt?: Date;
   engagementPeriods: Array<{ startedAt: Date; endedAt?: Date }>;
   permissionProfileIds: ObjectId[];
+  accessVersion?: number;
   createdAt: Date;
   updatedAt: Date;
 }

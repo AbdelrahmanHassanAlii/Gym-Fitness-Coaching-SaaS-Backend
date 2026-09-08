@@ -995,6 +995,8 @@ function safePlatformMembership(membership: PlatformMembershipDocument) {
     id: membership._id.toHexString(),
     userId: membership.userId.toHexString(),
     status: membership.status,
+    permissionProfileIds: membership.permissionProfileIds.map((id) => id.toHexString()),
+    accessVersion: membership.accessVersion ?? 0,
     createdAt: membership.createdAt.toISOString(),
     updatedAt: membership.updatedAt.toISOString(),
     suspendedAt: membership.suspendedAt?.toISOString(),
@@ -1009,6 +1011,8 @@ function safeMembership(membership: WorkspaceMembershipDocument) {
     userId: membership.userId.toHexString(),
     roles: membership.roles,
     status: membership.status,
+    permissionProfileIds: membership.permissionProfileIds.map((id) => id.toHexString()),
+    accessVersion: membership.accessVersion ?? 0,
     joinedAt: membership.joinedAt.toISOString(),
     endedAt: membership.endedAt?.toISOString(),
     engagementPeriods: membership.engagementPeriods.map((period) => ({

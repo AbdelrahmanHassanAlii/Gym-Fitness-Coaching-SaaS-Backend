@@ -21,6 +21,7 @@ export class PlatformMembershipRepository {
       userId,
       status: 'ACTIVE',
       permissionProfileIds: [],
+      accessVersion: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -57,6 +58,16 @@ export class PlatformMembershipRepository {
     );
   }
 
+  async findById(
+    membershipId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<PlatformMembershipDocument | null> {
+    return await this.memberships.findOne(
+      { _id: membershipId },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
   async list(): Promise<PlatformMembershipDocument[]> {
     return await this.memberships.find({}).sort({ createdAt: -1 }).toArray();
   }
@@ -87,6 +98,56 @@ export class PlatformMembershipRepository {
         code: 'PLATFORM_MEMBERSHIP_TRANSITION_INVALID',
         httpStatus: 409,
         message: 'The Platform membership cannot make the requested transition.',
+      });
+    }
+
+    return result;
+  }
+
+  async replacePermissionProfiles(
+    membershipId: ObjectId,
+    expectedVersion: number,
+    permissionProfileIds: ObjectId[],
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<PlatformMembershipDocument> {
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: membershipId, status: 'ACTIVE', accessVersion: expectedVersion },
+      {
+        $set: { permissionProfileIds, updatedAt: now },
+        $inc: { accessVersion: 1 },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+
+    if (!result) {
+      throw new AppError({
+        code: 'PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'The Platform membership permission profile set has changed.',
+      });
+    }
+
+    return result;
+  }
+
+  async bumpAccessVersion(
+    membershipId: ObjectId,
+    expectedVersion: number,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<PlatformMembershipDocument> {
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: membershipId, status: 'ACTIVE', accessVersion: expectedVersion },
+      { $set: { updatedAt: now }, $inc: { accessVersion: 1 } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+
+    if (!result) {
+      throw new AppError({
+        code: 'PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'The Platform membership access state has changed.',
       });
     }
 

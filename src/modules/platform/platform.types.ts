@@ -8,6 +8,7 @@ export interface PlatformMembershipDocument {
   userId: ObjectId;
   status: PlatformMembershipStatus;
   permissionProfileIds: ObjectId[];
+  accessVersion?: number;
   createdAt: Date;
   updatedAt: Date;
   suspendedAt?: Date;

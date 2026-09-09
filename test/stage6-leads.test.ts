@@ -783,6 +783,9 @@ describe('Stage 6 owner activation integration', () => {
     const wrongUser = await issueOwnerChallenge(container, 'other-binding@example.com');
     const activationToken = requireOwnerToken(converted);
     await expectActivationDenied(app, activationToken, wrongUser);
+    await expect(
+      db.collection('auth_challenges').findOne({ _id: new ObjectId(wrongUser.challengeId) }),
+    ).resolves.toMatchObject({ attemptCount: 0 });
 
     const phoneChallenge = await issueOwnerChallenge(
       container,
@@ -790,6 +793,31 @@ describe('Stage 6 owner activation integration', () => {
       'PHONE_VERIFICATION',
     );
     await expectActivationDenied(app, activationToken, phoneChallenge);
+    await expect(
+      db.collection('auth_challenges').findOne({ _id: new ObjectId(phoneChallenge.challengeId) }),
+    ).resolves.toMatchObject({ attemptCount: 0 });
+
+    const workspace = await db
+      .collection('workspaces')
+      .findOne({ _id: new ObjectId(converted.workspace.id) });
+    const wrongIdentifierCode = '654321';
+    const wrongIdentifierChallenge = await container.authChallenges.create({
+      purpose: 'EMAIL_VERIFICATION',
+      userId: workspace?.ownerUserId,
+      normalizedEmail: 'not-binding-owner@example.com',
+      challengeDigest: container.credentialDigests.hashHighEntropySecret(wrongIdentifierCode),
+      digestContext: `EMAIL_VERIFICATION:${workspace?.ownerUserId?.toHexString()}:not-binding-owner@example.com`,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      maxAttempts: 5,
+      ipAddress: '127.0.0.1',
+    });
+    await expectActivationDenied(app, activationToken, {
+      challengeId: wrongIdentifierChallenge._id.toHexString(),
+      code: wrongIdentifierCode,
+    });
+    await expect(
+      db.collection('auth_challenges').findOne({ _id: wrongIdentifierChallenge._id }),
+    ).resolves.toMatchObject({ attemptCount: 0 });
 
     const consumed = await issueOwnerChallenge(container, 'binding-owner@example.com');
     await container.authChallenges.consume(new ObjectId(consumed.challengeId));
@@ -802,6 +830,100 @@ describe('Stage 6 owner activation integration', () => {
     await expectActivationDenied(app, activationToken, expired);
 
     await db.collection('users').deleteOne({ _id: other._id });
+  });
+
+  test('invalid owner activation attempts persist across aborted transactions and idempotency keys', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2 });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'attempts-owner@example.com',
+      phone: '+201000000106',
+    });
+    const challenge = await issueOwnerChallenge(container, 'attempts-owner@example.com');
+    const challengeId = new ObjectId(challenge.challengeId);
+    await db
+      .collection('auth_challenges')
+      .updateOne({ _id: challengeId }, { $set: { maxAttempts: 2, attemptCount: 0 } });
+    const wrongCode = challenge.code === '000000' ? '111111' : '000000';
+
+    for (const attempt of [1, 2]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/public/owner-activations/complete',
+        headers: { 'idempotency-key': `bad-code-${attempt}-${new ObjectId().toHexString()}` },
+        payload: {
+          token: converted.ownerInvitation.token,
+          verification: { challengeId: challenge.challengeId, code: wrongCode },
+          password: 'CustomerPass123!',
+        },
+      });
+      expect(response.statusCode).not.toBe(200);
+      const savedChallenge = await db.collection('auth_challenges').findOne({ _id: challengeId });
+      expect(savedChallenge).toMatchObject({ attemptCount: attempt });
+      expect(savedChallenge?.consumedAt).toBeUndefined();
+    }
+
+    const exhaustedCorrect = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': `correct-after-exhausted-${new ObjectId().toHexString()}` },
+      payload: {
+        token: converted.ownerInvitation.token,
+        verification: challenge,
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(exhaustedCorrect.statusCode).not.toBe(200);
+    const challengeAfterCorrect = await db
+      .collection('auth_challenges')
+      .findOne({ _id: challengeId });
+    const workspace = await db
+      .collection('workspaces')
+      .findOne({ _id: new ObjectId(converted.workspace.id) });
+    const user = await db.collection('users').findOne({ _id: workspace?.ownerUserId });
+    const membership = await db.collection('workspace_memberships').findOne({
+      workspaceId: new ObjectId(converted.workspace.id),
+      userId: workspace?.ownerUserId,
+    });
+
+    expect(challengeAfterCorrect).toMatchObject({ attemptCount: 2 });
+    expect(challengeAfterCorrect?.consumedAt).toBeUndefined();
+    expect(user).toMatchObject({ status: 'PENDING_ACTIVATION' });
+    expect(user?.passwordHash).toBeUndefined();
+    expect(membership).toMatchObject({ status: 'INVITED' });
+  });
+
+  test('concurrent invalid owner activation attempts are bounded by atomic challenge attempts', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2 });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'concurrent-attempts-owner@example.com',
+      phone: '+201000000107',
+    });
+    const challenge = await issueOwnerChallenge(container, 'concurrent-attempts-owner@example.com');
+    const challengeId = new ObjectId(challenge.challengeId);
+    await db
+      .collection('auth_challenges')
+      .updateOne({ _id: challengeId }, { $set: { maxAttempts: 2, attemptCount: 0 } });
+    const wrongCode = challenge.code === '222222' ? '333333' : '222222';
+
+    const responses = await Promise.all(
+      [0, 1, 2, 3].map((index) =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/public/owner-activations/complete',
+          headers: { 'idempotency-key': `concurrent-bad-${index}-${new ObjectId().toHexString()}` },
+          payload: {
+            token: converted.ownerInvitation.token,
+            verification: { challengeId: challenge.challengeId, code: wrongCode },
+            password: 'CustomerPass123!',
+          },
+        }),
+      ),
+    );
+
+    expect(responses.every((response) => response.statusCode !== 200)).toBe(true);
+    const savedChallenge = await db.collection('auth_challenges').findOne({ _id: challengeId });
+    expect(savedChallenge).toMatchObject({ attemptCount: 2 });
+    expect(savedChallenge?.consumedAt).toBeUndefined();
   });
 
   test('quota failure rolls back owner activation and can be retried after capacity is available', async () => {
@@ -845,6 +967,7 @@ describe('Stage 6 owner activation integration', () => {
 
     expect(userAfterFailure).toMatchObject({ status: 'PENDING_ACTIVATION' });
     expect(userAfterFailure?.passwordHash).toBeUndefined();
+    expect(challengeAfterFailure).toMatchObject({ attemptCount: 0 });
     expect(challengeAfterFailure?.consumedAt).toBeUndefined();
     expect(membershipAfterFailure).toMatchObject({ status: 'INVITED' });
     expect(invitationAfterFailure).toMatchObject({ status: 'PENDING' });
@@ -857,6 +980,23 @@ describe('Stage 6 owner activation integration', () => {
         aggregateId: membershipAfterFailure?._id,
       }),
     ).resolves.toBeNull();
+
+    const secondFailure = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': `quota-again-${new ObjectId().toHexString()}` },
+      payload: {
+        token: converted.ownerInvitation.token,
+        verification: challenge,
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(secondFailure.statusCode).toBe(403);
+    const challengeAfterSecondFailure = await db
+      .collection('auth_challenges')
+      .findOne({ _id: new ObjectId(challenge.challengeId) });
+    expect(challengeAfterSecondFailure).toMatchObject({ attemptCount: 0 });
+    expect(challengeAfterSecondFailure?.consumedAt).toBeUndefined();
 
     await db.collection('subscriptions').updateOne(
       { workspaceId },
@@ -879,6 +1019,62 @@ describe('Stage 6 owner activation integration', () => {
     expect(retry.statusCode).toBe(200);
     const usageAfterRetry = await db.collection('workspace_usage').findOne({ workspaceId });
     expect(usageAfterRetry).toMatchObject({ activeStaff: 1 });
+  });
+
+  test('stale valid owner activation preflight cannot consume after a concurrent bad attempt', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2 });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'stale-preflight-owner@example.com',
+      phone: '+201000000108',
+    });
+    const challenge = await issueOwnerChallenge(container, 'stale-preflight-owner@example.com');
+    const verifiedAttempt = await container.leads.recordOwnerActivationVerificationAttempt(
+      {
+        token: requireOwnerToken(converted),
+        verification: challenge,
+      },
+      { ipAddress: '127.0.0.1' },
+    );
+    expect(verifiedAttempt.attemptCount).toBe(0);
+
+    const wrongCode = challenge.code === '444444' ? '555555' : '444444';
+    const badAttempt = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': `stale-bad-${new ObjectId().toHexString()}` },
+      payload: {
+        token: converted.ownerInvitation.token,
+        verification: { challengeId: challenge.challengeId, code: wrongCode },
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(badAttempt.statusCode).not.toBe(200);
+    const challengeAfterBadAttempt = await db
+      .collection('auth_challenges')
+      .findOne({ _id: new ObjectId(challenge.challengeId) });
+    expect(challengeAfterBadAttempt).toMatchObject({ attemptCount: 1 });
+    expect(challengeAfterBadAttempt?.consumedAt).toBeUndefined();
+
+    await expect(
+      container.unitOfWork.withTransaction((tx) =>
+        container.leads.completeOwnerActivation(
+          platformCtx(),
+          {
+            token: requireOwnerToken(converted),
+            verification: challenge,
+            password: 'CustomerPass123!',
+          },
+          { ipAddress: '127.0.0.1' },
+          tx,
+          verifiedAttempt,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'AUTH_CHALLENGE_INVALID' });
+    const challengeAfterStaleConsume = await db
+      .collection('auth_challenges')
+      .findOne({ _id: new ObjectId(challenge.challengeId) });
+    expect(challengeAfterStaleConsume).toMatchObject({ attemptCount: 1 });
+    expect(challengeAfterStaleConsume?.consumedAt).toBeUndefined();
   });
 
   test('existing active owner accepts OWNER_ACTIVATION without password mutation or duplicate membership', async () => {

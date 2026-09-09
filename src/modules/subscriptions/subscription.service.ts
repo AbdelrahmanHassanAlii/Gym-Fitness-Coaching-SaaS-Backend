@@ -356,10 +356,11 @@ export class SubscriptionApplicationService {
     tx?: TransactionContext,
   ) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
-    await this.assertWorkspaceExists(id);
+    await this.assertWorkspaceExists(id, tx);
     const planVersion = await this.requireEligiblePlanVersion(
       objectId(input.planVersionId, 'SUBSCRIPTION_PLAN_VERSION_NOT_FOUND'),
       input.billingPeriod,
+      tx,
     );
     const now = new Date();
     const effectiveFrom = new Date(input.effectiveFrom);
@@ -813,7 +814,7 @@ export class SubscriptionApplicationService {
       input.billingPeriod,
       tx,
     );
-    if (input.startMode === 'TRIAL' && !planVersion.trialDefaults?.days) {
+    if (!planVersion.trialDefaults?.days) {
       throw invalid('SUBSCRIPTION_TRIAL_DAYS_REQUIRED');
     }
     const now = new Date();
@@ -823,6 +824,7 @@ export class SubscriptionApplicationService {
       subscription.version,
       {
         startMode: input.startMode,
+        activationStartMode: 'TRIAL',
         planVersionId: planVersion._id,
         billingPeriod: input.billingPeriod,
         limits: input.limits ?? planVersion.defaultLimits,
@@ -851,50 +853,6 @@ export class SubscriptionApplicationService {
     const intent = subscription.pendingActivationIntent;
     if (!intent) {
       return { subscription: safeSubscription(subscription) };
-    }
-    if (intent.startMode === 'PENDING_ACTIVATION') {
-      const now = new Date();
-      const result = await this.subscriptions.attachTerms(
-        workspaceId,
-        subscription.version,
-        ['PENDING_ACTIVATION'],
-        {
-          subscriptionId: subscription._id,
-          workspaceId,
-          planVersionId: intent.planVersionId,
-          billingPeriod: intent.billingPeriod,
-          limits: intent.limits,
-          enabledFeatures: intent.enabledFeatures,
-          effectiveFrom: now,
-          source: 'PURCHASE',
-          createdBy: actorObjectId(ctx),
-          now,
-        },
-        'ACTIVE',
-        { startedAt: now },
-        ['pendingActivationIntent', ...activeLifecycleMarkers],
-        tx,
-      );
-      await this.writeAudit(
-        ctx,
-        workspaceId,
-        'SubscriptionActivated',
-        result.subscription._id,
-        'activate',
-        tx,
-      );
-      await this.writeOutbox(
-        ctx,
-        workspaceId,
-        'SubscriptionActivated',
-        'subscription',
-        result.subscription._id,
-        tx,
-      );
-      return {
-        subscription: safeSubscription(result.subscription),
-        currentTerms: safeTerms(result.terms),
-      };
     }
     const planVersion = await this.requireEligiblePlanVersion(
       intent.planVersionId,
@@ -1046,8 +1004,8 @@ export class SubscriptionApplicationService {
     return result.version;
   }
 
-  private async assertWorkspaceExists(workspaceId: ObjectId) {
-    const workspace = await this.workspaces.findById(workspaceId);
+  private async assertWorkspaceExists(workspaceId: ObjectId, tx?: TransactionContext) {
+    const workspace = await this.workspaces.findById(workspaceId, tx);
     if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
   }
 

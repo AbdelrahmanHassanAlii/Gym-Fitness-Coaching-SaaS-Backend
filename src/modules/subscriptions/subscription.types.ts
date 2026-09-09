@@ -64,6 +64,7 @@ export interface SubscriptionDocument {
   currentTermsId?: ObjectId;
   pendingActivationIntent?: {
     startMode: 'TRIAL' | 'PENDING_ACTIVATION';
+    activationStartMode: 'TRIAL';
     planVersionId: ObjectId;
     billingPeriod: BillingPeriod;
     limits: SubscriptionLimits;

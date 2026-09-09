@@ -105,8 +105,10 @@ export class IdempotencyService {
       fingerprint: unknown;
       unitOfWork: UnitOfWork;
       ttlMs?: number;
+      beforeTransaction?: () => Promise<unknown>;
       operation: (
         tx: TransactionContext,
+        beforeTransactionResult?: unknown,
       ) => Promise<{ statusCode?: number; body: T; storedBody?: unknown; resourceId?: string }>;
     },
   ): Promise<IdempotencyResult<T>> {
@@ -116,8 +118,9 @@ export class IdempotencyService {
     if (!owned) return await this.resolveExisting<T>(record);
 
     try {
+      const beforeTransactionResult = await input.beforeTransaction?.();
       const result = await input.unitOfWork.withTransaction(async (tx) => {
-        const operationResult = await input.operation(tx);
+        const operationResult = await input.operation(tx, beforeTransactionResult);
         await this.completeWithinTransaction(
           record,
           operationResult.statusCode ?? 200,

@@ -9,7 +9,11 @@ import { AppError } from '../../core/errors/app-error';
 import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import { normalizeEmail } from '../auth/auth.normalization';
-import type { AuthApplicationService, AuthRequestMetadata } from '../auth/auth.service';
+import type {
+  AuthApplicationService,
+  AuthRequestMetadata,
+  OwnerActivationChallengeAttempt,
+} from '../auth/auth.service';
 import type { IdentityRepository } from '../identity/identity.repository';
 import { Permissions, systemPermissionProfiles } from '../permissions/permission.registry';
 import type { PermissionProfileRepository } from '../permissions/permission.repository';
@@ -458,6 +462,7 @@ export class LeadApplicationService {
     input: { token: string; verification: { challengeId: string; code: string }; password: string },
     metadata: AuthRequestMetadata,
     tx: TransactionContext,
+    verifiedAttempt: OwnerActivationChallengeAttempt,
   ) {
     const now = new Date();
     const digest = this.credentialDigests.hashHighEntropySecret(input.token);
@@ -482,6 +487,7 @@ export class LeadApplicationService {
       identifier,
       metadata,
       tx,
+      expectedAttemptCount: verifiedAttempt.attemptCount,
     });
     const passwordHash = await this.passwordHasher.hash(input.password);
     await this.identity.activatePending(user._id, passwordHash, now, tx);
@@ -497,6 +503,35 @@ export class LeadApplicationService {
       workspaceId: workspace._id.toHexString(),
       membershipId: membership._id.toHexString(),
     };
+  }
+
+  async recordOwnerActivationVerificationAttempt(
+    input: { token: string; verification: { challengeId: string; code: string } },
+    metadata: AuthRequestMetadata,
+  ): Promise<OwnerActivationChallengeAttempt> {
+    const now = new Date();
+    const digest = this.credentialDigests.hashHighEntropySecret(input.token);
+    const invitation = await this.invitations.findPendingByDigest(digest, now);
+    if (!invitation?.workspaceId || invitation.type !== 'OWNER_ACTIVATION')
+      throw invalidInvitation();
+    const workspace = await this.workspacesRepo.findById(invitation.workspaceId);
+    if (!workspace) throw invalidInvitation();
+    const user = await this.identity.findById(workspace.ownerUserId);
+    if (user?.status !== 'PENDING_ACTIVATION') throw invalidInvitation();
+    const expectedPurpose = invitation.normalizedEmail
+      ? 'EMAIL_VERIFICATION'
+      : 'PHONE_VERIFICATION';
+    const identifier = invitation.normalizedEmail
+      ? { normalizedEmail: invitation.normalizedEmail }
+      : { normalizedPhone: required(invitation.normalizedPhone) };
+    return await this.auth.recordIdentifierChallengeAttemptForActivation({
+      purpose: expectedPurpose,
+      challengeId: objectId(input.verification.challengeId, 'AUTH_CHALLENGE_INVALID'),
+      code: input.verification.code,
+      userId: user._id,
+      identifier,
+      metadata,
+    });
   }
 
   private async resolveOwnerIdentity(

@@ -36,6 +36,11 @@ export interface AuthRequestMetadata {
   userAgent?: string;
 }
 
+export interface OwnerActivationChallengeAttempt {
+  challengeId: ObjectId;
+  attemptCount: number;
+}
+
 export interface SafeAuthUser {
   id: string;
   firstName: string;
@@ -879,48 +884,24 @@ export class AuthApplicationService {
     identifier: { normalizedEmail?: string; normalizedPhone?: string };
     metadata: AuthRequestMetadata;
     tx: TransactionContext;
+    expectedAttemptCount: number;
   }): Promise<void> {
     const now = new Date();
-    const attempted = await this.challenges.incrementAttempt(input.challengeId, now, input.tx);
-    const presentedDigest = this.digestForChallenge(attempted, input.code);
-    const expectedEmail =
-      input.purpose === 'EMAIL_VERIFICATION' &&
-      attempted.normalizedEmail &&
-      input.identifier.normalizedEmail === attempted.normalizedEmail;
-    const expectedPhone =
-      input.purpose === 'PHONE_VERIFICATION' &&
-      attempted.normalizedPhone &&
-      input.identifier.normalizedPhone === attempted.normalizedPhone;
-    const boundToSubject = attempted.userId?.equals(input.userId) === true;
-
-    if (
-      attempted.purpose !== input.purpose ||
-      !boundToSubject ||
-      (!expectedEmail && !expectedPhone) ||
-      !this.credentialDigests.matches(attempted.challengeDigest, presentedDigest)
-    ) {
-      await this.securityEvents.write({
-        type: 'OWNER_ACTIVATION_VERIFICATION_ATTEMPT',
-        userId: attempted.userId,
-        result: 'FAILURE',
-        reasonCode: 'CODE_MISMATCH',
-        ipAddress: input.metadata.ipAddress,
-        userAgent: input.metadata.userAgent,
-      });
-      throw new AppError({
-        code: 'AUTH_CHALLENGE_INVALID',
-        httpStatus: 401,
-        message: 'The verification challenge is invalid or expired.',
-      });
-    }
-
     const consumed = await this.challenges.consumeVerifiedChallenge(
       input.challengeId,
       input.purpose,
       now,
       input.tx,
+      { expectedAttemptCount: input.expectedAttemptCount },
     );
-    if (!consumed?.userId?.equals(input.userId)) {
+    if (
+      !consumed ||
+      !this.ownerActivationChallengeMatches(consumed, input) ||
+      !this.credentialDigests.matches(
+        consumed.challengeDigest,
+        this.digestForChallenge(consumed, input.code),
+      )
+    ) {
       throw new AppError({
         code: 'AUTH_CHALLENGE_INVALID',
         httpStatus: 401,
@@ -950,6 +931,75 @@ export class AuthApplicationService {
       },
       input.tx,
     );
+  }
+
+  async recordIdentifierChallengeAttemptForActivation(input: {
+    purpose: 'EMAIL_VERIFICATION' | 'PHONE_VERIFICATION';
+    challengeId: ObjectId;
+    code: string;
+    userId: ObjectId;
+    identifier: { normalizedEmail?: string; normalizedPhone?: string };
+    metadata: AuthRequestMetadata;
+  }): Promise<OwnerActivationChallengeAttempt> {
+    const now = new Date();
+    const challenge = await this.challenges.findById(input.challengeId);
+    const eligible =
+      challenge &&
+      !challenge.consumedAt &&
+      challenge.expiresAt > now &&
+      challenge.attemptCount < challenge.maxAttempts &&
+      this.ownerActivationChallengeMatches(challenge, input);
+
+    if (!eligible) {
+      await this.securityEvents.write({
+        type: 'OWNER_ACTIVATION_VERIFICATION_ATTEMPT',
+        userId: input.userId,
+        result: 'FAILURE',
+        reasonCode: 'CODE_MISMATCH',
+        ipAddress: input.metadata.ipAddress,
+        userAgent: input.metadata.userAgent,
+      });
+      throw new AppError({
+        code: 'AUTH_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The verification challenge is invalid or expired.',
+      });
+    }
+
+    const presentedDigest = this.digestForChallenge(challenge, input.code);
+    if (this.credentialDigests.matches(challenge.challengeDigest, presentedDigest)) {
+      return { challengeId: challenge._id, attemptCount: challenge.attemptCount };
+    }
+
+    const attempted = await this.challenges.incrementBoundOwnerActivationAttempt(
+      {
+        challengeId: input.challengeId,
+        userId: input.userId,
+        purpose: input.purpose,
+        ...input.identifier,
+      },
+      now,
+    );
+    await this.securityEvents.write({
+      type: 'OWNER_ACTIVATION_VERIFICATION_ATTEMPT',
+      userId: input.userId,
+      result: 'FAILURE',
+      reasonCode: 'CODE_MISMATCH',
+      ipAddress: input.metadata.ipAddress,
+      userAgent: input.metadata.userAgent,
+    });
+    if (!attempted) {
+      throw new AppError({
+        code: 'AUTH_CHALLENGE_INVALID',
+        httpStatus: 401,
+        message: 'The verification challenge is invalid or expired.',
+      });
+    }
+    throw new AppError({
+      code: 'AUTH_CHALLENGE_INVALID',
+      httpStatus: 401,
+      message: 'The verification challenge is invalid or expired.',
+    });
   }
 
   async resendVerification(input: {
@@ -1372,6 +1422,29 @@ export class AuthApplicationService {
       return this.credentialDigests.hmacLowEntropySecret(presented, challenge.digestContext);
     }
     return this.credentialDigests.hashHighEntropySecret(presented);
+  }
+
+  private ownerActivationChallengeMatches(
+    challenge: AuthChallengeDocument,
+    input: {
+      purpose: 'EMAIL_VERIFICATION' | 'PHONE_VERIFICATION';
+      userId: ObjectId;
+      identifier: { normalizedEmail?: string; normalizedPhone?: string };
+    },
+  ): boolean {
+    const expectedEmail =
+      input.purpose === 'EMAIL_VERIFICATION' &&
+      challenge.normalizedEmail &&
+      input.identifier.normalizedEmail === challenge.normalizedEmail;
+    const expectedPhone =
+      input.purpose === 'PHONE_VERIFICATION' &&
+      challenge.normalizedPhone &&
+      input.identifier.normalizedPhone === challenge.normalizedPhone;
+    return (
+      challenge.purpose === input.purpose &&
+      challenge.userId?.equals(input.userId) === true &&
+      (Boolean(expectedEmail) || Boolean(expectedPhone))
+    );
   }
 
   private async enforcePublicIpLimit(

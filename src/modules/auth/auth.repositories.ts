@@ -428,6 +428,32 @@ export class AuthChallengeRepository {
     return challenge;
   }
 
+  async incrementBoundOwnerActivationAttempt(
+    input: {
+      challengeId: ObjectId;
+      userId: ObjectId;
+      purpose: Extract<AuthChallengePurpose, 'EMAIL_VERIFICATION' | 'PHONE_VERIFICATION'>;
+      normalizedEmail?: string;
+      normalizedPhone?: string;
+    },
+    now = new Date(),
+  ): Promise<AuthChallengeDocument | null> {
+    return await this.challenges.findOneAndUpdate(
+      {
+        _id: input.challengeId,
+        userId: input.userId,
+        purpose: input.purpose,
+        consumedAt: { $exists: false },
+        expiresAt: { $gt: now },
+        ...(input.normalizedEmail ? { normalizedEmail: input.normalizedEmail } : {}),
+        ...(input.normalizedPhone ? { normalizedPhone: input.normalizedPhone } : {}),
+        $expr: { $lt: ['$attemptCount', '$maxAttempts'] },
+      },
+      { $inc: { attemptCount: 1 } },
+      { returnDocument: 'after' },
+    );
+  }
+
   async consume(
     challengeId: ObjectId,
     now = new Date(),
@@ -450,6 +476,7 @@ export class AuthChallengeRepository {
     purpose: AuthChallengePurpose,
     now = new Date(),
     tx?: TransactionContext,
+    options?: { expectedAttemptCount?: number },
   ): Promise<AuthChallengeDocument | null> {
     return await this.challenges.findOneAndUpdate(
       {
@@ -458,6 +485,9 @@ export class AuthChallengeRepository {
         consumedAt: { $exists: false },
         expiresAt: { $gt: now },
         $expr: { $lte: ['$attemptCount', '$maxAttempts'] },
+        ...(options?.expectedAttemptCount !== undefined
+          ? { attemptCount: options.expectedAttemptCount }
+          : {}),
       },
       { $set: { consumedAt: now } },
       { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },

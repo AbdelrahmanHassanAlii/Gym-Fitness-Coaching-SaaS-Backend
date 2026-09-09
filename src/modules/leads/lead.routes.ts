@@ -148,14 +148,25 @@ export async function registerLeadRoutes(
         key: idempotencyKey(request.headers),
         fingerprint: { body: request.body },
         unitOfWork: container.unitOfWork,
-        operation: async (tx) => ({
-          body: await container.leads.completeOwnerActivation(
-            request.ctx,
+        beforeTransaction: async () =>
+          await container.leads.recordOwnerActivationVerificationAttempt(
             request.body,
             metadata(request),
-            tx,
           ),
-        }),
+        operation: async (tx, verifiedAttempt) => {
+          if (!verifiedAttempt) throw new Error('Owner activation verification was not recorded.');
+          return {
+            body: await container.leads.completeOwnerActivation(
+              request.ctx,
+              request.body,
+              metadata(request),
+              tx,
+              verifiedAttempt as Awaited<
+                ReturnType<typeof container.leads.recordOwnerActivationVerificationAttempt>
+              >,
+            ),
+          };
+        },
       });
       return reply.status(result.statusCode).send({ data: result.body });
     },

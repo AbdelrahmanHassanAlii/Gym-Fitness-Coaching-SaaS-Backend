@@ -70,7 +70,7 @@ export class IdempotencyService {
       ttlMs?: number;
       operation: (
         tx: TransactionContext,
-      ) => Promise<{ statusCode?: number; body: T; resourceId?: string }>;
+      ) => Promise<{ statusCode?: number; body: T; storedBody?: unknown; resourceId?: string }>;
     },
   ): Promise<IdempotencyResult<T>> {
     const record = this.buildRecord(ctx, input);
@@ -84,7 +84,7 @@ export class IdempotencyService {
         await this.completeWithinTransaction(
           record,
           operationResult.statusCode ?? 200,
-          operationResult.body,
+          operationResult.storedBody ?? operationResult.body,
           tx,
           operationResult.resourceId,
         );
@@ -107,7 +107,7 @@ export class IdempotencyService {
       ttlMs?: number;
       operation: (
         tx: TransactionContext,
-      ) => Promise<{ statusCode?: number; body: T; resourceId?: string }>;
+      ) => Promise<{ statusCode?: number; body: T; storedBody?: unknown; resourceId?: string }>;
     },
   ): Promise<IdempotencyResult<T>> {
     const record = this.buildRecordForActor(actorId, input);
@@ -121,7 +121,7 @@ export class IdempotencyService {
         await this.completeWithinTransaction(
           record,
           operationResult.statusCode ?? 200,
-          operationResult.body,
+          operationResult.storedBody ?? operationResult.body,
           tx,
           operationResult.resourceId,
         );

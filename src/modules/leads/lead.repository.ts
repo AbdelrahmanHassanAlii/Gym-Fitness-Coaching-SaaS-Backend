@@ -203,6 +203,25 @@ export class LeadRepository {
     return result;
   }
 
+  async guardMergeTarget(
+    leadId: ObjectId,
+    expectedVersion: number,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<LeadDocument> {
+    const result = await this.leads.findOneAndUpdate(
+      {
+        _id: leadId,
+        version: expectedVersion,
+        status: { $ne: 'DUPLICATE' },
+      },
+      { $set: { updatedAt: now }, $inc: { version: 1 } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) throw conflict('LEAD_MERGE_TARGET_VERSION_CONFLICT');
+    return result;
+  }
+
   async convert(
     leadId: ObjectId,
     expectedVersion: number,

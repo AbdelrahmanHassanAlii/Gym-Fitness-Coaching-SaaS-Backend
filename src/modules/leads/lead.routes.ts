@@ -80,8 +80,13 @@ export async function registerLeadRoutes(
       body: ConvertLeadBody,
     }),
     async (request, reply) =>
-      await idempotent(reply, container, request, 'POST /platform/leads/:leadId/convert', (tx) =>
-        container.leads.convert(request.ctx, request.params.leadId, request.body, tx),
+      await idempotent(
+        reply,
+        container,
+        request,
+        'POST /platform/leads/:leadId/convert',
+        (tx) => container.leads.convert(request.ctx, request.params.leadId, request.body, tx),
+        redactOwnerInvitationToken,
       ),
   );
 
@@ -168,15 +173,30 @@ async function idempotent(
   },
   routeKey: string,
   operation: (tx: TransactionContext) => Promise<unknown>,
+  storedBody?: (body: unknown) => unknown,
 ) {
   const result = await container.idempotency.runInTransaction(request.ctx, {
     routeKey,
     key: idempotencyKey(request.headers),
     fingerprint: { params: request.params, body: request.body },
     unitOfWork: container.unitOfWork,
-    operation: async (tx) => ({ body: await operation(tx) }),
+    operation: async (tx) => {
+      const body = await operation(tx);
+      return { body, ...(storedBody ? { storedBody: storedBody(body) } : {}) };
+    },
   });
   return reply.status(result.statusCode).send({ data: result.body });
+}
+
+function redactOwnerInvitationToken(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return body;
+  const record = body as Record<string, unknown>;
+  const ownerInvitation =
+    record.ownerInvitation && typeof record.ownerInvitation === 'object'
+      ? { ...(record.ownerInvitation as Record<string, unknown>) }
+      : undefined;
+  if (ownerInvitation) delete ownerInvitation.token;
+  return { ...record, ...(ownerInvitation ? { ownerInvitation } : {}) };
 }
 
 function metadata(request: { ip: string; headers: Record<string, unknown> }) {

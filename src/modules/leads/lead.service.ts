@@ -218,11 +218,10 @@ export class LeadApplicationService {
     const targetId = objectId(input.targetLeadId, 'LEAD_NOT_FOUND');
     if (sourceId.equals(targetId)) throw conflict('LEAD_MERGE_SELF_INVALID');
     const source = await this.requireLead(sourceId, tx);
-    const target = await this.leads.assertVersion(targetId, input.targetExpectedVersion, tx);
+    await this.leads.guardMergeTarget(targetId, input.targetExpectedVersion, new Date(), tx);
     if (source.status === 'CONVERTED' || source.status === 'DUPLICATE') {
       throw conflict('LEAD_MERGE_SOURCE_INVALID');
     }
-    if (target.status === 'DUPLICATE') throw conflict('LEAD_MERGE_TARGET_INVALID');
     const updated = await this.leads.markDuplicate(
       sourceId,
       input.expectedVersion,
@@ -456,7 +455,19 @@ export class LeadApplicationService {
   }
 
   private async requireCommercialAccessForOverrides(ctx: RequestContext, input: ConvertLeadInput) {
-    if (!input.subscription.limits && !input.subscription.enabledFeatures) return;
+    if (input.subscription.startMode === 'PENDING_ACTIVATION' && input.subscription.effectiveFrom) {
+      throw new AppError({
+        code: 'SUBSCRIPTION_EFFECTIVE_FROM_UNSUPPORTED',
+        httpStatus: 422,
+        message: 'Pending activation conversions start at owner activation time.',
+      });
+    }
+    if (
+      !input.subscription.limits &&
+      !input.subscription.enabledFeatures &&
+      !input.subscription.effectiveFrom
+    )
+      return;
     await this.accessControl.authorize(ctx, {
       context: 'PLATFORM',
       permission: Permissions.SubscriptionsChangeTerms,

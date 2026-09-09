@@ -1,9 +1,14 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { ObjectId } from 'mongodb';
+import { type Db, ObjectId } from 'mongodb';
 import { buildApp } from '../src/api/build-app';
+import { type AppContainer, createAppContainer } from '../src/bootstrap/app-container';
+import type { AppConfig } from '../src/config/config.types';
+import { AppError } from '../src/core/errors/app-error';
 import { IdempotencyService } from '../src/core/idempotency/idempotency.service';
+import { migrations } from '../src/migrations';
 import { migration011Stage6Leads } from '../src/migrations/011-stage6-leads';
+import { MigrationRunner } from '../src/migrations/migration-runner';
 import { AuthApplicationService } from '../src/modules/auth/auth.service';
 import { LeadRepository } from '../src/modules/leads/lead.repository';
 import { LeadApplicationService } from '../src/modules/leads/lead.service';
@@ -151,6 +156,9 @@ describe('Stage 6 route metadata', () => {
           async convert() {
             return {};
           },
+          async reissueOwnerActivation() {
+            return { invitationId: 'invitation-id', token: 'token', ownerActivationRequired: true };
+          },
         },
         idempotency: {
           async runInTransaction(
@@ -175,9 +183,58 @@ describe('Stage 6 route metadata', () => {
       headers: { authorization: 'Bearer valid', 'idempotency-key': 'convert' },
       payload: convertPayload(),
     });
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/platform/leads/${new ObjectId().toHexString()}/owner-activation/reissue`,
+      headers: { authorization: 'Bearer valid' },
+      payload: {},
+    });
 
-    expect(calls).toEqual([Permissions.LeadsRead, Permissions.LeadsConvert]);
+    expect(calls).toEqual([
+      Permissions.LeadsRead,
+      Permissions.LeadsConvert,
+      Permissions.LeadsConvert,
+    ]);
     expect(idempotent).toEqual(['POST /platform/leads/:leadId/convert']);
+    await app.close();
+  });
+
+  test('owner activation reissue uses leads.convert authorization and no idempotency replay', async () => {
+    const ids = idsFixture();
+    let handlerCalled = false;
+    const app = await buildApp(
+      routeContainer(ids, {
+        async authorize(_ctx: unknown, input: { permission: string }) {
+          expect(input.permission).toBe(Permissions.LeadsConvert);
+          throw new AppError({
+            code: 'PERMISSION_DENIED',
+            httpStatus: 403,
+            message: 'Permission denied.',
+          });
+        },
+        leads: {
+          async reissueOwnerActivation() {
+            handlerCalled = true;
+            return {};
+          },
+        },
+        idempotency: {
+          async runInTransaction() {
+            throw new Error('reissue must not be idempotency-replayed');
+          },
+        },
+      }),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/platform/leads/${new ObjectId().toHexString()}/owner-activation/reissue`,
+      headers: { authorization: 'Bearer valid' },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(handlerCalled).toBe(false);
     await app.close();
   });
 });
@@ -589,6 +646,556 @@ describe('Stage 6 owner activation shared primitive', () => {
   });
 });
 
+describe('Stage 6 owner activation integration', () => {
+  let container: AppContainer;
+  let app: Awaited<ReturnType<typeof buildApp>>;
+  let db: Db;
+
+  beforeAll(async () => {
+    container = await createAppContainer(
+      integrationConfig(`stage6_${new ObjectId().toHexString()}`),
+    );
+    db = container.database.db;
+    await new MigrationRunner(db, migrations).migrate();
+    app = await buildApp(container);
+  }, 30_000);
+
+  afterAll(async () => {
+    if (db) await db.dropDatabase();
+    if (app) await app.close();
+    if (container) await container.database.close();
+  }, 30_000);
+
+  test('reissues a lost owner activation token without persisting raw token secrets', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2, trialDays: 9 });
+    const conversion = await convertNewOwnerLeadIdempotently(container, plan.versionId, {
+      email: 'recover-owner@example.com',
+      phone: '+201000000101',
+    });
+    const converted = conversion.first.body;
+    const tokenA = requireOwnerToken(converted);
+
+    expect(conversion.replay.replayed).toBe(true);
+    expect(conversion.replay.body.ownerInvitation.token).toBeUndefined();
+    expect(conversion.replay.body.ownerInvitation.id).toBe(converted.ownerInvitation.id);
+
+    const reissued = await container.leads.reissueOwnerActivation(platformCtx(), converted.lead.id);
+    const tokenB = reissued.token;
+    expect(tokenB).toBeTruthy();
+    expect(tokenB).not.toBe(tokenA);
+
+    const secondReissue = await container.leads.reissueOwnerActivation(
+      platformCtx(),
+      converted.lead.id,
+    );
+    const tokenC = secondReissue.token;
+    expect(tokenC).toBeTruthy();
+    expect(tokenC).not.toBe(tokenB);
+
+    const tokenADigest = container.credentialDigests.hashHighEntropySecret(tokenA);
+    const tokenBDigest = container.credentialDigests.hashHighEntropySecret(tokenB);
+    const tokenCDigest = container.credentialDigests.hashHighEntropySecret(tokenC);
+    await expect(container.invitations.findPendingByDigest(tokenADigest)).resolves.toBeNull();
+    await expect(container.invitations.findPendingByDigest(tokenBDigest)).resolves.toBeNull();
+    await expect(container.invitations.findPendingByDigest(tokenCDigest)).resolves.toMatchObject({
+      _id: new ObjectId(secondReissue.invitationId),
+      type: 'OWNER_ACTIVATION',
+    });
+
+    const allPersistedState = JSON.stringify(
+      await persistedSecretSurfaces(db, converted.lead.id, converted.workspace.id),
+    );
+    expect(allPersistedState).not.toContain(tokenA);
+    expect(allPersistedState).not.toContain(tokenB);
+    expect(allPersistedState).not.toContain(tokenC);
+
+    const challenge = await issueOwnerChallenge(container, 'recover-owner@example.com');
+    await expect(
+      db.collection('auth_challenges').findOne({ _id: new ObjectId(challenge.challengeId) }),
+    ).resolves.not.toBeNull();
+    const activation = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': `activate-${new ObjectId().toHexString()}` },
+      payload: {
+        token: tokenC,
+        verification: challenge,
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(activation.statusCode).toBe(200);
+
+    const workspace = await db
+      .collection('workspaces')
+      .findOne({ _id: new ObjectId(converted.workspace.id) });
+    const user = await db
+      .collection('users')
+      .findOne({ _id: new ObjectId(workspace?.ownerUserId) });
+    const membership = await db.collection('workspace_memberships').findOne({
+      workspaceId: new ObjectId(converted.workspace.id),
+      userId: workspace?.ownerUserId,
+    });
+    const subscription = await db.collection('subscriptions').findOne({
+      workspaceId: new ObjectId(converted.workspace.id),
+    });
+    const usage = await db.collection('workspace_usage').findOne({
+      workspaceId: new ObjectId(converted.workspace.id),
+    });
+
+    expect(user).toMatchObject({ status: 'ACTIVE', normalizedEmail: 'recover-owner@example.com' });
+    expect(typeof user?.passwordHash).toBe('string');
+    expect(membership).toMatchObject({ status: 'ACTIVE', roles: ['GYM_OWNER'] });
+    expect(workspace).toMatchObject({ status: 'ACTIVE' });
+    expect(subscription).toMatchObject({ lifecycleStatus: 'TRIAL' });
+    expect(subscription?.pendingActivationIntent).toBeUndefined();
+    expect(usage).toMatchObject({ activeStaff: 1 });
+
+    await expect(
+      container.auth.login({
+        identifier: 'recover-owner@example.com',
+        password: 'CustomerPass123!',
+        clientType: 'API',
+        metadata: { ipAddress: '127.0.0.1' },
+      }),
+    ).resolves.toMatchObject({ user: { id: user?._id.toHexString() } });
+    await expect(
+      container.leads.reissueOwnerActivation(platformCtx(), converted.lead.id),
+    ).rejects.toMatchObject({ code: 'OWNER_ACTIVATION_REISSUE_INVALID' });
+  });
+
+  test('owner activation binds challenge to invitation user, identifier, and purpose', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2 });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'binding-owner@example.com',
+      phone: '+201000000102',
+    });
+    const other = await container.identity.createPendingActivation({
+      email: 'other-binding@example.com',
+      normalizedEmail: 'other-binding@example.com',
+      phone: '+201000000103',
+      normalizedPhone: '+201000000103',
+      firstName: 'Other',
+      lastName: 'Owner',
+      preferredLanguage: 'en',
+      timezone: 'Africa/Cairo',
+    });
+
+    const wrongUser = await issueOwnerChallenge(container, 'other-binding@example.com');
+    const activationToken = requireOwnerToken(converted);
+    await expectActivationDenied(app, activationToken, wrongUser);
+
+    const phoneChallenge = await issueOwnerChallenge(
+      container,
+      '+201000000102',
+      'PHONE_VERIFICATION',
+    );
+    await expectActivationDenied(app, activationToken, phoneChallenge);
+
+    const consumed = await issueOwnerChallenge(container, 'binding-owner@example.com');
+    await container.authChallenges.consume(new ObjectId(consumed.challengeId));
+    await expectActivationDenied(app, activationToken, consumed);
+
+    const expired = await issueOwnerChallenge(container, 'binding-owner@example.com');
+    await db
+      .collection('auth_challenges')
+      .updateOne({ _id: new ObjectId(expired.challengeId) }, { $set: { expiresAt: new Date(0) } });
+    await expectActivationDenied(app, activationToken, expired);
+
+    await db.collection('users').deleteOne({ _id: other._id });
+  });
+
+  test('quota failure rolls back owner activation and can be retried after capacity is available', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 0, trialDays: 5 });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'quota-owner@example.com',
+      phone: '+201000000104',
+    });
+    const workspaceId = new ObjectId(converted.workspace.id);
+    const workspaceBefore = await db.collection('workspaces').findOne({ _id: workspaceId });
+    const userId = new ObjectId(workspaceBefore?.ownerUserId);
+    const challenge = await issueOwnerChallenge(container, 'quota-owner@example.com');
+    const firstKey = `quota-${new ObjectId().toHexString()}`;
+
+    const failed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': firstKey },
+      payload: {
+        token: converted.ownerInvitation.token,
+        verification: challenge,
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(failed.statusCode).toBe(403);
+
+    const userAfterFailure = await db.collection('users').findOne({ _id: userId });
+    const challengeAfterFailure = await db
+      .collection('auth_challenges')
+      .findOne({ _id: new ObjectId(challenge.challengeId) });
+    const membershipAfterFailure = await db.collection('workspace_memberships').findOne({
+      workspaceId,
+      userId,
+    });
+    const invitationAfterFailure = await db.collection('invitations').findOne({
+      workspaceId,
+      type: 'OWNER_ACTIVATION',
+    });
+    const subscriptionAfterFailure = await db.collection('subscriptions').findOne({ workspaceId });
+    const usageAfterFailure = await db.collection('workspace_usage').findOne({ workspaceId });
+
+    expect(userAfterFailure).toMatchObject({ status: 'PENDING_ACTIVATION' });
+    expect(userAfterFailure?.passwordHash).toBeUndefined();
+    expect(challengeAfterFailure?.consumedAt).toBeUndefined();
+    expect(membershipAfterFailure).toMatchObject({ status: 'INVITED' });
+    expect(invitationAfterFailure).toMatchObject({ status: 'PENDING' });
+    expect(subscriptionAfterFailure).toMatchObject({ lifecycleStatus: 'PENDING_ACTIVATION' });
+    expect(subscriptionAfterFailure?.currentTermsId).toBeUndefined();
+    expect(usageAfterFailure).toMatchObject({ activeStaff: 0 });
+    await expect(
+      db.collection('outbox_events').findOne({
+        eventType: 'OwnerActivated',
+        aggregateId: membershipAfterFailure?._id,
+      }),
+    ).resolves.toBeNull();
+
+    await db.collection('subscriptions').updateOne(
+      { workspaceId },
+      {
+        $set: {
+          'pendingActivationIntent.limits.activeStaff': 1,
+        },
+      },
+    );
+    const retry = await app.inject({
+      method: 'POST',
+      url: '/api/v1/public/owner-activations/complete',
+      headers: { 'idempotency-key': firstKey },
+      payload: {
+        token: converted.ownerInvitation.token,
+        verification: challenge,
+        password: 'CustomerPass123!',
+      },
+    });
+    expect(retry.statusCode).toBe(200);
+    const usageAfterRetry = await db.collection('workspace_usage').findOne({ workspaceId });
+    expect(usageAfterRetry).toMatchObject({ activeStaff: 1 });
+  });
+
+  test('existing active owner accepts OWNER_ACTIVATION without password mutation or duplicate membership', async () => {
+    const plan = await seedIntegrationPlan(db, { activeStaff: 2, trialDays: 6 });
+    const passwordHash = await container.passwordHasher.hash('ExistingPass123!');
+    const owner = await container.identity.create({
+      email: 'existing-owner@example.com',
+      normalizedEmail: 'existing-owner@example.com',
+      phone: '+201000000105',
+      normalizedPhone: '+201000000105',
+      passwordHash,
+      firstName: 'Existing',
+      lastName: 'Owner',
+      preferredLanguage: 'en',
+      timezone: 'Africa/Cairo',
+    });
+    await container.identity.markIdentifierVerified(owner._id, {
+      normalizedEmail: 'existing-owner@example.com',
+    });
+    const converted = await convertNewOwnerLead(container, plan.versionId, {
+      email: 'existing-owner@example.com',
+      phone: '+201000000105',
+    });
+    const workspaceId = new ObjectId(converted.workspace.id);
+    const invitation = await db.collection('invitations').findOne({
+      workspaceId,
+      type: 'OWNER_ACTIVATION',
+    });
+
+    const accepted = await container.workspaces.acceptInvitation(
+      { ...platformCtx(), userId: owner._id.toHexString() },
+      requireOwnerToken(converted),
+    );
+
+    const savedOwner = await db.collection('users').findOne({ _id: owner._id });
+    const memberships = await db
+      .collection('workspace_memberships')
+      .find({ workspaceId, userId: owner._id })
+      .toArray();
+    const workspace = await db.collection('workspaces').findOne({ _id: workspaceId });
+    if (!invitation) throw new Error('Expected owner activation invitation.');
+    const savedInvitation = await db.collection('invitations').findOne({ _id: invitation._id });
+    const subscription = await db.collection('subscriptions').findOne({ workspaceId });
+
+    expect(accepted.membership).toMatchObject({ status: 'ACTIVE' });
+    expect(savedOwner).toMatchObject({ status: 'ACTIVE', passwordHash });
+    expect(memberships).toHaveLength(1);
+    expect(memberships[0]).toMatchObject({ status: 'ACTIVE' });
+    expect(workspace).toMatchObject({ status: 'ACTIVE' });
+    expect(savedInvitation).toMatchObject({ status: 'ACCEPTED' });
+    expect(subscription).toMatchObject({ lifecycleStatus: 'TRIAL' });
+  });
+});
+
+interface ConvertedLeadResult {
+  workspace: { id: string; ownerUserId: string; status: string };
+  subscription: unknown;
+  ownerInvitation: { id: string; token?: string };
+  lead: { id: string; status: string; version: number };
+  membership: { id: string; status: string };
+}
+
+async function convertNewOwnerLead(
+  container: AppContainer,
+  planVersionId: ObjectId,
+  owner: { email: string; phone: string },
+): Promise<ConvertedLeadResult> {
+  const lead = await createIntegrationLead(container, owner);
+  return await convertLeadInTransaction(container, lead, planVersionId, owner);
+}
+
+async function convertNewOwnerLeadIdempotently(
+  container: AppContainer,
+  planVersionId: ObjectId,
+  owner: { email: string; phone: string },
+) {
+  const lead = await createIntegrationLead(container, owner);
+  const key = `convert-${new ObjectId().toHexString()}`;
+  const ctx = platformCtx();
+  const first = await container.idempotency.runInTransaction(ctx, {
+    routeKey: 'POST /platform/leads/:leadId/convert',
+    key,
+    fingerprint: {
+      params: { leadId: lead.id },
+      body: { planVersionId: planVersionId.toHexString(), owner },
+    },
+    unitOfWork: container.unitOfWork,
+    operation: async (tx) => {
+      const body = await convertLeadInTransaction(container, lead, planVersionId, owner, tx);
+      return { body, storedBody: redactOwnerInvitationToken(body) };
+    },
+  });
+  const replay = await container.idempotency.runInTransaction(ctx, {
+    routeKey: 'POST /platform/leads/:leadId/convert',
+    key,
+    fingerprint: {
+      params: { leadId: lead.id },
+      body: { planVersionId: planVersionId.toHexString(), owner },
+    },
+    unitOfWork: container.unitOfWork,
+    operation: async (tx) => {
+      const body = await convertLeadInTransaction(container, lead, planVersionId, owner, tx);
+      return { body, storedBody: redactOwnerInvitationToken(body) };
+    },
+  });
+  return { first, replay };
+}
+
+async function createIntegrationLead(
+  container: AppContainer,
+  owner: { email: string; phone: string },
+) {
+  const lead = await container.leads.createPublicLead(publicCtx(), {
+    customerInterest: 'GYM',
+    gymName: `Gym ${new ObjectId().toHexString()}`,
+    contactPerson: 'Owner Contact',
+    phone: owner.phone,
+    email: owner.email,
+    estimatedStaff: 1,
+    estimatedTrainees: 10,
+    source: 'integration-test',
+  });
+  return lead;
+}
+
+async function convertLeadInTransaction(
+  container: AppContainer,
+  lead: { id: string; version: number },
+  planVersionId: ObjectId,
+  owner: { email: string; phone: string },
+  tx?: Parameters<LeadApplicationService['convert']>[3],
+): Promise<ConvertedLeadResult> {
+  const operation = async (transaction: NonNullable<typeof tx>) =>
+    await container.leads.convert(
+      platformCtx(),
+      lead.id,
+      {
+        expectedVersion: lead.version,
+        workspaceType: 'GYM',
+        workspace: {
+          name: `Workspace ${new ObjectId().toHexString()}`,
+          timezone: 'Africa/Cairo',
+        },
+        subscription: {
+          planVersionId: planVersionId.toHexString(),
+          billingPeriod: 'MONTHLY',
+          startMode: 'PENDING_ACTIVATION',
+        },
+        owner,
+      },
+      transaction,
+    );
+  if (tx) return (await operation(tx)) as ConvertedLeadResult;
+  return (await container.unitOfWork.withTransaction(operation)) as ConvertedLeadResult;
+}
+
+async function issueOwnerChallenge(
+  container: AppContainer,
+  identifier: string,
+  purpose: 'EMAIL_VERIFICATION' | 'PHONE_VERIFICATION' = 'EMAIL_VERIFICATION',
+) {
+  const result = await container.auth.resendVerification({
+    identifier,
+    purpose,
+    metadata: { ipAddress: '127.0.0.1' },
+  });
+  if (!result.debugChallenge) throw new Error('Expected test challenge debug payload.');
+  return result.debugChallenge;
+}
+
+async function expectActivationDenied(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  token: string,
+  verification: { challengeId: string; code: string },
+) {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/api/v1/public/owner-activations/complete',
+    headers: { 'idempotency-key': `denied-${new ObjectId().toHexString()}` },
+    payload: {
+      token,
+      verification,
+      password: 'CustomerPass123!',
+    },
+  });
+  expect(response.statusCode).not.toBe(200);
+}
+
+function redactOwnerInvitationToken(body: ConvertedLeadResult): ConvertedLeadResult {
+  return {
+    ...body,
+    ownerInvitation: { id: body.ownerInvitation.id },
+  };
+}
+
+function requireOwnerToken(body: ConvertedLeadResult): string {
+  if (!body.ownerInvitation.token) throw new Error('Expected one-time owner activation token.');
+  return body.ownerInvitation.token;
+}
+
+async function persistedSecretSurfaces(db: Db, leadId: string, workspaceId: string) {
+  const leadObjectId = new ObjectId(leadId);
+  const workspaceObjectId = new ObjectId(workspaceId);
+  return {
+    idempotency: await db.collection('idempotency_records').find({}).toArray(),
+    audit: await db.collection('audit_events').find({}).toArray(),
+    outbox: await db.collection('outbox_events').find({}).toArray(),
+    lead: await db.collection('leads').findOne({ _id: leadObjectId }),
+    workspace: await db.collection('workspaces').findOne({ _id: workspaceObjectId }),
+    memberships: await db
+      .collection('workspace_memberships')
+      .find({ workspaceId: workspaceObjectId })
+      .toArray(),
+    subscription: await db.collection('subscriptions').findOne({ workspaceId: workspaceObjectId }),
+  };
+}
+
+async function seedIntegrationPlan(
+  db: Db,
+  options: { activeStaff: number; trialDays?: number },
+): Promise<{ planId: ObjectId; versionId: ObjectId }> {
+  const planId = new ObjectId();
+  const versionId = new ObjectId();
+  const now = new Date();
+  await db.collection('subscription_plans').insertOne({
+    _id: planId,
+    key: `STAGE6_${planId.toHexString()}`,
+    customerType: 'GYM',
+    name: 'Stage 6 Plan',
+    active: true,
+    currentVersionId: versionId,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.collection('subscription_plan_versions').insertOne({
+    _id: versionId,
+    planId,
+    version: 1,
+    billingOptions: ['MONTHLY'],
+    defaultLimits: {
+      activeTrainees: 10,
+      activeStaff: options.activeStaff,
+      storageBytes: 1000,
+    },
+    features: { leads: true, training: true },
+    trialDefaults: { days: options.trialDays ?? 7 },
+    effectiveFrom: now,
+    createdBy: new ObjectId(),
+    createdAt: now,
+  });
+  return { planId, versionId };
+}
+
+function mongoUri(): string {
+  return (
+    process.env.MONGODB_URI ??
+    'mongodb://localhost:27017/gym_platform?replicaSet=rs0&directConnection=true'
+  );
+}
+
+function integrationConfig(dbName: string): AppConfig {
+  return {
+    env: 'test',
+    app: {
+      host: '0.0.0.0',
+      port: 0,
+      docsEnabled: false,
+      trustProxy: false,
+      allowedOrigins: [],
+    },
+    mongo: { uri: mongoUri(), dbName, connectTimeoutMs: 5000 },
+    logging: { level: 'silent' },
+    auth: {
+      jwtActiveKeyId: 'local',
+      jwtPrivateKey:
+        '-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIP27WzZ2lrwob/CusOSRmtVPlS0TPTrBOFjTuBztUPm8\n-----END PRIVATE KEY-----',
+      jwtPublicKeys: {
+        local:
+          '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAVk4E+7jo4OHXHcYC1lvT+vqaViaFNdUPnMcuSDPpp60=\n-----END PUBLIC KEY-----',
+      },
+      accessTokenTtlSeconds: 900,
+      refreshTokenTtlSeconds: 2592000,
+      webRefreshCookieSameSite: 'LAX',
+      otpHmacSecret: 'local-dev-change-me',
+      totpEncryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      loginIdentifierIpWindowMs: 60_000,
+      loginIdentifierIpMaxAttempts: 50,
+      loginIdentifierIpBlockMs: 60_000,
+      loginIpWindowMs: 60_000,
+      loginIpMaxAttempts: 50,
+      challengeTtlSeconds: 600,
+      challengeMaxAttempts: 5,
+      challengeResendCooldownSeconds: 0,
+      challengeMaxSendsPerHour: 50,
+      mfaChallengeTtlSeconds: 300,
+      mfaChallengeMaxAttempts: 5,
+      recoveryCodeCount: 10,
+      passwordResetIdentifierMaxPerHour: 10,
+      passwordResetIpMaxPerHour: 50,
+    },
+    worker: {
+      id: 'stage6-test-worker',
+      outboxPollIntervalMs: 1000,
+      outboxLockMs: 30000,
+      outboxMaxAttempts: 8,
+      jobLeaseMs: 30000,
+    },
+    subscriptions: {
+      trialExpiryAction: 'FROZEN',
+      paidGraceDays: 0,
+      frozenToExpiredDays: 30,
+    },
+    support: { defaultSessionMinutes: 30, maxSessionMinutes: 60 },
+  };
+}
+
 function repositoryWithLead(lead: LeadDocument) {
   const collection = new FakeLeadCollection(lead);
   const repository = new LeadRepository({
@@ -799,6 +1406,15 @@ function platformCtx() {
     mfaSatisfied: true,
     ipAddress: '127.0.0.1',
     correlationId: new ObjectId().toHexString(),
+    locale: 'en',
+    timezone: 'Africa/Cairo',
+  };
+}
+
+function publicCtx() {
+  return {
+    correlationId: `stage6-public-${new ObjectId().toHexString()}`,
+    ipAddress: '127.0.0.1',
     locale: 'en',
     timezone: 'Africa/Cairo',
   };

@@ -881,7 +881,7 @@ export class AuthApplicationService {
     tx: TransactionContext;
   }): Promise<void> {
     const now = new Date();
-    const attempted = await this.challenges.incrementAttempt(input.challengeId, now);
+    const attempted = await this.challenges.incrementAttempt(input.challengeId, now, input.tx);
     const presentedDigest = this.digestForChallenge(attempted, input.code);
     const expectedEmail =
       input.purpose === 'EMAIL_VERIFICATION' &&

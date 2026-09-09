@@ -96,6 +96,8 @@ export const MergeLeadBody = Type.Object(
   { additionalProperties: false },
 );
 
+export const ReissueOwnerActivationBody = Type.Object({}, { additionalProperties: false });
+
 const Limits = Type.Object(
   {
     activeTrainees: Type.Optional(Type.Number({ minimum: 0 })),

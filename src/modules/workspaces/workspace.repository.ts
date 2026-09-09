@@ -673,6 +673,47 @@ export class InvitationRepository {
     );
   }
 
+  async findPendingOwnerActivationByWorkspace(
+    workspaceId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<InvitationDocument | null> {
+    return await this.invitations.findOne(
+      {
+        workspaceId,
+        type: 'OWNER_ACTIVATION',
+        status: 'PENDING',
+        expiresAt: { $gt: now },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async rotatePendingOwnerActivationToken(
+    invitationId: ObjectId,
+    workspaceId: ObjectId,
+    currentTokenDigest: string,
+    newTokenDigest: string,
+    expiresAt: Date,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<InvitationDocument> {
+    const result = await this.invitations.findOneAndUpdate(
+      {
+        _id: invitationId,
+        workspaceId,
+        type: 'OWNER_ACTIVATION',
+        status: 'PENDING',
+        tokenDigest: currentTokenDigest,
+        expiresAt: { $gt: now },
+      },
+      { $set: { tokenDigest: newTokenDigest, expiresAt, updatedAt: now } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) throw invalidInvitation();
+    return result;
+  }
+
   async acceptPending(
     invitationId: ObjectId,
     userId: ObjectId,
@@ -717,6 +758,14 @@ function compact<T extends Record<string, unknown>>(input: T): Partial<T> {
 
 function notFound(code: string, message: string): AppError {
   return new AppError({ code, httpStatus: 404, message });
+}
+
+function invalidInvitation(): AppError {
+  return new AppError({
+    code: 'INVITATION_INVALID',
+    httpStatus: 401,
+    message: 'The invitation is invalid or expired.',
+  });
 }
 
 function requiredIdentifier(value: string | undefined): string {

@@ -17,6 +17,7 @@ import {
   MarkDuplicateBody,
   MergeLeadBody,
   PublicCreateLeadBody,
+  ReissueOwnerActivationBody,
   UpdateLeadBody,
 } from './lead.schemas';
 
@@ -88,6 +89,20 @@ export async function registerLeadRoutes(
         (tx) => container.leads.convert(request.ctx, request.params.leadId, request.body, tx),
         redactOwnerInvitationToken,
       ),
+  );
+
+  app.post<{
+    Params: Static<typeof LeadParams>;
+    Body: Static<typeof ReissueOwnerActivationBody>;
+  }>(
+    '/api/v1/platform/leads/:leadId/owner-activation/reissue',
+    platformOptions(container, Permissions.LeadsConvert, {
+      params: LeadParams,
+      body: ReissueOwnerActivationBody,
+    }),
+    async (request) => ({
+      data: await container.leads.reissueOwnerActivation(request.ctx, request.params.leadId),
+    }),
   );
 
   app.post<{ Params: Static<typeof LeadParams>; Body: Static<typeof MarkDuplicateBody> }>(

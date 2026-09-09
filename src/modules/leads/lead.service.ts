@@ -20,7 +20,7 @@ import type {
   WorkspaceRepository,
 } from '../workspaces/workspace.repository';
 import type { WorkspaceApplicationService } from '../workspaces/workspace.service';
-import type { WorkspaceMembershipRole } from '../workspaces/workspace.types';
+import type { InvitationDocument, WorkspaceMembershipRole } from '../workspaces/workspace.types';
 import type { LeadRepository } from './lead.repository';
 import type {
   ConvertLeadInput,
@@ -368,6 +368,91 @@ export class LeadApplicationService {
     };
   }
 
+  async reissueOwnerActivation(ctx: RequestContext, leadId: string) {
+    const id = objectId(leadId, 'LEAD_NOT_FOUND');
+    return await this.unitOfWork.withTransaction(async (tx) => {
+      const now = new Date();
+      const lead = await this.requireLead(id, tx);
+      if (lead.status !== 'CONVERTED' || !lead.convertedWorkspaceId) {
+        throw conflict('OWNER_ACTIVATION_REISSUE_INVALID');
+      }
+      const workspace = await this.workspacesRepo.findById(lead.convertedWorkspaceId, tx);
+      if (workspace?.status !== 'PENDING_ACTIVATION') {
+        throw conflict('OWNER_ACTIVATION_REISSUE_INVALID');
+      }
+      const user = await this.identity.findById(workspace.ownerUserId, tx);
+      if (user?.status !== 'PENDING_ACTIVATION') {
+        throw conflict('OWNER_ACTIVATION_REISSUE_INVALID');
+      }
+      const membership = await this.memberships.findByUserInWorkspace(
+        workspace._id,
+        workspace.ownerUserId,
+        tx,
+      );
+      if (membership?.status !== 'INVITED') {
+        throw conflict('OWNER_ACTIVATION_REISSUE_INVALID');
+      }
+      const invitation = await this.invitations.findPendingOwnerActivationByWorkspace(
+        workspace._id,
+        now,
+        tx,
+      );
+      if (
+        !invitation?.workspaceId?.equals(workspace._id) ||
+        !invitation.intendedRoles.some((role) => membership.roles.includes(role)) ||
+        !invitationMatchesOwner(invitation, user)
+      ) {
+        throw conflict('OWNER_ACTIVATION_REISSUE_INVALID');
+      }
+      const token = this.credentialDigests.randomSecret(32);
+      const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const rotated = await this.invitations.rotatePendingOwnerActivationToken(
+        invitation._id,
+        workspace._id,
+        invitation.tokenDigest,
+        this.credentialDigests.hashHighEntropySecret(token),
+        expiresAt,
+        now,
+        tx,
+      );
+      await this.audit.write(
+        {
+          eventType: 'OwnerActivationReissued',
+          actor: auditActor(ctx),
+          entity: { type: 'invitation', id: rotated._id },
+          action: 'reissue_owner_activation',
+          before: safeInvitationForAudit(invitation),
+          after: safeInvitationForAudit(rotated),
+          ipAddress: ctx.ipAddress,
+          ...(ctx.userAgent ? { userAgent: ctx.userAgent } : {}),
+          correlationId: ctx.correlationId,
+        },
+        tx,
+      );
+      await this.writeOutbox(
+        ctx,
+        'OwnerActivationRequired',
+        'invitation',
+        rotated._id,
+        {
+          leadId,
+          workspaceId: workspace._id.toHexString(),
+          ownerUserId: workspace.ownerUserId.toHexString(),
+          invitationId: rotated._id.toHexString(),
+          expiresAt: rotated.expiresAt.toISOString(),
+          reissuedAt: now.toISOString(),
+        },
+        tx,
+      );
+      return {
+        invitationId: rotated._id.toHexString(),
+        token,
+        expiresAt: rotated.expiresAt.toISOString(),
+        ownerActivationRequired: true,
+      };
+    });
+  }
+
   async completeOwnerActivation(
     ctx: RequestContext,
     input: { token: string; verification: { challengeId: string; code: string }; password: string },
@@ -400,8 +485,9 @@ export class LeadApplicationService {
     });
     const passwordHash = await this.passwordHasher.hash(input.password);
     await this.identity.activatePending(user._id, passwordHash, now, tx);
+    const activationCtx = { ...ctx, userId: user._id.toHexString() };
     const membership = await this.workspaceService.completeOwnerActivation(
-      ctx,
+      activationCtx,
       invitation,
       user._id,
       tx,
@@ -604,6 +690,29 @@ function safeWorkspace(workspace: {
     ownerUserId: workspace.ownerUserId.toHexString(),
     status: workspace.status,
   };
+}
+
+function safeInvitationForAudit(invitation: InvitationDocument) {
+  return {
+    id: invitation._id.toHexString(),
+    workspaceId: invitation.workspaceId?.toHexString(),
+    type: invitation.type,
+    status: invitation.status,
+    expiresAt: invitation.expiresAt.toISOString(),
+    updatedAt: invitation.updatedAt.toISOString(),
+  };
+}
+
+function invitationMatchesOwner(
+  invitation: InvitationDocument,
+  owner: {
+    normalizedEmail?: string;
+    normalizedPhone?: string;
+  },
+) {
+  if (invitation.normalizedEmail) return invitation.normalizedEmail === owner.normalizedEmail;
+  if (invitation.normalizedPhone) return invitation.normalizedPhone === owner.normalizedPhone;
+  return false;
 }
 
 function normalizeLeadIdentifiers(email: string, phone: string) {

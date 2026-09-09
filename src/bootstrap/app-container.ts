@@ -40,6 +40,8 @@ import {
   EntitlementService,
   SubscriptionApplicationService,
 } from '../modules/subscriptions/subscription.service';
+import { CoachingRelationshipRepository } from '../modules/trainees/trainee.repository';
+import { TraineeApplicationService } from '../modules/trainees/trainee.service';
 import {
   BranchRepository,
   InvitationRepository,
@@ -78,6 +80,7 @@ export interface AppContainer {
   workspaceUsage: WorkspaceUsageRepository;
   manualPayments: ManualPaymentRepository;
   leadsRepo: LeadRepository;
+  coachingRelationships: CoachingRelationshipRepository;
   credentialDigests: CredentialDigests;
   passwordHasher: PasswordHasher;
   jwt: JwtService;
@@ -90,6 +93,7 @@ export interface AppContainer {
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
   leads: LeadApplicationService;
+  trainees: TraineeApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -124,6 +128,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const workspaceUsage = new WorkspaceUsageRepository(database);
   const manualPayments = new ManualPaymentRepository(database);
   const leadsRepo = new LeadRepository(database);
+  const coachingRelationships = new CoachingRelationshipRepository(database);
   const accessControl = new AccessControlService(
     platformMemberships,
     workspaceRepo,
@@ -146,6 +151,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     workspaceMemberships,
     audit,
     outbox,
+    coachingRelationships,
   );
   const workspaces = new WorkspaceApplicationService(
     unitOfWork,
@@ -194,6 +200,23 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const trainees = new TraineeApplicationService(
+    unitOfWork,
+    coachingRelationships,
+    identity,
+    workspaceRepo,
+    workspaceMemberships,
+    branches,
+    membershipBranchAssignments,
+    invitations,
+    permissionProfiles,
+    accessControl,
+    entitlements,
+    workspaceUsage,
+    credentialDigests,
+    audit,
+    outbox,
+  );
 
   return {
     config,
@@ -224,6 +247,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     workspaceUsage,
     manualPayments,
     leadsRepo,
+    coachingRelationships,
     credentialDigests,
     passwordHasher,
     jwt,
@@ -248,5 +272,6 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     entitlements,
     subscriptions,
     leads,
+    trainees,
   };
 }

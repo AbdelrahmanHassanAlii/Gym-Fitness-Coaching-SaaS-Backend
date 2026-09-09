@@ -13,6 +13,7 @@ import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerLeadRoutes } from '../modules/leads/lead.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
+import { registerTraineeRoutes } from '../modules/trainees/trainee.routes';
 import { registerWorkspaceRoutes } from '../modules/workspaces/workspace.routes';
 import { registerHealthRoutes } from './health.routes';
 
@@ -80,6 +81,7 @@ export async function buildApp(container: AppContainer) {
   await registerPermissionRoutes(app, container);
   await registerSubscriptionRoutes(app, container);
   await registerLeadRoutes(app, container);
+  await registerTraineeRoutes(app, container);
 
   return app;
 }

@@ -117,6 +117,10 @@ export interface InvitationDocument {
   normalizedPhone?: string;
   intendedRoles: WorkspaceMembershipRole[];
   branchIds: ObjectId[];
+  stage7Context?: {
+    homeBranchId?: ObjectId;
+    proposedPrimaryTrainerMembershipId?: ObjectId;
+  };
   invitedBy: ObjectId;
   tokenDigest: string;
   expiresAt: Date;

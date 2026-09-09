@@ -3,11 +3,13 @@ import { loadConfig } from '../config/config';
 import { OutboxProcessor } from '../core/events/outbox.processor';
 import { createLogger } from '../core/logging/logger';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
+import { registerTraineeOutboxHandlers } from '../modules/trainees/trainee.outbox-handlers';
 
 const config = loadConfig();
 const logger = createLogger(config).child({ process: 'worker', workerId: config.worker.id });
 const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
+registerTraineeOutboxHandlers(outbox, container.trainees);
 const subscriptionJobs = new SubscriptionJobRunner(container);
 
 let shuttingDown = false;

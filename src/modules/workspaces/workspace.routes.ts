@@ -2,6 +2,7 @@ import type { Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
 import { requireAccess } from '../../core/access-control/access-control.middleware';
+import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import { requireAuth } from '../auth/auth.middleware';
 import { Permissions } from '../permissions/permission.registry';
 import {
@@ -409,9 +410,24 @@ export async function registerWorkspaceRoutes(
         response: { 200: {}, 401: ErrorResponse, 409: ErrorResponse },
       },
     },
-    async (request) => ({
-      data: await container.workspaces.acceptInvitation(request.ctx, request.body.token),
-    }),
+    async (request) => {
+      const digest = container.credentialDigests.hashHighEntropySecret(request.body.token);
+      const invitation = await container.invitations.findPendingByDigest(digest);
+      if (invitation?.type === 'TRAINEE_INVITATION') {
+        const result = await container.idempotency.runInTransaction(request.ctx, {
+          key: idempotencyKey(request.headers),
+          routeKey: 'POST /api/v1/invitations/accept:trainee',
+          fingerprint: { tokenDigest: digest },
+          unitOfWork: container.unitOfWork,
+          operation: (tx) =>
+            container.trainees
+              .acceptTraineeInvitation(request.ctx, request.body.token, tx)
+              .then((body) => ({ body })),
+        });
+        return { data: result.body };
+      }
+      return { data: await container.workspaces.acceptInvitation(request.ctx, request.body.token) };
+    },
   );
 
   app.post<{ Params: Static<typeof InvitationParams> }>(

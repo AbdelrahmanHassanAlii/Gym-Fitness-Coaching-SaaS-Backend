@@ -408,6 +408,42 @@ export class WorkspaceMembershipRepository {
 
     return result;
   }
+
+  async updateRoleAndProfileContributions(
+    workspaceId: ObjectId,
+    membershipId: ObjectId,
+    expectedAccessVersion: number,
+    input: {
+      roles: WorkspaceMembershipRole[];
+      permissionProfileIds: ObjectId[];
+      now?: Date;
+    },
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const now = input.now ?? new Date();
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: membershipId, workspaceId, status: 'ACTIVE', accessVersion: expectedAccessVersion },
+      {
+        $set: {
+          roles: input.roles,
+          permissionProfileIds: input.permissionProfileIds,
+          updatedAt: now,
+        },
+        $inc: { accessVersion: 1 },
+      },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+
+    if (!result) {
+      throw new AppError({
+        code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'The workspace membership access state has changed.',
+      });
+    }
+
+    return result;
+  }
 }
 
 export class BranchRepository {
@@ -597,8 +633,11 @@ export class MembershipBranchAssignmentRepository {
   async listActive(
     workspaceId: ObjectId,
     membershipId: ObjectId,
+    tx?: TransactionContext,
   ): Promise<MembershipBranchAssignmentDocument[]> {
-    return await this.assignments.find({ workspaceId, membershipId, active: true }).toArray();
+    return await this.assignments
+      .find({ workspaceId, membershipId, active: true }, tx ? { session: tx.session } : undefined)
+      .toArray();
   }
 
   async endActive(
@@ -689,6 +728,18 @@ export class InvitationRepository {
     );
   }
 
+  async findPendingByIdInWorkspace(
+    workspaceId: ObjectId,
+    invitationId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<InvitationDocument | null> {
+    return await this.invitations.findOne(
+      { _id: invitationId, workspaceId, status: 'PENDING', expiresAt: { $gt: now } },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
   async rotatePendingOwnerActivationToken(
     invitationId: ObjectId,
     workspaceId: ObjectId,
@@ -703,6 +754,31 @@ export class InvitationRepository {
         _id: invitationId,
         workspaceId,
         type: 'OWNER_ACTIVATION',
+        status: 'PENDING',
+        tokenDigest: currentTokenDigest,
+        expiresAt: { $gt: now },
+      },
+      { $set: { tokenDigest: newTokenDigest, expiresAt, updatedAt: now } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) throw invalidInvitation();
+    return result;
+  }
+
+  async rotatePendingTraineeInvitationToken(
+    invitationId: ObjectId,
+    workspaceId: ObjectId,
+    currentTokenDigest: string,
+    newTokenDigest: string,
+    expiresAt: Date,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<InvitationDocument> {
+    const result = await this.invitations.findOneAndUpdate(
+      {
+        _id: invitationId,
+        workspaceId,
+        type: 'TRAINEE_INVITATION',
         status: 'PENDING',
         tokenDigest: currentTokenDigest,
         expiresAt: { $gt: now },

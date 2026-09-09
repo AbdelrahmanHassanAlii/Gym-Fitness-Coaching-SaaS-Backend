@@ -413,6 +413,21 @@ export class WorkspaceUsageRepository {
     await this.reserveCounter(workspaceId, 'activeTrainees', limit, 'TRAINEE_LIMIT_EXCEEDED', tx);
   }
 
+  async releaseTrainee(workspaceId: ObjectId, tx?: TransactionContext): Promise<void> {
+    const result = await this.usage.updateOne(
+      { workspaceId, activeTrainees: { $gt: 0 } },
+      { $inc: { activeTrainees: -1, revision: 1 }, $set: { updatedAt: new Date() } },
+      tx ? { session: tx.session } : undefined,
+    );
+    if (result.modifiedCount !== 1) {
+      throw new AppError({
+        code: 'TRAINEE_USAGE_RELEASE_INVALID',
+        httpStatus: 409,
+        message: 'Active trainee usage cannot be released.',
+      });
+    }
+  }
+
   async reserveStaff(
     workspaceId: ObjectId,
     limit: number | undefined,

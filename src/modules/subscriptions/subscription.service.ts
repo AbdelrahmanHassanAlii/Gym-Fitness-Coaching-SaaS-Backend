@@ -5,6 +5,7 @@ import type { TransactionContext, UnitOfWork } from '../../core/database/unit-of
 import { AppError } from '../../core/errors/app-error';
 import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
+import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type {
   WorkspaceMembershipRepository,
   WorkspaceRepository,
@@ -145,6 +146,7 @@ export class SubscriptionApplicationService {
     private readonly memberships: WorkspaceMembershipRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly coachingRelationships?: CoachingRelationshipRepository,
   ) {}
 
   async getWorkspaceSubscription(_ctx: RequestContext, workspaceId: string) {
@@ -981,7 +983,9 @@ export class SubscriptionApplicationService {
         )
         .map((membership) => membership.userId.toHexString()),
     );
-    return { activeTrainees: 0, activeStaff: activeStaffUsers.size, storageBytes: 0 };
+    const activeTrainees =
+      (await this.coachingRelationships?.countActiveForUsage(workspaceId)) ?? 0;
+    return { activeTrainees, activeStaff: activeStaffUsers.size, storageBytes: 0 };
   }
 
   private async requirePlan(planId: ObjectId) {

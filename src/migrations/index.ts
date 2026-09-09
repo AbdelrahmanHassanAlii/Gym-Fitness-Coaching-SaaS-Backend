@@ -9,6 +9,7 @@ import { migration008Stage5SubscriptionsAndBillingIndexes } from './008-stage5-s
 import { migration009Stage5ExistingWorkspaceBackfill } from './009-stage5-existing-workspace-backfill';
 import { migration010Stage5WorkspaceUsageRevision } from './010-stage5-workspace-usage-revision';
 import { migration011Stage6Leads } from './011-stage6-leads';
+import { migration012Stage7TraineeRelationships } from './012-stage7-trainee-relationships';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -23,4 +24,5 @@ export const migrations: Migration[] = [
   migration009Stage5ExistingWorkspaceBackfill,
   migration010Stage5WorkspaceUsageRevision,
   migration011Stage6Leads,
+  migration012Stage7TraineeRelationships,
 ];

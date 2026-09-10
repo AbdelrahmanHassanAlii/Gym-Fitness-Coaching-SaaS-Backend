@@ -14,6 +14,7 @@ import { Permissions, systemPermissionProfiles } from '../permissions/permission
 import type { PermissionProfileRepository } from '../permissions/permission.repository';
 import type { WorkspaceUsageRepository } from '../subscriptions/subscription.repository';
 import type { EntitlementService } from '../subscriptions/subscription.service';
+import type { TrainingRelationshipLifecyclePort } from '../training/training.service';
 import type {
   BranchRepository,
   InvitationRepository,
@@ -67,6 +68,7 @@ export class TraineeApplicationService {
     private readonly credentialDigests: CredentialDigests,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly trainingLifecycle?: TrainingRelationshipLifecyclePort,
   ) {}
 
   async listRelationships(
@@ -449,6 +451,13 @@ export class TraineeApplicationService {
       workspaceId,
       relationshipId,
       async ({ workspace, relationship, actorId, now, tx }) => {
+        await this.trainingLifecycle?.closeActiveProgramForRelationshipEnd(
+          ctx,
+          workspace._id,
+          relationship._id,
+          now,
+          tx,
+        );
         await this.relationships.closeActiveAssignmentsForRelationship(
           relationship._id,
           actorId,

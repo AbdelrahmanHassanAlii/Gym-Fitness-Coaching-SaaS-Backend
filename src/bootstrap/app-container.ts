@@ -42,6 +42,8 @@ import {
 } from '../modules/subscriptions/subscription.service';
 import { CoachingRelationshipRepository } from '../modules/trainees/trainee.repository';
 import { TraineeApplicationService } from '../modules/trainees/trainee.service';
+import { TrainingRepository } from '../modules/training/training.repository';
+import { TrainingApplicationService } from '../modules/training/training.service';
 import {
   BranchRepository,
   InvitationRepository,
@@ -81,6 +83,7 @@ export interface AppContainer {
   manualPayments: ManualPaymentRepository;
   leadsRepo: LeadRepository;
   coachingRelationships: CoachingRelationshipRepository;
+  trainingRepo: TrainingRepository;
   credentialDigests: CredentialDigests;
   passwordHasher: PasswordHasher;
   jwt: JwtService;
@@ -94,6 +97,7 @@ export interface AppContainer {
   subscriptions: SubscriptionApplicationService;
   leads: LeadApplicationService;
   trainees: TraineeApplicationService;
+  training: TrainingApplicationService;
 }
 
 export async function createAppContainer(config: AppConfig): Promise<AppContainer> {
@@ -129,6 +133,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const manualPayments = new ManualPaymentRepository(database);
   const leadsRepo = new LeadRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
+  const trainingRepo = new TrainingRepository(database);
   const accessControl = new AccessControlService(
     platformMemberships,
     workspaceRepo,
@@ -200,6 +205,16 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const training = new TrainingApplicationService(
+    unitOfWork,
+    trainingRepo,
+    coachingRelationships,
+    workspaceMemberships,
+    accessControl,
+    entitlements,
+    audit,
+    outbox,
+  );
   const trainees = new TraineeApplicationService(
     unitOfWork,
     coachingRelationships,
@@ -216,6 +231,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     credentialDigests,
     audit,
     outbox,
+    training,
   );
 
   return {
@@ -248,6 +264,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     manualPayments,
     leadsRepo,
     coachingRelationships,
+    trainingRepo,
     credentialDigests,
     passwordHasher,
     jwt,
@@ -273,5 +290,6 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     subscriptions,
     leads,
     trainees,
+    training,
   };
 }

@@ -616,6 +616,7 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
         throw conflict('ACTIVE_PROGRAM_CONFLICT');
       }
       if (existing) {
+        await this.training.guardActiveProgramForWorkout(id, guarded._id, existing._id, tx);
         await this.workoutLifecycle?.assertNoInProgressForProgramTransition(
           id,
           guarded._id,
@@ -687,6 +688,12 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     );
     await this.entitlements.assert(id, 'WRITE', 'training');
     return await this.unitOfWork.withTransaction(async (tx) => {
+      await this.training.guardActiveProgramForWorkout(
+        id,
+        relationship._id,
+        objectId(programId, 'PROGRAM_NOT_FOUND'),
+        tx,
+      );
       await this.workoutLifecycle?.assertNoInProgressForProgramTransition(
         id,
         relationship._id,

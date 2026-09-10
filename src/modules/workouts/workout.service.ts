@@ -1,6 +1,5 @@
 import { ObjectId } from 'mongodb';
 import type { AccessControlService } from '../../core/access-control/access-control.service';
-import type { AuthorizationDecision } from '../../core/access-control/access-control.types';
 import type { AuditWriter } from '../../core/audit/audit.writer';
 import type { TransactionContext, UnitOfWork } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -266,11 +265,7 @@ export class WorkoutApplicationService
     const id = objectId(workoutId, 'WORKOUT_NOT_FOUND');
     const now = new Date();
     return await this.withTransaction(tx, async (tx) => {
-      await this.relationships.guardWorkoutLifecycleActive(
-        ids.relationship._id,
-        ids.workspaceId,
-        tx,
-      );
+      await this.relationships.guardWorkoutLifecycleOpen(ids.relationship._id, ids.workspaceId, tx);
       const existing = await this.requireWorkout(ids.workspaceId, ids.relationship._id, id, tx);
       if (existing.status === 'COMPLETED') throw conflict('WORKOUT_ALREADY_COMPLETED');
       if (existing.status === 'ABANDONED') throw conflict('WORKOUT_ABANDONED');
@@ -655,18 +650,12 @@ export class WorkoutApplicationService
     permission: string,
     action: AccessAction,
   ) {
-    let decision: AuthorizationDecision | undefined;
-    try {
-      decision = await this.accessControl.authorize(ctx, {
-        context: 'WORKSPACE',
-        workspaceId,
-        permission,
-        scope: { type: 'WORKSPACE' },
-      });
-    } catch (error) {
-      if (isTraineeSelf(ctx, relationship) && traineeSelfActions.has(action)) return;
-      throw error;
-    }
+    const decision = await this.accessControl.authorize(ctx, {
+      context: 'WORKSPACE',
+      workspaceId,
+      permission,
+      scope: { type: 'WORKSPACE' },
+    });
     const membership = await this.actorMembership(ctx, workspaceId);
     if (membership.roles.includes('GYM_OWNER')) return;
     if (membership.roles.includes('GYM_MANAGER')) {

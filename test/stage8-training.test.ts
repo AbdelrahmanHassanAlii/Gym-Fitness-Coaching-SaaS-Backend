@@ -68,7 +68,10 @@ describe('Stage 8 migration 013', () => {
       integrationConfig(`stage8_upgrade_migration_${new ObjectId().toHexString()}`),
     );
     try {
-      await new MigrationRunner(cleanContainer.database.db, migrations).migrate();
+      const lockedThroughStage8 = migrations.filter(
+        (migration) => migration.id !== '014-stage9-workout-execution',
+      );
+      await new MigrationRunner(cleanContainer.database.db, lockedThroughStage8).migrate();
       expect(
         await cleanContainer.database.db
           .collection('db_migrations')
@@ -79,7 +82,9 @@ describe('Stage 8 migration 013', () => {
       ).toBe(false);
 
       const lockedStage7 = migrations.filter(
-        (migration) => migration.id !== '013-stage8-training-foundation',
+        (migration) =>
+          migration.id !== '013-stage8-training-foundation' &&
+          migration.id !== '014-stage9-workout-execution',
       );
       await new MigrationRunner(upgradeContainer.database.db, lockedStage7).migrate();
       expect(
@@ -92,8 +97,8 @@ describe('Stage 8 migration 013', () => {
           .collection('db_migrations')
           .countDocuments({ migrationId: '013-stage8-training-foundation' }),
       ).toBe(0);
-      await new MigrationRunner(upgradeContainer.database.db, migrations).migrate();
-      await new MigrationRunner(upgradeContainer.database.db, migrations).migrate();
+      await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
+      await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
       expect(
         await upgradeContainer.database.db
           .collection('db_migrations')
@@ -1631,7 +1636,7 @@ describe('Stage 8 training foundation integration', () => {
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
   });
 
-  test('activation route requires Idempotency-Key and no Stage 9 endpoints exist', async () => {
+  test('activation route requires Idempotency-Key and Stage 9 progress routes require it too', async () => {
     const seed = await seedGym(container);
     const exercise = await activeGymExercise(container, seed, 'Curl');
     const program = await container.training.createProgram(
@@ -1670,7 +1675,7 @@ describe('Stage 8 training foundation integration', () => {
       url: `/api/v1/workspaces/${seed.workspaceId}/relationships/${seed.relationshipId}/programs/${program.program.id}/progress/skip`,
       payload: { reason: 'travel' },
     });
-    expect(skipped.statusCode).toBe(404);
+    expect(skipped.statusCode).toBe(400);
     await app.close();
   });
 });

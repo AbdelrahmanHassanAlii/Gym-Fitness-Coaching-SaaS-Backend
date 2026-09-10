@@ -11,6 +11,7 @@ import { migration010Stage5WorkspaceUsageRevision } from './010-stage5-workspace
 import { migration011Stage6Leads } from './011-stage6-leads';
 import { migration012Stage7TraineeRelationships } from './012-stage7-trainee-relationships';
 import { migration013Stage8TrainingFoundation } from './013-stage8-training-foundation';
+import { migration014Stage9WorkoutExecution } from './014-stage9-workout-execution';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -27,4 +28,5 @@ export const migrations: Migration[] = [
   migration011Stage6Leads,
   migration012Stage7TraineeRelationships,
   migration013Stage8TrainingFoundation,
+  migration014Stage9WorkoutExecution,
 ];

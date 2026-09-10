@@ -32,6 +32,7 @@ export interface CoachingRelationshipDocument {
   currentPrimaryTrainerAssignmentId?: ObjectId;
   engagementPeriods: CoachingEngagementPeriod[];
   version: number;
+  trainingLifecycleRevision?: number;
   requestedBy?: ObjectId;
   requestedAt?: Date;
   activatedBy?: ObjectId;

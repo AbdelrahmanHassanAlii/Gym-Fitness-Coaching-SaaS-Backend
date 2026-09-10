@@ -35,6 +35,7 @@ export interface ExerciseDocument {
   externalVideoUrl?: string;
   status: TrainingStatus;
   version: number;
+  newUseGuardRevision?: number;
   archivedAt?: Date;
   createdAt: Date;
   updatedAt: Date;

@@ -585,14 +585,13 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
       'mutate',
     );
     await this.entitlements.assert(id, 'WRITE', 'training');
+    const membership = await this.actorMembership(ctx, id);
+    const preExistingActive = await this.training.findActiveProgram(id, relationship._id);
     const now = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
     return await this.withTransaction(tx, async (tx) => {
-      const guarded = await this.relationships.bumpVersion(
+      const guarded = await this.relationships.guardTrainingLifecycleActive(
         relationship._id,
         id,
-        relationship.version,
-        ['ACTIVE'],
-        now,
         tx,
       );
       const program = await this.requireProgram(id, guarded._id, programId, tx);
@@ -600,7 +599,12 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
       if (program.version !== input.expectedVersion) throw conflict('PROGRAM_VERSION_CONFLICT');
       const revision = await this.requireProgramRevision(program, tx);
       assertHasExecutableDay(revision.days);
+      await this.assertSnapshotExercisesStillUsable(id, membership._id, revision.days, tx);
       const existing = await this.training.findActiveProgram(id, guarded._id, tx);
+      if (existing && !preExistingActive) throw conflict('ACTIVE_PROGRAM_CONFLICT');
+      if (existing && preExistingActive && !existing._id.equals(preExistingActive._id)) {
+        throw conflict('ACTIVE_PROGRAM_CONFLICT');
+      }
       if (existing) {
         await this.training.replaceActiveProgram(existing, program._id, now, tx);
         await this.writeAudit(ctx, id, 'ProgramReplaced', existing._id, 'replace', tx);
@@ -886,7 +890,7 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
       const exerciseIds = exerciseInputs.map((exercise) =>
         objectId(exercise.exerciseId, 'EXERCISE_NOT_FOUND'),
       );
-      const exercises = await this.training.findExercisesForUse(
+      const exercises = await this.training.guardExercisesForUse(
         exerciseIds,
         workspaceId,
         ownerMembershipId,
@@ -915,7 +919,7 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     tx: TransactionContext,
   ) {
     const ids = days.flatMap((day) => day.exercises.map((exercise) => exercise.exerciseId));
-    const exercises = await this.training.findExercisesForUse(
+    const exercises = await this.training.guardExercisesForUse(
       ids,
       workspaceId,
       ownerMembershipId,
@@ -931,12 +935,15 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     tx: TransactionContext,
   ) {
     const ids = days.flatMap((day) => day.exercises.map((exercise) => exercise.exerciseId));
-    const exercises = await this.training.findExercisesForUse(
-      ids,
-      workspaceId,
-      ownerMembershipId,
-      tx,
-    );
+    let exercises: ExerciseDocument[];
+    try {
+      exercises = await this.training.guardExercisesForUse(ids, workspaceId, ownerMembershipId, tx);
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'EXERCISE_NOT_FOUND') {
+        throw conflict('PROGRAM_SOURCE_EXERCISE_UNAVAILABLE');
+      }
+      throw error;
+    }
     if (exercises.length !== new Set(ids.map((id) => id.toHexString())).size) {
       throw conflict('PROGRAM_SOURCE_EXERCISE_UNAVAILABLE');
     }

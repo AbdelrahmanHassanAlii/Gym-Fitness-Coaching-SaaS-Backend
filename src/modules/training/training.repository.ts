@@ -180,6 +180,34 @@ export class TrainingRepository {
       .toArray();
   }
 
+  async guardExercisesForUse(
+    exerciseIds: ObjectId[],
+    workspaceId: ObjectId,
+    ownerMembershipId: ObjectId,
+    tx: TransactionContext,
+  ) {
+    const uniqueIds = [...new Map(exerciseIds.map((id) => [id.toHexString(), id])).values()];
+    const exercises: ExerciseDocument[] = [];
+    for (const exerciseId of uniqueIds) {
+      const exercise = await this.exercises.findOneAndUpdate(
+        {
+          _id: exerciseId,
+          status: 'ACTIVE',
+          $or: [
+            { scope: 'SYSTEM', workspaceId: null },
+            { scope: 'GYM', workspaceId },
+            { scope: 'PRIVATE', workspaceId, ownerMembershipId },
+          ],
+        },
+        { $inc: { newUseGuardRevision: 1 } },
+        { returnDocument: 'after', ...options(tx) },
+      );
+      if (!exercise) throw conflict('EXERCISE_NOT_FOUND');
+      exercises.push(exercise);
+    }
+    return exercises;
+  }
+
   async createTemplate(
     template: ProgramTemplateDocument,
     revision: ProgramTemplateRevisionDocument,

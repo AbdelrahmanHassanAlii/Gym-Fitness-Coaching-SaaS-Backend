@@ -33,6 +33,7 @@ export interface CoachingRelationshipDocument {
   engagementPeriods: CoachingEngagementPeriod[];
   version: number;
   trainingLifecycleRevision?: number;
+  workoutLifecycleRevision?: number;
   requestedBy?: ObjectId;
   requestedAt?: Date;
   activatedBy?: ObjectId;

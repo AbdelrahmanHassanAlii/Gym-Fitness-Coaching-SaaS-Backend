@@ -10,6 +10,10 @@ import { Permissions } from '../permissions/permission.registry';
 import type { EntitlementService } from '../subscriptions/subscription.service';
 import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type { CoachingRelationshipDocument } from '../trainees/trainee.types';
+import type {
+  WorkoutProgramLifecyclePort,
+  WorkoutRelationshipLifecyclePort,
+} from '../workouts/workout.service';
 import type { WorkspaceMembershipRepository } from '../workspaces/workspace.repository';
 import type { WorkspaceMembershipDocument } from '../workspaces/workspace.types';
 import type { TrainingRepository } from './training.repository';
@@ -73,6 +77,8 @@ export interface TrainingRelationshipLifecyclePort {
 }
 
 export class TrainingApplicationService implements TrainingRelationshipLifecyclePort {
+  private workoutLifecycle?: WorkoutProgramLifecyclePort & WorkoutRelationshipLifecyclePort;
+
   constructor(
     private readonly unitOfWork: UnitOfWork,
     private readonly training: TrainingRepository,
@@ -83,6 +89,10 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
   ) {}
+
+  setWorkoutLifecyclePort(port: WorkoutProgramLifecyclePort & WorkoutRelationshipLifecyclePort) {
+    this.workoutLifecycle = port;
+  }
 
   async listExercises(ctx: RequestContext, workspaceId: string, query: PageQuery) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
@@ -606,6 +616,12 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
         throw conflict('ACTIVE_PROGRAM_CONFLICT');
       }
       if (existing) {
+        await this.workoutLifecycle?.assertNoInProgressForProgramTransition(
+          id,
+          guarded._id,
+          existing._id,
+          tx,
+        );
         await this.training.replaceActiveProgram(existing, program._id, now, tx);
         await this.writeAudit(ctx, id, 'ProgramReplaced', existing._id, 'replace', tx);
         await this.writeOutbox(ctx, id, 'ProgramReplaced', 'program', existing._id, tx);
@@ -671,6 +687,12 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     );
     await this.entitlements.assert(id, 'WRITE', 'training');
     return await this.unitOfWork.withTransaction(async (tx) => {
+      await this.workoutLifecycle?.assertNoInProgressForProgramTransition(
+        id,
+        relationship._id,
+        objectId(programId, 'PROGRAM_NOT_FOUND'),
+        tx,
+      );
       const program = await this.training.completeProgram(
         id,
         relationship._id,
@@ -747,6 +769,13 @@ export class TrainingApplicationService implements TrainingRelationshipLifecycle
     now: Date,
     tx: TransactionContext,
   ): Promise<void> {
+    await this.workoutLifecycle?.abandonInProgressForRelationshipEnd(
+      ctx,
+      workspaceId,
+      relationshipId,
+      now,
+      tx,
+    );
     const program = await this.training.closeActiveProgramForRelationshipEnd(
       workspaceId,
       relationshipId,

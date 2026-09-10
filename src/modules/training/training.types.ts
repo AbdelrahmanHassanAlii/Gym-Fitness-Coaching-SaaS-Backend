@@ -110,6 +110,7 @@ export interface ProgramDocument {
   archivedAt?: Date;
   currentRevisionId: ObjectId;
   assignedBy: ObjectId;
+  workoutLifecycleRevision?: number;
   createdAt: Date;
   updatedAt: Date;
   version: number;
@@ -136,6 +137,7 @@ export interface ProgramProgressDocument {
   completedDayCount: number;
   skippedDayCount: number;
   version: number;
+  workoutLifecycleRevision?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -147,7 +149,7 @@ export interface ProgramProgressEventDocument {
   programId: ObjectId;
   programRevisionId: ObjectId;
   daySequence: number;
-  type: 'INITIALIZED' | 'COMPLETED' | 'SKIPPED' | 'RESET' | 'MANUAL_ADVANCE';
+  type: 'INITIALIZED' | 'COMPLETED' | 'SKIPPED' | 'DEFERRED' | 'RESET' | 'MANUAL_ADVANCE';
   workoutSessionId?: ObjectId;
   reason?: string;
   performedBy: ObjectId;

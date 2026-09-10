@@ -1,4 +1,4 @@
-import type { Collection, MongoServerError, ObjectId } from 'mongodb';
+import { type Collection, type MongoServerError, ObjectId } from 'mongodb';
 import type { Database } from '../../core/database/database';
 import type { TransactionContext } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -403,6 +403,10 @@ export class TrainingRepository {
     );
   }
 
+  async findProgramRevisionById(workspaceId: ObjectId, programId: ObjectId, revisionId: ObjectId) {
+    return await this.programRevisions.findOne({ _id: revisionId, workspaceId, programId });
+  }
+
   async createProgramRevision(
     program: ProgramDocument,
     expectedVersion: number,
@@ -477,6 +481,21 @@ export class TrainingRepository {
       if (isDuplicate(error)) throw conflict('ACTIVE_PROGRAM_CONFLICT');
       throw error;
     }
+  }
+
+  async guardActiveProgramForWorkout(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    programId: ObjectId,
+    tx: TransactionContext,
+  ) {
+    const result = await this.programs.findOneAndUpdate(
+      { _id: programId, workspaceId, relationshipId, status: 'ACTIVE' },
+      { $inc: { workoutLifecycleRevision: 1 } },
+      { returnDocument: 'after', ...options(tx) },
+    );
+    if (!result) throw conflict('PROGRAM_NOT_ACTIVE');
+    return result;
   }
 
   async replaceActiveProgram(
@@ -589,6 +608,121 @@ export class TrainingRepository {
     tx?: TransactionContext,
   ) {
     return await this.progress.findOne({ workspaceId, relationshipId, programId }, options(tx));
+  }
+
+  async guardProgressForWorkoutStart(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    programId: ObjectId,
+    currentDaySequence: number,
+    tx: TransactionContext,
+  ) {
+    const result = await this.progress.findOneAndUpdate(
+      { workspaceId, relationshipId, programId, currentDaySequence },
+      { $inc: { workoutLifecycleRevision: 1 } },
+      { returnDocument: 'after', ...options(tx) },
+    );
+    if (!result) throw conflict('PROGRAM_DAY_NOT_CURRENT');
+    return result;
+  }
+
+  async advanceProgress(
+    input: {
+      workspaceId: ObjectId;
+      relationshipId: ObjectId;
+      programId: ObjectId;
+      expectedVersion: number;
+      currentDaySequence: number;
+      nextDaySequence: number;
+      kind: 'COMPLETED' | 'SKIPPED';
+      programRevisionId: ObjectId;
+      workoutSessionId?: ObjectId;
+      reason?: string;
+      performedBy: ObjectId;
+      now: Date;
+    },
+    tx: TransactionContext,
+  ) {
+    const update =
+      input.kind === 'COMPLETED'
+        ? { completedDayCount: 1, version: 1 }
+        : { skippedDayCount: 1, version: 1 };
+    const result = await this.progress.findOneAndUpdate(
+      {
+        workspaceId: input.workspaceId,
+        relationshipId: input.relationshipId,
+        programId: input.programId,
+        version: input.expectedVersion,
+        currentDaySequence: input.currentDaySequence,
+      },
+      {
+        $set: { currentDaySequence: input.nextDaySequence, updatedAt: input.now },
+        $inc: update,
+      },
+      { returnDocument: 'after', ...options(tx) },
+    );
+    if (!result) throw conflict('PROGRAM_PROGRESS_CONFLICT');
+    await this.progressEvents.insertOne(
+      {
+        _id: new ObjectId(),
+        workspaceId: input.workspaceId,
+        relationshipId: input.relationshipId,
+        programId: input.programId,
+        programRevisionId: input.programRevisionId,
+        daySequence: input.currentDaySequence,
+        type: input.kind,
+        ...(input.workoutSessionId ? { workoutSessionId: input.workoutSessionId } : {}),
+        ...(input.reason ? { reason: input.reason } : {}),
+        performedBy: input.performedBy,
+        occurredAt: input.now,
+      },
+      options(tx),
+    );
+    return result;
+  }
+
+  async deferProgress(
+    input: {
+      workspaceId: ObjectId;
+      relationshipId: ObjectId;
+      programId: ObjectId;
+      expectedVersion: number;
+      programRevisionId: ObjectId;
+      currentDaySequence: number;
+      reason?: string;
+      performedBy: ObjectId;
+      now: Date;
+    },
+    tx: TransactionContext,
+  ) {
+    const result = await this.progress.findOneAndUpdate(
+      {
+        workspaceId: input.workspaceId,
+        relationshipId: input.relationshipId,
+        programId: input.programId,
+        version: input.expectedVersion,
+        currentDaySequence: input.currentDaySequence,
+      },
+      { $set: { updatedAt: input.now }, $inc: { version: 1 } },
+      { returnDocument: 'after', ...options(tx) },
+    );
+    if (!result) throw conflict('PROGRAM_PROGRESS_CONFLICT');
+    await this.progressEvents.insertOne(
+      {
+        _id: new ObjectId(),
+        workspaceId: input.workspaceId,
+        relationshipId: input.relationshipId,
+        programId: input.programId,
+        programRevisionId: input.programRevisionId,
+        daySequence: input.currentDaySequence,
+        type: 'DEFERRED',
+        ...(input.reason ? { reason: input.reason } : {}),
+        performedBy: input.performedBy,
+        occurredAt: input.now,
+      },
+      options(tx),
+    );
+    return result;
   }
 
   async countActivePrograms(workspaceId: ObjectId, relationshipId: ObjectId) {

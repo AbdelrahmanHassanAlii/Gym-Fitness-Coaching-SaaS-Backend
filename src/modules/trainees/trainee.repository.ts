@@ -357,6 +357,7 @@ export class CoachingRelationshipRepository {
   async listActivePrimaryAssignmentsForStaff(
     workspaceId: ObjectId,
     staffMembershipId: ObjectId,
+    options: { afterId?: ObjectId; limit?: number } = {},
   ): Promise<TraineeStaffAssignmentDocument[]> {
     return await this.assignments
       .find({
@@ -364,8 +365,29 @@ export class CoachingRelationshipRepository {
         staffMembershipId,
         assignmentType: 'PRIMARY_TRAINER',
         active: true,
+        ...(options.afterId ? { _id: { $gt: options.afterId } } : {}),
       })
+      .sort({ _id: 1 })
+      .limit(options.limit ?? 50)
       .toArray();
+  }
+
+  async findActivePrimaryById(
+    assignmentId: ObjectId,
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<TraineeStaffAssignmentDocument | null> {
+    return await this.assignments.findOne(
+      {
+        _id: assignmentId,
+        workspaceId,
+        relationshipId,
+        assignmentType: 'PRIMARY_TRAINER',
+        active: true,
+      },
+      tx ? { session: tx.session } : undefined,
+    );
   }
 
   async closeAssignment(

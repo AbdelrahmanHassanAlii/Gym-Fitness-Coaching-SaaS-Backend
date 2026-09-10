@@ -40,6 +40,7 @@ const traineeCountedStatuses = new Set<CoachingRelationshipStatus>([
   'ACTIVE',
   'NEEDS_REASSIGNMENT',
 ]);
+const reconciliationBatchSize = 25;
 const staffProfileRoles = new Set<WorkspaceMembershipRole>([
   'GYM_OWNER',
   'GYM_MANAGER',
@@ -320,6 +321,7 @@ export class TraineeApplicationService {
       if (!referral) throw notFound('REFERRAL_CODE_NOT_FOUND');
       const workspace = await this.requireWorkspace(referral.ownerWorkspaceId, tx);
       if (workspace.status !== 'ACTIVE') throw conflict('WORKSPACE_INACTIVE');
+      await this.entitlements.assert(workspace._id, 'WRITE', undefined, tx);
       const existing = await this.relationships.findByWorkspaceAndUser(workspace._id, actorId, tx);
       if (existing) {
         if (existing.status === 'PENDING') return { relationship: safeRelationship(existing) };
@@ -1005,7 +1007,8 @@ export class TraineeApplicationService {
         now,
         tx,
       );
-      if (input.endSourceRelationship ?? true) {
+      const shouldEndSource = input.endSourceRelationship ?? true;
+      if (shouldEndSource) {
         await this.relationships.closeActiveAssignmentsForRelationship(
           source._id,
           actorId,
@@ -1032,7 +1035,16 @@ export class TraineeApplicationService {
           tx,
         );
       }
-      await this.writeAudit(ctx, sourceWorkspaceId, 'TraineeEnded', source._id, 'migrate_out', tx);
+      if (shouldEndSource) {
+        await this.writeAudit(
+          ctx,
+          sourceWorkspaceId,
+          'TraineeEnded',
+          source._id,
+          'migrate_out',
+          tx,
+        );
+      }
       await this.writeAudit(
         ctx,
         destinationWorkspaceId,
@@ -1041,15 +1053,17 @@ export class TraineeApplicationService {
         'migrate_in',
         tx,
       );
-      await this.writeOutbox(
-        ctx,
-        sourceWorkspaceId,
-        'TraineeEnded',
-        'coaching_relationship',
-        source._id,
-        { relationshipId: source._id.toHexString(), migration: true },
-        tx,
-      );
+      if (shouldEndSource) {
+        await this.writeOutbox(
+          ctx,
+          sourceWorkspaceId,
+          'TraineeEnded',
+          'coaching_relationship',
+          source._id,
+          { relationshipId: source._id.toHexString(), migration: true },
+          tx,
+        );
+      }
       await this.writeOutbox(
         ctx,
         destinationWorkspaceId,
@@ -1074,68 +1088,78 @@ export class TraineeApplicationService {
     staffMembershipId: ObjectId,
     reason: string,
   ) {
-    const assignments = await this.relationships.listActivePrimaryAssignmentsForStaff(
-      workspaceId,
-      staffMembershipId,
-    );
     let changed = 0;
-    for (const assignment of assignments) {
-      const relationship = await this.relationships.findByIdInWorkspace(
+    let afterId: ObjectId | undefined;
+    while (true) {
+      const assignments = await this.relationships.listActivePrimaryAssignmentsForStaff(
         workspaceId,
-        assignment.relationshipId,
+        staffMembershipId,
+        { ...(afterId ? { afterId } : {}), limit: reconciliationBatchSize },
       );
-      if (relationship?.status !== 'ACTIVE') continue;
-      const workspace = await this.workspaces.findById(workspaceId);
-      if (!workspace) continue;
-      if (await this.isEligiblePrimary(workspace, relationship, staffMembershipId)) continue;
-      await this.unitOfWork.withTransaction(async (tx) => {
-        const fresh = await this.relationships.findByIdInWorkspace(
+      if (assignments.length === 0) break;
+      afterId = assignments.at(-1)?._id;
+      for (const assignment of assignments) {
+        const relationship = await this.relationships.findByIdInWorkspace(
           workspaceId,
-          relationship._id,
-          tx,
+          assignment.relationshipId,
         );
-        if (fresh?.status !== 'ACTIVE') return;
-        const primary = await this.relationships.findActivePrimary(fresh._id, tx);
-        if (!primary?.staffMembershipId.equals(staffMembershipId)) return;
-        await this.relationships.closeAssignment(
-          primary._id,
-          staffMembershipId,
-          reason,
-          new Date(),
-          tx,
-        );
-        const updated = await this.relationships.markNeedsReassignment(
-          fresh._id,
-          workspaceId,
-          fresh.version,
-          new Date(),
-          tx,
-        );
-        const systemCtx = {
-          correlationId: `stage7-reconcile-${fresh._id.toHexString()}`,
-          ipAddress: 'system',
-          locale: 'en',
-          timezone: 'UTC',
-        } as RequestContext;
-        await this.writeAudit(
-          systemCtx,
-          workspaceId,
-          'TraineeNeedsReassignment',
-          updated._id,
-          'system_reconcile',
-          tx,
-        );
-        await this.writeOutbox(
-          systemCtx,
-          workspaceId,
-          'TraineeNeedsReassignment',
-          'coaching_relationship',
-          updated._id,
-          { relationshipId: updated._id.toHexString(), reason },
-          tx,
-        );
-        changed += 1;
-      });
+        if (relationship?.status !== 'ACTIVE') continue;
+        const workspace = await this.workspaces.findById(workspaceId);
+        if (!workspace) continue;
+        if (await this.isEligiblePrimary(workspace, relationship, staffMembershipId)) continue;
+        await this.unitOfWork.withTransaction(async (tx) => {
+          const fresh = await this.relationships.findByIdInWorkspace(
+            workspaceId,
+            relationship._id,
+            tx,
+          );
+          if (fresh?.status !== 'ACTIVE') return;
+          if (!fresh.currentPrimaryTrainerAssignmentId?.equals(assignment._id)) return;
+          const primary = await this.relationships.findActivePrimaryById(
+            assignment._id,
+            workspaceId,
+            fresh._id,
+            tx,
+          );
+          if (!primary?.staffMembershipId.equals(staffMembershipId)) return;
+          const currentWorkspace = await this.workspaces.findById(workspaceId, tx);
+          if (!currentWorkspace) return;
+          if (await this.isEligiblePrimary(currentWorkspace, fresh, staffMembershipId, tx)) return;
+          const now = new Date();
+          await this.relationships.closeAssignment(primary._id, staffMembershipId, reason, now, tx);
+          const updated = await this.relationships.markNeedsReassignment(
+            fresh._id,
+            workspaceId,
+            fresh.version,
+            now,
+            tx,
+          );
+          const systemCtx = {
+            correlationId: `stage7-reconcile-${fresh._id.toHexString()}`,
+            ipAddress: 'system',
+            locale: 'en',
+            timezone: 'UTC',
+          } as RequestContext;
+          await this.writeAudit(
+            systemCtx,
+            workspaceId,
+            'TraineeNeedsReassignment',
+            updated._id,
+            'system_reconcile',
+            tx,
+          );
+          await this.writeOutbox(
+            systemCtx,
+            workspaceId,
+            'TraineeNeedsReassignment',
+            'coaching_relationship',
+            updated._id,
+            { relationshipId: updated._id.toHexString(), reason },
+            tx,
+          );
+          changed += 1;
+        });
+      }
     }
     return changed;
   }

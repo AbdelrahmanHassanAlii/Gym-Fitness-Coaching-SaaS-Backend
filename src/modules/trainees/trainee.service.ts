@@ -10,6 +10,7 @@ import type { RequestContext } from '../../core/request-context/request-context'
 import { normalizeEmail } from '../auth/auth.normalization';
 import type { IdentityRepository } from '../identity/identity.repository';
 import type { UserDocument } from '../identity/identity.types';
+import type { NutritionRelationshipLifecyclePort } from '../nutrition/nutrition.service';
 import { Permissions, systemPermissionProfiles } from '../permissions/permission.registry';
 import type { PermissionProfileRepository } from '../permissions/permission.repository';
 import type { WorkspaceUsageRepository } from '../subscriptions/subscription.repository';
@@ -69,6 +70,7 @@ export class TraineeApplicationService {
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
     private readonly trainingLifecycle?: TrainingRelationshipLifecyclePort,
+    private readonly nutritionLifecycle?: NutritionRelationshipLifecyclePort,
   ) {}
 
   async listRelationships(
@@ -452,6 +454,13 @@ export class TraineeApplicationService {
       relationshipId,
       async ({ workspace, relationship, actorId, now, tx }) => {
         await this.trainingLifecycle?.closeActiveProgramForRelationshipEnd(
+          ctx,
+          workspace._id,
+          relationship._id,
+          now,
+          tx,
+        );
+        await this.nutritionLifecycle?.closeActiveNutritionPlanForRelationshipEnd(
           ctx,
           workspace._id,
           relationship._id,

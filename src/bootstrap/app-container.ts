@@ -23,6 +23,8 @@ import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
 import { LeadRepository } from '../modules/leads/lead.repository';
 import { LeadApplicationService } from '../modules/leads/lead.service';
+import { NutritionRepository } from '../modules/nutrition/nutrition.repository';
+import { NutritionApplicationService } from '../modules/nutrition/nutrition.service';
 import {
   AccessGrantRepository,
   PermissionDefinitionRepository,
@@ -84,6 +86,7 @@ export interface AppContainer {
   workspaceUsage: WorkspaceUsageRepository;
   manualPayments: ManualPaymentRepository;
   leadsRepo: LeadRepository;
+  nutritionRepo: NutritionRepository;
   coachingRelationships: CoachingRelationshipRepository;
   trainingRepo: TrainingRepository;
   workoutsRepo: WorkoutRepository;
@@ -99,6 +102,7 @@ export interface AppContainer {
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
   leads: LeadApplicationService;
+  nutrition: NutritionApplicationService;
   trainees: TraineeApplicationService;
   training: TrainingApplicationService;
   workouts: WorkoutApplicationService;
@@ -136,6 +140,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const workspaceUsage = new WorkspaceUsageRepository(database);
   const manualPayments = new ManualPaymentRepository(database);
   const leadsRepo = new LeadRepository(database);
+  const nutritionRepo = new NutritionRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
   const trainingRepo = new TrainingRepository(database);
   const workoutsRepo = new WorkoutRepository(database);
@@ -232,6 +237,16 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     outbox,
   );
   training.setWorkoutLifecyclePort(workouts);
+  const nutrition = new NutritionApplicationService(
+    unitOfWork,
+    nutritionRepo,
+    coachingRelationships,
+    workspaceMemberships,
+    accessControl,
+    entitlements,
+    audit,
+    outbox,
+  );
   const trainees = new TraineeApplicationService(
     unitOfWork,
     coachingRelationships,
@@ -249,6 +264,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
     training,
+    nutrition,
   );
 
   return {
@@ -280,6 +296,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     workspaceUsage,
     manualPayments,
     leadsRepo,
+    nutritionRepo,
     coachingRelationships,
     trainingRepo,
     workoutsRepo,
@@ -307,6 +324,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     entitlements,
     subscriptions,
     leads,
+    nutrition,
     trainees,
     training,
     workouts,

@@ -108,6 +108,7 @@ export class NutritionRepository {
     workspaceId: ObjectId | null,
     ownerMembershipId: ObjectId | undefined,
     expectedVersion: number,
+    actor: ObjectId,
     now: Date,
     tx?: TransactionContext,
   ) {
@@ -121,7 +122,10 @@ export class NutritionRepository {
     };
     const result = await this.foods.findOneAndUpdate(
       filter,
-      { $set: { status: 'ARCHIVED', archivedAt: now, updatedAt: now }, $inc: { version: 1 } },
+      {
+        $set: { status: 'ARCHIVED', archivedAt: now, updatedAt: now, updatedBy: actor },
+        $inc: { version: 1 },
+      },
       { returnDocument: 'after', ...options(tx) },
     );
     if (!result) throw conflict('FOOD_VERSION_CONFLICT');

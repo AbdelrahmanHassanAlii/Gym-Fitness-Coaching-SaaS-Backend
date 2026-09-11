@@ -186,13 +186,15 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
     platform = false,
   ) {
     const id = platform ? undefined : objectId(workspaceId ?? '', 'WORKSPACE_NOT_FOUND');
+    const decision = platform
+      ? undefined
+      : await this.authorizeWorkspace(ctx, id as ObjectId, Permissions.FoodsUpdate);
     if (platform) {
       await this.accessControl.authorize(ctx, {
         context: 'PLATFORM',
         permission: Permissions.SystemFoodsUpdate,
       });
     } else {
-      await this.authorizeWorkspace(ctx, id as ObjectId, Permissions.FoodsUpdate);
       await this.entitlements.assert(id as ObjectId, 'WRITE', 'nutrition');
     }
     const membership = id ? await this.actorMembership(ctx, id) : undefined;
@@ -205,6 +207,13 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
         platform,
         tx,
       );
+      if (!platform && membership && decision) {
+        assertWorkspaceFoodMutationScope(
+          food.scope as 'GYM' | 'PRIVATE',
+          membership,
+          decision.source,
+        );
+      }
       const updated = await this.nutrition.updateFood(
         food._id,
         food.scope,
@@ -234,13 +243,15 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
     platform = false,
   ) {
     const id = platform ? undefined : objectId(workspaceId ?? '', 'WORKSPACE_NOT_FOUND');
+    const decision = platform
+      ? undefined
+      : await this.authorizeWorkspace(ctx, id as ObjectId, Permissions.FoodsArchive);
     if (platform) {
       await this.accessControl.authorize(ctx, {
         context: 'PLATFORM',
         permission: Permissions.SystemFoodsArchive,
       });
     } else {
-      await this.authorizeWorkspace(ctx, id as ObjectId, Permissions.FoodsArchive);
       await this.entitlements.assert(id as ObjectId, 'WRITE', 'nutrition');
     }
     const membership = id ? await this.actorMembership(ctx, id) : undefined;
@@ -253,12 +264,20 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
         platform,
         tx,
       );
+      if (!platform && membership && decision) {
+        assertWorkspaceFoodMutationScope(
+          food.scope as 'GYM' | 'PRIVATE',
+          membership,
+          decision.source,
+        );
+      }
       const archived = await this.nutrition.archiveFood(
         food._id,
         food.scope,
         food.workspaceId ?? null,
         food.ownerMembershipId ?? undefined,
         input.expectedVersion,
+        actorId(ctx),
         now,
         tx,
       );
@@ -573,10 +592,15 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
         ids.workspaceId,
         tx,
       );
+      const plan = await this.requirePlan(ids.workspaceId, ids.relationship._id, planId, tx);
+      if (plan.status !== 'ACTIVE') throw conflict('NUTRITION_PLAN_STATUS_INVALID');
+      if (plan.version !== input.expectedVersion) {
+        throw conflict('NUTRITION_PLAN_VERSION_CONFLICT');
+      }
       const completed = await this.nutrition.completePlan(
         ids.workspaceId,
         ids.relationship._id,
-        objectId(planId, 'NUTRITION_PLAN_NOT_FOUND'),
+        plan._id,
         input.expectedVersion,
         now,
         tx,
@@ -615,10 +639,17 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
         ids.workspaceId,
         tx,
       );
+      const plan = await this.requirePlan(ids.workspaceId, ids.relationship._id, planId, tx);
+      if (!['DRAFT', 'REPLACED', 'COMPLETED'].includes(plan.status)) {
+        throw conflict('NUTRITION_PLAN_STATUS_INVALID');
+      }
+      if (plan.version !== input.expectedVersion) {
+        throw conflict('NUTRITION_PLAN_VERSION_CONFLICT');
+      }
       const archived = await this.nutrition.archivePlan(
         ids.workspaceId,
         ids.relationship._id,
-        objectId(planId, 'NUTRITION_PLAN_NOT_FOUND'),
+        plan._id,
         input.expectedVersion,
         now,
         tx,
@@ -738,13 +769,7 @@ export class NutritionApplicationService implements NutritionRelationshipLifecyc
         assignment.staffMembershipId.equals(membershipId) &&
         ['NUTRITIONIST', 'PRIMARY_TRAINER'].includes(assignment.assignmentType),
     );
-    if (
-      !assigned &&
-      !membership.roles.includes('GYM_OWNER') &&
-      !membership.roles.includes('GYM_MANAGER')
-    ) {
-      throw conflict('NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID');
-    }
+    if (!assigned) throw conflict('NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID');
   }
 
   private async buildRevision(

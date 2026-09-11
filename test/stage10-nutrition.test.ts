@@ -223,6 +223,11 @@ describe('Stage 10 nutrition integration', () => {
         selectedUnit: 'MILLILITER',
       }),
     ).rejects.toMatchObject({ code: 'FOOD_UNIT_MISMATCH' });
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        selectedUnit: 'UNIT',
+      }),
+    ).rejects.toMatchObject({ code: 'FOOD_UNIT_MISMATCH' });
 
     const plan = await createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
       selectedAmount: 150,
@@ -238,6 +243,10 @@ describe('Stage 10 nutrition integration', () => {
       calculatedFatG: 7.5,
     });
     expect(plan.revision.calculatedCalories).toBe(300);
+    expect(plan.revision.targetCalories).toBe(2100);
+    expect(plan.revision.targetProteinG).toBe(160);
+    expect(plan.revision.targetCarbsG).toBe(220);
+    expect(plan.revision.targetFatG).toBe(70);
     expect(plan.revision.meals[0]?.alternativeGroups[0]?.options[0]?.items[0]).toMatchObject({
       selectedUnit: 'MILLILITER',
       selectedAmount: 500,
@@ -276,6 +285,90 @@ describe('Stage 10 nutrition integration', () => {
     });
     expect(unitPlan.revision.calculatedCalories).toBe(142);
     expect(servingPlan.revision.calculatedCalories).toBe(151.5);
+    expect(servingPlan.revision.supplements[0]).toMatchObject({
+      name: 'Creatine',
+      amount: 5,
+      unit: 'g',
+      timing: 'daily',
+    });
+
+    const fractionalA = await container.nutrition.createFood(seed.ownerCtx, seed.workspaceId, {
+      ...foodInput('Fractional A'),
+      baseAmount: 3,
+      calories: 1,
+      proteinG: 1,
+      carbsG: 1,
+      fatG: 1,
+      scope: 'GYM',
+    });
+    const fractionalB = await container.nutrition.createFood(seed.ownerCtx, seed.workspaceId, {
+      ...foodInput('Fractional B'),
+      baseAmount: 3,
+      calories: 1,
+      proteinG: 1,
+      carbsG: 1,
+      fatG: 1,
+      scope: 'GYM',
+    });
+    const fractional = await container.nutrition.createPlan(
+      seed.ownerCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      {
+        name: 'Fractional',
+        responsibleMembershipId: seed.trainerMembershipId,
+        targetCalories: 2000,
+        targetProteinG: 150,
+        targetCarbsG: 250,
+        targetFatG: 55,
+        waterTargetMl: 1800,
+        meals: [
+          {
+            order: 1,
+            name: 'Fractional Meal',
+            items: [fractionalA.food.id, fractionalB.food.id].map((foodId) => ({
+              foodId,
+              selectedAmount: 1,
+              selectedUnit: 'GRAM' as const,
+            })),
+          },
+        ],
+      },
+    );
+    expect(fractional.revision.meals[0]?.items.map((item) => item.calculatedCalories)).toEqual([
+      0.33, 0.33,
+    ]);
+    expect(fractional.revision.calculatedCalories).toBe(0.66);
+    expect(fractional.revision.targetCalories).toBe(2000);
+
+    await expect(
+      container.nutrition.createPlan(seed.ownerCtx, seed.workspaceId, seed.relationshipId, {
+        name: 'Bad Water',
+        responsibleMembershipId: seed.trainerMembershipId,
+        waterTargetMl: 0,
+        meals: [
+          {
+            order: 1,
+            name: 'Meal',
+            items: [{ foodId: food.food.id, selectedAmount: 1, selectedUnit: 'GRAM' }],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_VALUE_INVALID' });
+    await expect(
+      container.nutrition.createPlan(seed.ownerCtx, seed.workspaceId, seed.relationshipId, {
+        name: 'NaN Water',
+        responsibleMembershipId: seed.trainerMembershipId,
+        waterTargetMl: Number.NaN,
+        meals: [
+          {
+            order: 1,
+            name: 'Meal',
+            items: [{ foodId: food.food.id, selectedAmount: 1, selectedUnit: 'GRAM' }],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_VALUE_INVALID' });
   });
 
   test('food snapshots are immutable and new revisions snapshot current Food state through the use guard', async () => {
@@ -315,6 +408,178 @@ describe('Stage 10 nutrition integration', () => {
     const usedFood = await db.collection('foods').findOne({ _id: new ObjectId(food.food.id) });
     expect(usedFood?.version).toBe(1);
     expect(usedFood?.nutritionUseRevision).toBeGreaterThanOrEqual(2);
+  });
+
+  test('archived alternative Foods remain historical but block complete-content N+1 validation', async () => {
+    const seed = await seedGym(container);
+    const primary = await ownerFood(container, seed, 'Primary Alternative Test');
+    const alternative = await container.nutrition.createFood(seed.ownerCtx, seed.workspaceId, {
+      ...foodInput('Huge Alternative'),
+      baseUnit: 'MILLILITER',
+      calories: 5000,
+      scope: 'GYM',
+    });
+    const plan = await createSimplePlan(container, seed, seed.ownerCtx, [primary.food.id], {
+      alternativeFoodId: alternative.food.id,
+    });
+    expect(plan.revision.calculatedCalories).toBe(10);
+    expect(plan.revision.meals[0]?.alternativeGroups[0]?.options[0]?.items[0]).toMatchObject({
+      caloriesSnapshot: 5000,
+      calculatedCalories: 2500000,
+    });
+    await container.nutrition.archiveFood(seed.ownerCtx, seed.workspaceId, alternative.food.id, {
+      expectedVersion: alternative.food.version,
+    });
+    const historical = await container.nutrition.getPlan(
+      seed.ownerCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      plan.plan.id,
+    );
+    expect(historical.revision?.meals[0]?.alternativeGroups[0]?.options[0]?.items[0]).toMatchObject(
+      { caloriesSnapshot: 5000 },
+    );
+    await expect(
+      container.nutrition.createRevision(
+        seed.ownerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        plan.plan.id,
+        {
+          ...revisionInput([primary.food.id], { alternativeFoodId: alternative.food.id }),
+          expectedVersion: plan.plan.version,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'FOOD_ARCHIVED' });
+  });
+
+  test('responsibleMembershipId requires an active eligible relationship practitioner at create and activation time', async () => {
+    const seed = await seedGym(container);
+    const food = await ownerFood(container, seed, 'Responsible Food');
+    const nutritionist = await seedNutritionist(container, seed);
+    const unassignedNutritionist = await seedNutritionist(container, seed, false);
+    const otherWorkspace = await seedGym(container);
+
+    await expect(
+      createSimplePlan(container, seed, nutritionist.ctx, [food.food.id]),
+    ).resolves.toMatchObject({
+      plan: { responsibleMembershipId: nutritionist.membership._id.toHexString() },
+    });
+
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: seed.trainerMembershipId,
+      }),
+    ).resolves.toMatchObject({
+      plan: { responsibleMembershipId: seed.trainerMembershipId },
+    });
+
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: seed.ownerMembershipId,
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+
+    await db
+      .collection('workspace_memberships')
+      .updateOne(
+        { _id: nutritionist.membership._id },
+        { $set: { status: 'SUSPENDED', updatedAt: new Date() } },
+      );
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: nutritionist.membership._id.toHexString(),
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+    await db
+      .collection('workspace_memberships')
+      .updateOne(
+        { _id: nutritionist.membership._id },
+        { $set: { status: 'ACTIVE', updatedAt: new Date() } },
+      );
+
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: otherWorkspace.trainerMembershipId,
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: unassignedNutritionist.membership._id.toHexString(),
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+
+    await expect(
+      createSimplePlan(container, seed, seed.ownerCtx, [food.food.id], {
+        responsibleMembershipId: seed.assistantMembershipId,
+      }),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+
+    const relationshipB = await seedRelationshipWithPrimary(container, seed);
+    await expect(
+      container.nutrition.createPlan(
+        seed.ownerCtx,
+        seed.workspaceId,
+        relationshipB.relationshipId,
+        {
+          name: 'Wrong Relationship Responsible',
+          responsibleMembershipId: nutritionist.membership._id.toHexString(),
+          ...revisionInput([food.food.id]),
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+
+    const activeFood = await ownerFood(container, seed, 'Responsible Activation Food');
+    const previous = await createSimplePlan(container, seed, seed.ownerCtx, [activeFood.food.id], {
+      name: 'Previous Active',
+      responsibleMembershipId: seed.trainerMembershipId,
+    });
+    await activateIdempotently(container, seed, previous.plan.id, previous.plan.version, 'prev');
+    const draft = await createSimplePlan(container, seed, nutritionist.ctx, [activeFood.food.id]);
+    await db.collection('trainee_staff_assignments').updateOne(
+      {
+        relationshipId: seed.relationshipObjectId,
+        staffMembershipId: nutritionist.membership._id,
+      },
+      { $set: { active: false, endedAt: new Date(), updatedAt: new Date() } },
+    );
+    const activatedEventsBefore = await db
+      .collection('outbox_events')
+      .countDocuments({ eventType: 'NutritionPlanActivated' });
+    await expect(
+      activateIdempotently(container, seed, draft.plan.id, draft.plan.version, 'invalidated'),
+    ).rejects.toMatchObject({ code: 'NUTRITION_RESPONSIBLE_MEMBERSHIP_INVALID' });
+    expect(
+      await db.collection('nutrition_plans').findOne({ _id: new ObjectId(draft.plan.id) }),
+    ).toMatchObject({ status: 'DRAFT' });
+    expect(
+      await db.collection('nutrition_plans').findOne({ _id: new ObjectId(previous.plan.id) }),
+    ).toMatchObject({ status: 'ACTIVE' });
+    expect(
+      await db.collection('outbox_events').countDocuments({ eventType: 'NutritionPlanActivated' }),
+    ).toBe(activatedEventsBefore);
+    expect(
+      await db.collection('idempotency_records').findOne({ key: 'invalidated' }),
+    ).not.toMatchObject({ state: 'COMPLETED' });
+
+    await expect(
+      container.nutrition.getPlan(
+        seed.traineeCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        previous.plan.id,
+      ),
+    ).resolves.toMatchObject({ plan: { status: 'ACTIVE' } });
+    await expect(
+      container.nutrition.createRevision(
+        nutritionist.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        previous.plan.id,
+        { ...revisionInput([activeFood.food.id]), expectedVersion: 1 },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 
   test('activation, replacement, idempotency, archived food revalidation, and ACTIVE edits are transactional', async () => {
@@ -388,6 +653,25 @@ describe('Stage 10 nutrition integration', () => {
     expect(
       await db.collection('nutrition_plans').findOne({ _id: new ObjectId(second.plan.id) }),
     ).toMatchObject({ status: 'ACTIVE' });
+    const activeAfterFoodArchive = await container.nutrition.getPlan(
+      seed.ownerCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      second.plan.id,
+    );
+    expect(activeAfterFoodArchive.plan.status).toBe('ACTIVE');
+    expect(activeAfterFoodArchive.revision?.meals[0]?.items[0]).toMatchObject({
+      foodNameSnapshot: 'Activation Food',
+    });
+    await expect(
+      container.nutrition.createRevision(
+        seed.ownerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        second.plan.id,
+        { ...revisionInput([food.food.id]), expectedVersion: activeRevision.plan.version },
+      ),
+    ).rejects.toMatchObject({ code: 'FOOD_ARCHIVED' });
   });
 
   test('concurrency protections cover foods, revisions, activation, relationship END, create, complete and public guard versions', async () => {
@@ -530,7 +814,9 @@ describe('Stage 10 nutrition integration', () => {
     ]);
     expect(revisionArchive.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(rejectedCodes(revisionArchive)).toEqual(
-      expect.arrayContaining(['NUTRITION_PLAN_STATUS_INVALID']),
+      expect.arrayContaining([
+        expect.stringMatching(/^NUTRITION_PLAN_(STATUS_INVALID|VERSION_CONFLICT)$/),
+      ]),
     );
 
     const revisionCompleteSeed = await seedGym(container);
@@ -573,7 +859,9 @@ describe('Stage 10 nutrition integration', () => {
     ]);
     expect(revisionComplete.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(rejectedCodes(revisionComplete)).toEqual(
-      expect.arrayContaining(['NUTRITION_PLAN_STATUS_INVALID']),
+      expect.arrayContaining([
+        expect.stringMatching(/^NUTRITION_PLAN_(STATUS_INVALID|VERSION_CONFLICT)$/),
+      ]),
     );
 
     const actSeed = await seedGym(container);
@@ -766,20 +1054,162 @@ describe('Stage 10 nutrition integration', () => {
 
   test('authorization, DENY precedence, entitlements, and platform/system separation are enforced', async () => {
     const seed = await seedGym(container);
+    const manager = await seedManager(container, seed);
     const nutritionist = await seedNutritionist(container, seed);
     const other = await seedRelationshipWithPrimary(container, seed);
     const platform = await seedPlatformAdmin(container);
     const food = await ownerFood(container, seed, 'Auth Food');
+    const plan = await createSimplePlan(container, seed, seed.ownerCtx, [food.food.id]);
 
     await expect(
       createSimplePlan(container, seed, seed.assistantCtx, [food.food.id]),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(
+      container.nutrition.createRevision(
+        seed.assistantCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        plan.plan.id,
+        { ...revisionInput([food.food.id]), expectedVersion: plan.plan.version },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.nutrition.archivePlan(
+        seed.assistantCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        plan.plan.id,
+        { expectedVersion: plan.plan.version },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    await expect(
+      container.nutrition.listPlans(manager.ctx, seed.workspaceId, seed.relationshipId, {}),
+    ).resolves.toHaveProperty('data');
+    await expect(
+      createSimplePlan(container, seed, manager.ctx, [food.food.id]),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.nutrition.createRevision(
+        manager.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        plan.plan.id,
+        {
+          ...revisionInput([food.food.id], { notes: 'manager update' }),
+          expectedVersion: plan.plan.version,
+        },
+      ),
+    ).resolves.toMatchObject({ plan: { status: 'DRAFT', version: plan.plan.version + 1 } });
+    await expect(
+      activateIdempotently(
+        container,
+        seed,
+        plan.plan.id,
+        plan.plan.version + 1,
+        'manager-activate',
+        undefined,
+        manager.ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    await expect(
+      createSimplePlan(container, seed, seed.trainerCtx, [food.food.id]),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    const trainerRevision = await container.nutrition.createRevision(
+      seed.trainerCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      plan.plan.id,
+      {
+        ...revisionInput([food.food.id], { notes: 'trainer update' }),
+        expectedVersion: plan.plan.version + 1,
+      },
+    );
+    expect(trainerRevision.plan.version).toBe(plan.plan.version + 2);
+    await expect(
+      container.nutrition.createRevision(
+        seed.trainerCtx,
+        seed.workspaceId,
+        other.relationshipId,
+        plan.plan.id,
+        { ...revisionInput([food.food.id]), expectedVersion: trainerRevision.plan.version },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    await expect(
       createSimplePlan(container, seed, nutritionist.ctx, [food.food.id]),
     ).resolves.toMatchObject({ plan: { status: 'DRAFT' } });
     await expect(
+      container.nutrition.updateFood(nutritionist.ctx, seed.workspaceId, food.food.id, {
+        expectedVersion: food.food.version,
+        calories: 11,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.nutrition.archiveFood(nutritionist.ctx, seed.workspaceId, food.food.id, {
+        expectedVersion: food.food.version,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    const privateFood = await container.nutrition.createFood(nutritionist.ctx, seed.workspaceId, {
+      ...foodInput('Auth Private'),
+      scope: 'PRIVATE',
+    });
+    await expect(
+      container.nutrition.updateFood(nutritionist.ctx, seed.workspaceId, privateFood.food.id, {
+        expectedVersion: privateFood.food.version,
+        calories: 12,
+      }),
+    ).resolves.toMatchObject({ food: { version: privateFood.food.version + 1 } });
+
+    await writeGrant(db, {
+      workspaceId: seed.workspaceObjectId,
+      subjectId: nutritionist.membership._id,
+      permission: Permissions.FoodsCreate,
+      effect: 'ALLOW',
+    });
+    await expect(
+      container.nutrition.createFood(nutritionist.ctx, seed.workspaceId, {
+        ...foodInput('Granted Gym Food'),
+        scope: 'GYM',
+      }),
+    ).resolves.toMatchObject({ food: { scope: 'GYM' } });
+
+    await expect(
       container.nutrition.listPlans(seed.traineeCtx, seed.workspaceId, other.relationshipId, {}),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.nutrition.listFoods(seed.traineeCtx, seed.workspaceId, {}),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const independent = await seedIndependent(container);
+    await expect(
+      container.nutrition.listPlans(
+        independent.trainerCtx,
+        independent.workspaceId,
+        independent.relationshipId,
+        {},
+      ),
+    ).resolves.toHaveProperty('data');
+    await expect(
+      container.nutrition.createFood(independent.trainerCtx, independent.workspaceId, {
+        ...foodInput('Independent Private'),
+        scope: 'PRIVATE',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.nutrition.createPlan(
+        independent.trainerCtx,
+        independent.workspaceId,
+        independent.relationshipId,
+        {
+          name: 'Independent Plan',
+          responsibleMembershipId: independent.trainerMembershipId,
+          meals: [],
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
     await writeGrant(db, {
       workspaceId: seed.workspaceObjectId,
       subjectId: new ObjectId(seed.traineeMembershipId),
@@ -841,13 +1271,142 @@ describe('Stage 10 nutrition integration', () => {
         relationshipId: createSeed.relationshipObjectId,
       }),
     ).toBe(0);
+    const originalAudit = container.audit.write.bind(container.audit);
+    container.audit.write = (async () => {
+      throw new Error('plan create audit failed');
+    }) as typeof container.audit.write;
+    await expect(
+      createSimplePlan(container, createSeed, createSeed.ownerCtx, [food.food.id]),
+    ).rejects.toThrow('plan create audit failed');
+    container.audit.write = originalAudit;
+    expect(
+      await db.collection('nutrition_plans').countDocuments({
+        relationshipId: createSeed.relationshipObjectId,
+      }),
+    ).toBe(0);
+    await container.nutrition.archiveFood(
+      createSeed.ownerCtx,
+      createSeed.workspaceId,
+      food.food.id,
+      {
+        expectedVersion: food.food.version,
+      },
+    );
+    await expect(
+      createSimplePlan(container, createSeed, createSeed.ownerCtx, [food.food.id]),
+    ).rejects.toMatchObject({ code: 'FOOD_ARCHIVED' });
+    expect(
+      await db.collection('nutrition_plans').countDocuments({
+        relationshipId: createSeed.relationshipObjectId,
+      }),
+    ).toBe(0);
 
     const activationSeed = await seedGym(container);
     const activationFood = await ownerFood(container, activationSeed, 'Activation Failure Food');
-    const plan = await createSimplePlan(container, activationSeed, activationSeed.ownerCtx, [
-      activationFood.food.id,
-    ]);
+    const activeBeforeFailure = await createSimplePlan(
+      container,
+      activationSeed,
+      activationSeed.ownerCtx,
+      [activationFood.food.id],
+      { name: 'Existing Active Before Failure' },
+    );
+    await activateIdempotently(
+      container,
+      activationSeed,
+      activeBeforeFailure.plan.id,
+      activeBeforeFailure.plan.version,
+      'existing-active-before-failure',
+    );
+    const replacementDraft = await createSimplePlan(
+      container,
+      activationSeed,
+      activationSeed.ownerCtx,
+      [activationFood.food.id],
+      { name: 'Replacement Failure Draft' },
+    );
+    const originalReplaceActive = container.nutritionRepo.replaceActivePlan.bind(
+      container.nutritionRepo,
+    );
+    container.nutritionRepo.replaceActivePlan = (async () => {
+      throw new Error('previous active replacement failed');
+    }) as typeof container.nutritionRepo.replaceActivePlan;
+    await expect(
+      activateIdempotently(
+        container,
+        activationSeed,
+        replacementDraft.plan.id,
+        replacementDraft.plan.version,
+        'replace-write-failure',
+      ),
+    ).rejects.toThrow('previous active replacement failed');
+    container.nutritionRepo.replaceActivePlan = originalReplaceActive;
+    expect(
+      await db
+        .collection('nutrition_plans')
+        .findOne({ _id: new ObjectId(activeBeforeFailure.plan.id) }),
+    ).toMatchObject({ status: 'ACTIVE' });
+    expect(
+      await db
+        .collection('nutrition_plans')
+        .findOne({ _id: new ObjectId(replacementDraft.plan.id) }),
+    ).toMatchObject({ status: 'DRAFT' });
+    const targetFailureDraft = await createSimplePlan(
+      container,
+      activationSeed,
+      activationSeed.ownerCtx,
+      [activationFood.food.id],
+      { name: 'Target Failure Draft' },
+    );
+    const originalActivatePlan = container.nutritionRepo.activatePlan.bind(container.nutritionRepo);
+    container.nutritionRepo.activatePlan = (async () => {
+      throw new Error('target activation failed');
+    }) as typeof container.nutritionRepo.activatePlan;
+    await expect(
+      activateIdempotently(
+        container,
+        activationSeed,
+        targetFailureDraft.plan.id,
+        targetFailureDraft.plan.version,
+        'target-write-failure',
+      ),
+    ).rejects.toThrow('target activation failed');
+    container.nutritionRepo.activatePlan = originalActivatePlan;
+    expect(
+      await db
+        .collection('nutrition_plans')
+        .findOne({ _id: new ObjectId(targetFailureDraft.plan.id) }),
+    ).toMatchObject({ status: 'DRAFT' });
+    const auditFailureDraft = await createSimplePlan(
+      container,
+      activationSeed,
+      activationSeed.ownerCtx,
+      [activationFood.food.id],
+      { name: 'Audit Failure Draft' },
+    );
+    container.audit.write = (async () => {
+      throw new Error('activation audit failed');
+    }) as typeof container.audit.write;
+    await expect(
+      activateIdempotently(
+        container,
+        activationSeed,
+        auditFailureDraft.plan.id,
+        auditFailureDraft.plan.version,
+        'activation-audit-failure',
+      ),
+    ).rejects.toThrow('activation audit failed');
+    container.audit.write = originalAudit;
+    expect(
+      await db
+        .collection('nutrition_plans')
+        .findOne({ _id: new ObjectId(auditFailureDraft.plan.id) }),
+    ).toMatchObject({ status: 'DRAFT' });
     const originalOutbox = container.outbox.write.bind(container.outbox);
+    const outboxSeed = await seedGym(container);
+    const outboxFood = await ownerFood(container, outboxSeed, 'Activation Outbox Failure Food');
+    const outboxDraft = await createSimplePlan(container, outboxSeed, outboxSeed.ownerCtx, [
+      outboxFood.food.id,
+    ]);
     const activatedEventsBeforeFailure = await db
       .collection('outbox_events')
       .countDocuments({ eventType: 'NutritionPlanActivated' });
@@ -857,45 +1416,175 @@ describe('Stage 10 nutrition integration', () => {
     await expect(
       activateIdempotently(
         container,
-        activationSeed,
-        plan.plan.id,
-        plan.plan.version,
+        outboxSeed,
+        outboxDraft.plan.id,
+        outboxDraft.plan.version,
         'fail-outbox',
       ),
     ).rejects.toThrow('outbox failed');
     container.outbox.write = originalOutbox;
     expect(
-      await db.collection('nutrition_plans').findOne({ _id: new ObjectId(plan.plan.id) }),
+      await db.collection('nutrition_plans').findOne({ _id: new ObjectId(outboxDraft.plan.id) }),
     ).toMatchObject({ status: 'DRAFT' });
     expect(
       await db.collection('outbox_events').countDocuments({ eventType: 'NutritionPlanActivated' }),
     ).toBe(activatedEventsBeforeFailure);
+    const idempotencySeed = await seedGym(container);
+    const idempotencyFood = await ownerFood(
+      container,
+      idempotencySeed,
+      'Idempotency Completion Failure Food',
+    );
+    const idempotencyDraft = await createSimplePlan(
+      container,
+      idempotencySeed,
+      idempotencySeed.ownerCtx,
+      [idempotencyFood.food.id],
+      { name: 'Idempotency Completion Failure Draft' },
+    );
+    const originalCompleteIdempotency = container.idempotency.completeWithinTransaction.bind(
+      container.idempotency,
+    );
+    container.idempotency.completeWithinTransaction = (async () => {
+      throw new Error('idempotency completion failed');
+    }) as typeof container.idempotency.completeWithinTransaction;
+    await expect(
+      activateIdempotently(
+        container,
+        idempotencySeed,
+        idempotencyDraft.plan.id,
+        idempotencyDraft.plan.version,
+        'idempotency-completion-failure',
+      ),
+    ).rejects.toThrow('idempotency completion failed');
+    container.idempotency.completeWithinTransaction = originalCompleteIdempotency;
+    expect(
+      await db
+        .collection('nutrition_plans')
+        .findOne({ _id: new ObjectId(idempotencyDraft.plan.id) }),
+    ).toMatchObject({ status: 'DRAFT' });
+    expect(
+      await db.collection('idempotency_records').findOne({ key: 'idempotency-completion-failure' }),
+    ).not.toMatchObject({ state: 'COMPLETED' });
 
+    const activeRevisionSeed = await seedGym(container);
+    const activeRevisionFood = await ownerFood(
+      container,
+      activeRevisionSeed,
+      'Active Revision Failure Food',
+    );
+    const activeRevisionPlan = await createSimplePlan(
+      container,
+      activeRevisionSeed,
+      activeRevisionSeed.ownerCtx,
+      [activeRevisionFood.food.id],
+    );
     const active = await activateIdempotently(
       container,
-      activationSeed,
-      plan.plan.id,
-      plan.plan.version,
+      activeRevisionSeed,
+      activeRevisionPlan.plan.id,
+      activeRevisionPlan.plan.version,
       'activation-after-failure',
     );
+    const originalCreatePlanRevision = container.nutritionRepo.createRevision.bind(
+      container.nutritionRepo,
+    );
+    container.nutritionRepo.createRevision = (async () => {
+      throw new Error('active revision insert failed');
+    }) as typeof container.nutritionRepo.createRevision;
+    await expect(
+      container.nutrition.createRevision(
+        activeRevisionSeed.ownerCtx,
+        activeRevisionSeed.workspaceId,
+        activeRevisionSeed.relationshipId,
+        activeRevisionPlan.plan.id,
+        {
+          ...revisionInput([activeRevisionFood.food.id]),
+          expectedVersion: active.body.plan.version,
+        },
+      ),
+    ).rejects.toThrow('active revision insert failed');
+    container.nutritionRepo.createRevision = originalCreatePlanRevision;
+    expect(
+      await db.collection('nutrition_plan_revisions').countDocuments({
+        nutritionPlanId: new ObjectId(activeRevisionPlan.plan.id),
+      }),
+    ).toBe(1);
     container.outbox.write = (async () => {
       throw new Error('active update outbox failed');
     }) as typeof container.outbox.write;
     await expect(
       container.nutrition.createRevision(
-        activationSeed.ownerCtx,
-        activationSeed.workspaceId,
-        activationSeed.relationshipId,
-        plan.plan.id,
-        { ...revisionInput([activationFood.food.id]), expectedVersion: active.body.plan.version },
+        activeRevisionSeed.ownerCtx,
+        activeRevisionSeed.workspaceId,
+        activeRevisionSeed.relationshipId,
+        activeRevisionPlan.plan.id,
+        {
+          ...revisionInput([activeRevisionFood.food.id]),
+          expectedVersion: active.body.plan.version,
+        },
       ),
     ).rejects.toThrow('active update outbox failed');
     container.outbox.write = originalOutbox;
     expect(
       await db.collection('nutrition_plan_revisions').countDocuments({
-        nutritionPlanId: new ObjectId(plan.plan.id),
+        nutritionPlanId: new ObjectId(activeRevisionPlan.plan.id),
       }),
     ).toBe(1);
+    container.audit.write = (async () => {
+      throw new Error('active revision audit failed');
+    }) as typeof container.audit.write;
+    await expect(
+      container.nutrition.createRevision(
+        activeRevisionSeed.ownerCtx,
+        activeRevisionSeed.workspaceId,
+        activeRevisionSeed.relationshipId,
+        activeRevisionPlan.plan.id,
+        {
+          ...revisionInput([activeRevisionFood.food.id]),
+          expectedVersion: active.body.plan.version,
+        },
+      ),
+    ).rejects.toThrow('active revision audit failed');
+    container.audit.write = originalAudit;
+    expect(
+      await db.collection('nutrition_plan_revisions').countDocuments({
+        nutritionPlanId: new ObjectId(activeRevisionPlan.plan.id),
+      }),
+    ).toBe(1);
+
+    const foodMutationSeed = await seedGym(container);
+    const foodMutation = await ownerFood(container, foodMutationSeed, 'Food Mutation Failure');
+    container.audit.write = (async () => {
+      throw new Error('food update audit failed');
+    }) as typeof container.audit.write;
+    await expect(
+      container.nutrition.updateFood(
+        foodMutationSeed.ownerCtx,
+        foodMutationSeed.workspaceId,
+        foodMutation.food.id,
+        { expectedVersion: foodMutation.food.version, calories: 999 },
+      ),
+    ).rejects.toThrow('food update audit failed');
+    container.audit.write = originalAudit;
+    expect(
+      await db.collection('foods').findOne({ _id: new ObjectId(foodMutation.food.id) }),
+    ).toMatchObject({ calories: foodMutation.food.calories, version: foodMutation.food.version });
+    container.audit.write = (async () => {
+      throw new Error('food archive audit failed');
+    }) as typeof container.audit.write;
+    await expect(
+      container.nutrition.archiveFood(
+        foodMutationSeed.ownerCtx,
+        foodMutationSeed.workspaceId,
+        foodMutation.food.id,
+        { expectedVersion: foodMutation.food.version },
+      ),
+    ).rejects.toThrow('food archive audit failed');
+    container.audit.write = originalAudit;
+    expect(
+      await db.collection('foods').findOne({ _id: new ObjectId(foodMutation.food.id) }),
+    ).toMatchObject({ status: 'ACTIVE', version: foodMutation.food.version });
 
     const endSeed = await seedGym(container);
     const endFood = await ownerFood(container, endSeed, 'End Failure Food');
@@ -952,27 +1641,57 @@ async function assertStage10DbShape(db: Db) {
   ]) {
     expect(await db.listCollections({ name }).hasNext()).toBe(false);
   }
-  expect((await db.collection('foods').indexes()).map((index) => index.name)).toEqual(
+  const foodIndexes = await db.collection('foods').indexes();
+  expect(foodIndexes).toEqual(
     expect.arrayContaining([
-      'foods_active_normalized_name_unique',
-      'foods_scope_status',
-      'foods_workspace_scope_status',
-      'foods_private_owner_lookup',
+      expect.objectContaining({ name: 'foods_scope_status', key: { scope: 1, status: 1, _id: 1 } }),
+      expect.objectContaining({
+        name: 'foods_workspace_scope_status',
+        key: { workspaceId: 1, scope: 1, status: 1, _id: 1 },
+      }),
+      expect.objectContaining({
+        name: 'foods_private_owner_lookup',
+        key: { workspaceId: 1, ownerMembershipId: 1, status: 1, _id: 1 },
+      }),
+      expect.objectContaining({
+        name: 'foods_active_normalized_name_unique',
+        unique: true,
+        key: { scope: 1, workspaceId: 1, ownerMembershipId: 1, normalizedNames: 1 },
+        partialFilterExpression: { status: 'ACTIVE' },
+      }),
     ]),
   );
-  expect((await db.collection('nutrition_plans').indexes()).map((index) => index.name)).toEqual(
+  const planIndexes = await db.collection('nutrition_plans').indexes();
+  expect(planIndexes).toEqual(
     expect.arrayContaining([
-      'nutrition_plans_relationship_status',
-      'nutrition_plans_relationship_history',
-      'nutrition_plans_one_active_per_relationship',
+      expect.objectContaining({
+        name: 'nutrition_plans_relationship_status',
+        key: { workspaceId: 1, relationshipId: 1, status: 1, _id: 1 },
+      }),
+      expect.objectContaining({
+        name: 'nutrition_plans_relationship_history',
+        key: { workspaceId: 1, relationshipId: 1, _id: 1 },
+      }),
+      expect.objectContaining({
+        name: 'nutrition_plans_one_active_per_relationship',
+        unique: true,
+        key: { workspaceId: 1, relationshipId: 1 },
+        partialFilterExpression: { status: 'ACTIVE' },
+      }),
     ]),
   );
-  expect(
-    (await db.collection('nutrition_plan_revisions').indexes()).map((index) => index.name),
-  ).toEqual(
+  const revisionIndexes = await db.collection('nutrition_plan_revisions').indexes();
+  expect(revisionIndexes).toEqual(
     expect.arrayContaining([
-      'nutrition_plan_revisions_plan_revision_unique',
-      'nutrition_plan_revisions_plan_order',
+      expect.objectContaining({
+        name: 'nutrition_plan_revisions_plan_revision_unique',
+        unique: true,
+        key: { nutritionPlanId: 1, revision: 1 },
+      }),
+      expect.objectContaining({
+        name: 'nutrition_plan_revisions_plan_order',
+        key: { nutritionPlanId: 1, revision: -1 },
+      }),
     ]),
   );
   expect(
@@ -1136,6 +1855,7 @@ async function seedRelationshipWithPrimary(
 async function seedNutritionist(
   container: AppContainer,
   seed: Awaited<ReturnType<typeof seedGym>>,
+  assigned = true,
 ) {
   const user = await seedUser(
     container.database.db,
@@ -1147,14 +1867,88 @@ async function seedNutritionist(
     roles: ['NUTRITIONIST'],
   });
   await assignSystemProfile(container, seed.workspaceObjectId, membership._id, 'NUTRITIONIST');
-  await container.coachingRelationships.createAssignment({
-    workspaceId: seed.workspaceObjectId,
-    relationshipId: seed.relationshipObjectId,
-    staffMembershipId: membership._id,
-    assignmentType: 'NUTRITIONIST',
-    assignedBy: new ObjectId(seed.ownerCtx.userId),
-  });
+  if (assigned) {
+    await container.coachingRelationships.createAssignment({
+      workspaceId: seed.workspaceObjectId,
+      relationshipId: seed.relationshipObjectId,
+      staffMembershipId: membership._id,
+      assignmentType: 'NUTRITIONIST',
+      assignedBy: new ObjectId(seed.ownerCtx.userId),
+    });
+  }
   return { ctx: ctx(user._id, membership._id), membership };
+}
+
+async function seedManager(container: AppContainer, seed: Awaited<ReturnType<typeof seedGym>>) {
+  const user = await seedUser(
+    container.database.db,
+    `manager-${new ObjectId().toHexString()}@example.com`,
+  );
+  const membership = await container.workspaceMemberships.createActive({
+    workspaceId: seed.workspaceObjectId,
+    userId: user._id,
+    roles: ['GYM_MANAGER'],
+  });
+  await assignSystemProfile(container, seed.workspaceObjectId, membership._id, 'GYM_MANAGER');
+  return { ctx: ctx(user._id, membership._id), membership };
+}
+
+async function seedIndependent(container: AppContainer) {
+  const db = container.database.db;
+  const owner = await seedUser(db, `independent-${new ObjectId().toHexString()}@example.com`);
+  const trainee = await seedUser(
+    db,
+    `independent-trainee-${new ObjectId().toHexString()}@example.com`,
+  );
+  const workspace = await container.workspaceRepo.create({
+    type: 'INDEPENDENT_TRAINER',
+    name: 'Stage 10 Independent',
+    ownerUserId: owner._id,
+    timezone: 'Africa/Cairo',
+    defaultLanguage: 'en',
+  });
+  await seedCommercial(db, workspace._id, ['training', 'nutrition']);
+  const trainerMembership = await container.workspaceMemberships.createActive({
+    workspaceId: workspace._id,
+    userId: owner._id,
+    roles: ['TRAINER'],
+  });
+  const traineeMembership = await container.workspaceMemberships.createActive({
+    workspaceId: workspace._id,
+    userId: trainee._id,
+    roles: ['TRAINEE'],
+  });
+  await assignSystemProfile(container, workspace._id, trainerMembership._id, 'TRAINER');
+  await assignSystemProfile(container, workspace._id, traineeMembership._id, 'TRAINEE');
+  const relationship = await container.coachingRelationships.createActive({
+    workspaceId: workspace._id,
+    traineeUserId: trainee._id,
+    traineeMembershipId: traineeMembership._id,
+    activatedBy: owner._id,
+  });
+  const primary = await container.coachingRelationships.createAssignment({
+    workspaceId: workspace._id,
+    relationshipId: relationship._id,
+    staffMembershipId: trainerMembership._id,
+    assignmentType: 'PRIMARY_TRAINER',
+    assignedBy: owner._id,
+  });
+  const active = await container.coachingRelationships.setPrimaryPointer(
+    relationship._id,
+    workspace._id,
+    relationship.version,
+    ['ACTIVE'],
+    primary._id,
+  );
+  return {
+    workspaceId: workspace._id.toHexString(),
+    workspaceObjectId: workspace._id,
+    relationshipId: active._id.toHexString(),
+    relationshipObjectId: active._id,
+    trainerMembershipId: trainerMembership._id.toHexString(),
+    trainerCtx: ctx(owner._id, trainerMembership._id),
+    traineeCtx: ctx(trainee._id, traineeMembership._id),
+  };
 }
 
 async function seedPlatformAdmin(container: AppContainer) {
@@ -1201,6 +1995,7 @@ async function createSimplePlan(
   foodIds: string[],
   options: {
     name?: string;
+    responsibleMembershipId?: string;
     selectedAmount?: number;
     selectedUnit?: 'GRAM' | 'MILLILITER' | 'UNIT' | 'SERVING';
     fakeCalculatedCalories?: number;
@@ -1209,6 +2004,11 @@ async function createSimplePlan(
 ) {
   return await container.nutrition.createPlan(actorCtx, seed.workspaceId, seed.relationshipId, {
     name: options.name ?? `Plan ${new ObjectId().toHexString()}`,
+    ...(options.responsibleMembershipId
+      ? { responsibleMembershipId: options.responsibleMembershipId }
+      : actorCtx.userId === seed.ownerCtx.userId
+        ? { responsibleMembershipId: seed.trainerMembershipId }
+        : {}),
     ...revisionInput(foodIds, options),
   });
 }

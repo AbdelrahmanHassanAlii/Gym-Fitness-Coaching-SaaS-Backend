@@ -6,6 +6,7 @@ import type { AppConfig } from '../src/config/config.types';
 import { migrations } from '../src/migrations';
 import { migration017Stage12CheckIns } from '../src/migrations/017-stage12-checkins';
 import { MigrationRunner } from '../src/migrations/migration-runner';
+import { CheckInJobRunner } from '../src/modules/checkins/checkin.jobs';
 import { systemPermissionProfiles } from '../src/modules/permissions/permission.registry';
 
 describe('Stage 12 migration 017', () => {
@@ -288,6 +289,147 @@ describe('Stage 12 check-ins integration', () => {
     expect(after?.dayOfWeek).toBe(7);
   });
 
+  test('job runner uses configured worker lease identity and ttl for Stage 12 jobs', async () => {
+    const calls: Array<{ key: string; ownerId: string; ttlMs: number }> = [];
+    const originalAcquire = container.jobLeases.tryAcquire.bind(container.jobLeases);
+    const originalRelease = container.jobLeases.release.bind(container.jobLeases);
+    const originalGenerate = container.checkins.generateDueInstances.bind(container.checkins);
+    const originalOverdue = container.checkins.markOverdue.bind(container.checkins);
+    const originalWorker = container.config.worker;
+    container.config.worker = { ...originalWorker, id: 'stage12-lease-test', jobLeaseMs: 12_345 };
+    container.jobLeases.tryAcquire = (async (key: string, ownerId: string, ttlMs: number) => {
+      calls.push({ key, ownerId, ttlMs });
+      return true;
+    }) as typeof container.jobLeases.tryAcquire;
+    container.jobLeases.release = (async () => undefined) as typeof container.jobLeases.release;
+    container.checkins.generateDueInstances = (async () => ({
+      generated: 0,
+    })) as typeof container.checkins.generateDueInstances;
+    container.checkins.markOverdue = (async () => ({
+      marked: 0,
+    })) as typeof container.checkins.markOverdue;
+    try {
+      await new CheckInJobRunner(container).runDueJobs();
+    } finally {
+      container.config.worker = originalWorker;
+      container.jobLeases.tryAcquire = originalAcquire;
+      container.jobLeases.release = originalRelease;
+      container.checkins.generateDueInstances = originalGenerate;
+      container.checkins.markOverdue = originalOverdue;
+    }
+    expect(calls).toEqual([
+      { key: 'generate-checkins', ownerId: 'stage12-lease-test', ttlMs: 12_345 },
+      { key: 'mark-checkins-overdue', ownerId: 'stage12-lease-test', ttlMs: 12_345 },
+    ]);
+  });
+
+  test('weekly timezone boundaries use exact IANA UTC instants across DST and ISO weeks', async () => {
+    const seed = await seedGym(container);
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'Spring forward',
+      startedAt: '2026-03-02T05:00:00.000Z',
+      now: '2026-03-03T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 7,
+      periodKey: '2026-W10',
+      periodStartAt: '2026-03-02T05:00:00.000Z',
+      periodEndAt: '2026-03-09T04:00:00.000Z',
+      dueAt: '2026-03-09T04:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'Fall back',
+      startedAt: '2026-10-26T04:00:00.000Z',
+      now: '2026-10-27T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 7,
+      periodKey: '2026-W44',
+      periodStartAt: '2026-10-26T04:00:00.000Z',
+      periodEndAt: '2026-11-02T05:00:00.000Z',
+      dueAt: '2026-11-02T05:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'ISO year boundary',
+      startedAt: '2025-12-29T05:00:00.000Z',
+      now: '2025-12-30T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 7,
+      periodKey: '2026-W01',
+      periodStartAt: '2025-12-29T05:00:00.000Z',
+      periodEndAt: '2026-01-05T05:00:00.000Z',
+      dueAt: '2026-01-05T05:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'ISO week 53',
+      startedAt: '2026-12-28T05:00:00.000Z',
+      now: '2026-12-29T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 7,
+      periodKey: '2026-W53',
+      periodStartAt: '2026-12-28T05:00:00.000Z',
+      periodEndAt: '2027-01-04T05:00:00.000Z',
+      dueAt: '2027-01-04T05:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'Wednesday due',
+      startedAt: '2026-01-05T05:00:00.000Z',
+      now: '2026-01-06T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 3,
+      periodKey: '2026-W02',
+      periodStartAt: '2026-01-05T05:00:00.000Z',
+      periodEndAt: '2026-01-12T05:00:00.000Z',
+      dueAt: '2026-01-08T05:00:00.000Z',
+    });
+  });
+
+  test('first eligible assignment period never creates a retroactive already-expired instance', async () => {
+    const seed = await seedGym(container);
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'before cutoff',
+      startedAt: '2026-01-06T12:00:00.000Z',
+      now: '2026-01-06T12:00:00.000Z',
+      timezone: 'UTC',
+      dayOfWeek: 3,
+      periodKey: '2026-W02',
+      periodStartAt: '2026-01-05T00:00:00.000Z',
+      periodEndAt: '2026-01-12T00:00:00.000Z',
+      dueAt: '2026-01-08T00:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'at cutoff',
+      startedAt: '2026-01-08T00:00:00.000Z',
+      now: '2026-01-08T00:00:00.000Z',
+      timezone: 'UTC',
+      dayOfWeek: 3,
+      periodKey: '2026-W02',
+      periodStartAt: '2026-01-05T00:00:00.000Z',
+      periodEndAt: '2026-01-12T00:00:00.000Z',
+      dueAt: '2026-01-08T00:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'after cutoff',
+      startedAt: '2026-01-08T00:00:01.000Z',
+      now: '2026-01-09T12:00:00.000Z',
+      timezone: 'UTC',
+      dayOfWeek: 3,
+      periodKey: '2026-W03',
+      periodStartAt: '2026-01-12T00:00:00.000Z',
+      periodEndAt: '2026-01-19T00:00:00.000Z',
+      dueAt: '2026-01-15T00:00:00.000Z',
+    });
+    await expectGeneratedPeriod(container, seed, {
+      localName: 'non UTC after cutoff',
+      startedAt: '2026-01-08T05:00:01.000Z',
+      now: '2026-01-09T12:00:00.000Z',
+      timezone: 'America/New_York',
+      dayOfWeek: 3,
+      periodKey: '2026-W03',
+      periodStartAt: '2026-01-12T05:00:00.000Z',
+      periodEndAt: '2026-01-19T05:00:00.000Z',
+      dueAt: '2026-01-15T05:00:00.000Z',
+    });
+  });
+
   test('concurrency matrix preserves serial Stage 12 outcomes', async () => {
     const seed = await seedGym(container);
     const template = await createTemplate(container, seed);
@@ -382,6 +524,412 @@ describe('Stage 12 check-ins integration', () => {
       }),
     ).toBe(archiveRaceAssignments);
   });
+
+  test('failure injection rolls back every Stage 12 multi-document transaction boundary', async () => {
+    await verifyTemplateCreateRollback(container);
+    await verifyRevisionCreateRollback(container);
+    await verifyAssignmentCreateRollback(container);
+    await verifyAssignmentEndRollback(container);
+    await verifyGenerationRollback(container);
+    await verifyDueTransitionRollback(container);
+    await verifyOverdueTransitionRollback(container);
+    await verifySubmissionRollback(container);
+    await verifyReviewRollback(container);
+    await verifyRelationshipEndRollback(container);
+  }, 60_000);
+
+  test('deterministic interleaving covers Stage 12 serialization race matrix', async () => {
+    const seed = await seedGym(container);
+    const template = await createTemplate(container, seed);
+
+    await withBarrierOn(container.checkInRepo, 'guardTemplateForUse', 2, async (stats) => {
+      const results = await Promise.allSettled([
+        container.checkins.createRevision(seed.ownerCtx, seed.workspaceId, template.template.id, {
+          expectedVersion: template.template.version,
+          fields: [{ fieldKey: 'sleep', type: 'NUMBER', label: 'Sleep', required: true }],
+        }),
+        container.checkins.createRevision(seed.ownerCtx, seed.workspaceId, template.template.id, {
+          expectedVersion: template.template.version,
+          fields: [{ fieldKey: 'stress', type: 'RATING', label: 'Stress', required: true }],
+        }),
+      ]);
+      expect(stats.calls).toBeGreaterThanOrEqual(2);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    });
+
+    const revisionGenerationTemplate = await createTemplate(container, seed);
+    await createAssignment(container, seed, revisionGenerationTemplate.template.id, {
+      startedAt: '2026-01-05T00:00:00.000Z',
+    });
+    await withBarrierOn(container.checkInRepo, 'guardTemplateForUse', 2, async (stats) => {
+      await Promise.allSettled([
+        container.checkins.createRevision(
+          seed.ownerCtx,
+          seed.workspaceId,
+          revisionGenerationTemplate.template.id,
+          {
+            expectedVersion: revisionGenerationTemplate.template.version,
+            fields: [{ fieldKey: 'sleep', type: 'NUMBER', label: 'Sleep', required: true }],
+          },
+        ),
+        container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z')),
+      ]);
+      expect(stats.calls).toBeGreaterThanOrEqual(2);
+    });
+    const generated = await db
+      .collection('checkin_instances')
+      .find({ templateId: new ObjectId(revisionGenerationTemplate.template.id) })
+      .toArray();
+    expect(generated.length).toBeGreaterThan(0);
+    expect(new Set(generated.map((item) => item.periodKey)).size).toBe(generated.length);
+    for (const instance of generated) {
+      expect(
+        await db.collection('checkin_template_revisions').countDocuments({
+          _id: instance.templateRevisionId,
+        }),
+      ).toBe(1);
+    }
+
+    const archiveGenerationTemplate = await createTemplate(container, seed);
+    await createAssignment(container, seed, archiveGenerationTemplate.template.id, {
+      startedAt: '2026-01-05T00:00:00.000Z',
+    });
+    await withBarrierOn(container.checkInRepo, 'guardTemplateForUse', 2, async (stats) => {
+      const results = await Promise.allSettled([
+        container.checkins.archiveTemplate(
+          seed.ownerCtx,
+          seed.workspaceId,
+          archiveGenerationTemplate.template.id,
+          { expectedVersion: archiveGenerationTemplate.template.version },
+        ),
+        container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z')),
+      ]);
+      expect(stats.calls).toBeGreaterThanOrEqual(1);
+      expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+    });
+    const archiveGeneratedCount = await db.collection('checkin_instances').countDocuments({
+      templateId: new ObjectId(archiveGenerationTemplate.template.id),
+    });
+    const archivedTemplate = await db.collection('checkin_templates').findOne({
+      _id: new ObjectId(archiveGenerationTemplate.template.id),
+    });
+    expect(archivedTemplate?.status === 'ACTIVE' || archiveGeneratedCount === 0).toBe(true);
+
+    const scheduleTemplate = await createTemplate(container, seed);
+    const scheduleAssignment = await createAssignment(
+      container,
+      seed,
+      scheduleTemplate.template.id,
+      {
+        startedAt: '2026-01-05T00:00:00.000Z',
+      },
+    );
+    await withBarrierOnMethods(
+      container.checkInRepo,
+      ['updateAssignment', 'guardAssignmentForGeneration'],
+      2,
+      async (stats) => {
+        await Promise.allSettled([
+          container.checkins.updateAssignment(
+            seed.ownerCtx,
+            seed.workspaceId,
+            seed.relationshipId,
+            scheduleAssignment.assignment.id,
+            {
+              expectedVersion: scheduleAssignment.assignment.version,
+              recurrence: { frequency: 'WEEKLY', dayOfWeek: 5, timezone: 'UTC' },
+            },
+          ),
+          container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z')),
+        ]);
+        expect(stats.calls).toBeGreaterThanOrEqual(1);
+      },
+    );
+    const scheduleInstances = await db
+      .collection('checkin_instances')
+      .find({ assignmentId: new ObjectId(scheduleAssignment.assignment.id) })
+      .toArray();
+    expect(new Set(scheduleInstances.map((item) => item.periodKey)).size).toBe(
+      scheduleInstances.length,
+    );
+
+    const submitEnd = await preparedDueInstance(container, 'submit-end');
+    await withBarrierOn(
+      container.coachingRelationships,
+      'guardCheckInLifecycleOpen',
+      2,
+      async (stats) => {
+        const rel = await db
+          .collection('coaching_relationships')
+          .findOne({ _id: submitEnd.seed.relationshipObjectId });
+        const results = await Promise.allSettled([
+          submitIdempotently(
+            container,
+            submitEnd.seed,
+            submitEnd.instance._id.toHexString(),
+            'submit-end-race',
+            submitEnd.instance.version,
+            [
+              { fieldKey: 'energy', value: 5 },
+              { fieldKey: 'ready', value: true },
+            ],
+          ),
+          container.trainees.endRelationship(
+            submitEnd.seed.ownerCtx,
+            submitEnd.seed.workspaceId,
+            submitEnd.seed.relationshipId,
+            { expectedVersion: rel?.version ?? -1 },
+          ),
+        ]);
+        expect(stats.calls).toBeGreaterThanOrEqual(2);
+        expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+      },
+    );
+    const submitEndInstance = await db
+      .collection('checkin_instances')
+      .findOne({ _id: submitEnd.instance._id });
+    expect(['SUBMITTED', 'SKIPPED']).toContain(submitEndInstance?.status);
+
+    const submitOverdue = await preparedDueInstance(container, 'submit-overdue');
+    await withBarrierOn(
+      container.coachingRelationships,
+      'guardCheckInLifecycleOpen',
+      2,
+      async () => {
+        await Promise.allSettled([
+          submitIdempotently(
+            container,
+            submitOverdue.seed,
+            submitOverdue.instance._id.toHexString(),
+            'submit-overdue-race',
+            submitOverdue.instance.version,
+            [
+              { fieldKey: 'energy', value: 4 },
+              { fieldKey: 'ready', value: true },
+            ],
+          ),
+          container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z')),
+        ]);
+      },
+    );
+    const submitOverdueFinal = await db
+      .collection('checkin_instances')
+      .findOne({ _id: submitOverdue.instance._id });
+    expect(['SUBMITTED', 'OVERDUE']).toContain(submitOverdueFinal?.status);
+    if (submitOverdueFinal?.status === 'OVERDUE') {
+      const submitted = await submitIdempotently(
+        container,
+        submitOverdue.seed,
+        submitOverdue.instance._id.toHexString(),
+        'submit-after-overdue',
+        submitOverdueFinal.version,
+        [
+          { fieldKey: 'energy', value: 4 },
+          { fieldKey: 'ready', value: true },
+        ],
+      );
+      expect(submitted.checkin.status).toBe('SUBMITTED');
+    }
+
+    const submitReview = await preparedDueInstance(container, 'submit-review');
+    await withBarrierOn(
+      container.coachingRelationships,
+      'guardCheckInLifecycleOpen',
+      2,
+      async () => {
+        const submitReviewResults = await Promise.allSettled([
+          submitIdempotently(
+            container,
+            submitReview.seed,
+            submitReview.instance._id.toHexString(),
+            'submit-review-race',
+            submitReview.instance.version,
+            [
+              { fieldKey: 'energy', value: 3 },
+              { fieldKey: 'ready', value: false },
+            ],
+          ),
+          reviewIdempotently(
+            container,
+            submitReview.seed,
+            submitReview.seed.trainerCtx,
+            submitReview.instance._id.toHexString(),
+            'review-before-submit',
+            submitReview.instance.version,
+          ),
+        ]);
+        expect(submitReviewResults[0]?.status).toBe('fulfilled');
+      },
+    );
+    const submitReviewFinal = await db
+      .collection('checkin_instances')
+      .findOne({ _id: submitReview.instance._id });
+    expect(['SUBMITTED', 'REVIEWED']).toContain(submitReviewFinal?.status);
+
+    const reviewEnd = await preparedSubmittedInstance(container, 'review-end');
+    await withBarrierOn(
+      container.coachingRelationships,
+      'guardCheckInLifecycleOpen',
+      2,
+      async () => {
+        const rel = await db
+          .collection('coaching_relationships')
+          .findOne({ _id: reviewEnd.seed.relationshipObjectId });
+        await Promise.allSettled([
+          reviewIdempotently(
+            container,
+            reviewEnd.seed,
+            reviewEnd.seed.trainerCtx,
+            reviewEnd.instance._id.toHexString(),
+            'review-end-race',
+            reviewEnd.instance.version,
+          ),
+          container.trainees.endRelationship(
+            reviewEnd.seed.ownerCtx,
+            reviewEnd.seed.workspaceId,
+            reviewEnd.seed.relationshipId,
+            { expectedVersion: rel?.version ?? -1 },
+          ),
+        ]);
+      },
+    );
+    const reviewEndFinal = await db
+      .collection('checkin_instances')
+      .findOne({ _id: reviewEnd.instance._id });
+    expect(['SUBMITTED', 'REVIEWED']).toContain(reviewEndFinal?.status);
+
+    const endTransition = await preparedDueInstance(container, 'end-transition');
+    await withBarrierOn(
+      container.coachingRelationships,
+      'guardCheckInLifecycleOpen',
+      2,
+      async () => {
+        const rel = await db
+          .collection('coaching_relationships')
+          .findOne({ _id: endTransition.seed.relationshipObjectId });
+        await Promise.allSettled([
+          container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z')),
+          container.trainees.endRelationship(
+            endTransition.seed.ownerCtx,
+            endTransition.seed.workspaceId,
+            endTransition.seed.relationshipId,
+            { expectedVersion: rel?.version ?? -1 },
+          ),
+        ]);
+      },
+    );
+    const endTransitionFinal = await db
+      .collection('checkin_instances')
+      .findOne({ _id: endTransition.instance._id });
+    expect(['OVERDUE', 'SKIPPED']).toContain(endTransitionFinal?.status);
+  }, 90_000);
+
+  test('duplicate transition, submit, and review races are serialized without duplicate events', async () => {
+    const dueSetup = await preparedAssignmentOnly(container, 'C9 due duplicate');
+    await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+    const upcoming = await firstInstance(container, dueSetup.assignment.assignment.id, {
+      status: 'UPCOMING',
+    });
+    await withBarrierOn(container.checkInRepo, 'dueUpcoming', 2, async () => {
+      await Promise.allSettled([
+        container.checkins.generateDueInstances(upcoming.opensAt),
+        container.checkins.generateDueInstances(upcoming.opensAt),
+      ]);
+    });
+    const dueFinal = await container.database.db
+      .collection('checkin_instances')
+      .findOne({ _id: upcoming._id });
+    expect(dueFinal?.status).toBe('DUE');
+    expect(await outboxCount(container, 'CheckInDue', upcoming._id)).toBe(1);
+
+    const overdueSetup = await preparedDueInstance(container, 'C10 overdue duplicate');
+    await withBarrierOn(container.checkInRepo, 'overdueDue', 2, async () => {
+      await Promise.allSettled([
+        container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z')),
+        container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z')),
+      ]);
+    });
+    const overdueFinal = await container.database.db
+      .collection('checkin_instances')
+      .findOne({ _id: overdueSetup.instance._id });
+    expect(overdueFinal?.status).toBe('OVERDUE');
+    expect(await outboxCount(container, 'CheckInOverdue', overdueSetup.instance._id)).toBe(1);
+
+    const submitSetup = await preparedDueInstance(container, 'C11 submit duplicate');
+    const submitResults = await Promise.allSettled([
+      submitIdempotently(
+        container,
+        submitSetup.seed,
+        submitSetup.instance._id.toHexString(),
+        'duplicate-submit-a',
+        submitSetup.instance.version,
+        [
+          { fieldKey: 'energy', value: 4 },
+          { fieldKey: 'ready', value: true },
+        ],
+      ),
+      submitIdempotently(
+        container,
+        submitSetup.seed,
+        submitSetup.instance._id.toHexString(),
+        'duplicate-submit-b',
+        submitSetup.instance.version,
+        [
+          { fieldKey: 'energy', value: 4 },
+          { fieldKey: 'ready', value: true },
+        ],
+      ),
+    ]);
+    expect(submitResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const submitFinal = await container.database.db
+      .collection('checkin_instances')
+      .findOne({ _id: submitSetup.instance._id });
+    expect(submitFinal?.status).toBe('SUBMITTED');
+    expect(submitFinal?.responses).toHaveLength(2);
+    expect(await outboxCount(container, 'CheckInSubmitted', submitSetup.instance._id)).toBe(1);
+
+    const replayKey =
+      submitResults[0]?.status === 'fulfilled' ? 'duplicate-submit-a' : 'duplicate-submit-b';
+    const replay = await submitIdempotently(
+      container,
+      submitSetup.seed,
+      submitSetup.instance._id.toHexString(),
+      replayKey,
+      submitSetup.instance.version,
+      [
+        { fieldKey: 'energy', value: 4 },
+        { fieldKey: 'ready', value: true },
+      ],
+    );
+    expect(replay.checkin.status).toBe('SUBMITTED');
+
+    const reviewSetup = await preparedSubmittedInstance(container, 'C15 review duplicate');
+    const reviewResults = await Promise.allSettled([
+      reviewIdempotently(
+        container,
+        reviewSetup.seed,
+        reviewSetup.seed.trainerCtx,
+        reviewSetup.instance._id.toHexString(),
+        'duplicate-review-a',
+        reviewSetup.instance.version,
+      ),
+      reviewIdempotently(
+        container,
+        reviewSetup.seed,
+        reviewSetup.seed.trainerCtx,
+        reviewSetup.instance._id.toHexString(),
+        'duplicate-review-b',
+        reviewSetup.instance.version,
+      ),
+    ]);
+    expect(reviewResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const reviewFinal = await container.database.db
+      .collection('checkin_instances')
+      .findOne({ _id: reviewSetup.instance._id });
+    expect(reviewFinal?.status).toBe('REVIEWED');
+    expect(reviewFinal?.trainerFeedback?.comment).toBe('Looks good');
+    expect(await outboxCount(container, 'CheckInReviewed', reviewSetup.instance._id)).toBe(1);
+  }, 60_000);
 
   test('sensitive instance access, self-only submission, response validation, review authorization, and idempotency', async () => {
     const seed = await seedGym(container);
@@ -555,6 +1103,152 @@ describe('Stage 12 check-ins integration', () => {
     ).rejects.toThrow('Permission denied.');
   });
 
+  test('relationship reactivation does not revive ended check-in assignments', async () => {
+    const seed = await seedGym(container);
+    const template = await createTemplate(container, seed);
+    const assignment = await createAssignment(container, seed, template.template.id);
+    await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+    const beforeEnd = await db
+      .collection('coaching_relationships')
+      .findOne({ _id: seed.relationshipObjectId });
+    await container.trainees.endRelationship(seed.ownerCtx, seed.workspaceId, seed.relationshipId, {
+      expectedVersion: beforeEnd?.version ?? -1,
+    });
+    const endedAssignment = await db.collection('checkin_assignments').findOne({
+      _id: new ObjectId(assignment.assignment.id),
+    });
+    expect(endedAssignment?.active).toBe(false);
+    const endedRelationship = await db
+      .collection('coaching_relationships')
+      .findOne({ _id: seed.relationshipObjectId });
+    await container.trainees.reactivateRelationship(
+      seed.ownerCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      {
+        expectedVersion: endedRelationship?.version ?? -1,
+        homeBranchId: seed.branchId,
+        primaryTrainerMembershipId: seed.trainerMembershipId,
+      },
+    );
+    const afterReactivationAssignment = await db.collection('checkin_assignments').findOne({
+      _id: new ObjectId(assignment.assignment.id),
+    });
+    expect(afterReactivationAssignment?.active).toBe(false);
+    const beforeGenerationCount = await db.collection('checkin_instances').countDocuments({
+      assignmentId: new ObjectId(assignment.assignment.id),
+    });
+    await container.checkins.generateDueInstances(new Date('2026-01-21T12:00:00.000Z'));
+    expect(
+      await db.collection('checkin_instances').countDocuments({
+        assignmentId: new ObjectId(assignment.assignment.id),
+      }),
+    ).toBe(beforeGenerationCount);
+    const newAssignment = await createAssignment(container, seed, template.template.id, {
+      startedAt: '2026-01-19T00:00:00.000Z',
+    });
+    await container.checkins.generateDueInstances(new Date('2026-01-21T12:00:00.000Z'));
+    expect(
+      await db.collection('checkin_instances').countDocuments({
+        assignmentId: new ObjectId(newAssignment.assignment.id),
+      }),
+    ).toBeGreaterThan(0);
+  });
+
+  test('sensitive list and detail access require checkins.read plus relationship scope', async () => {
+    const seed = await seedGym(container);
+    const template = await createTemplate(container, seed);
+    const assignment = await createAssignment(container, seed, template.template.id);
+    await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+    const instance = await db.collection('checkin_instances').findOne({
+      assignmentId: new ObjectId(assignment.assignment.id),
+    });
+    if (!instance) throw new Error('expected instance');
+    await submitIdempotently(container, seed, instance._id.toHexString(), 'sensitive-submit', 0, [
+      { fieldKey: 'energy', value: 5 },
+      { fieldKey: 'notes', value: 'sensitive trainee text' },
+      { fieldKey: 'ready', value: true },
+    ]);
+
+    const templateOnly = await seedLimitedStaff(container, seed, [
+      { permission: 'checkins.templates.read', effect: 'ALLOW' },
+    ]);
+    const assignmentOnly = await seedLimitedStaff(container, seed, [
+      { permission: 'checkins.assignments.read', effect: 'ALLOW' },
+    ]);
+    const noReadStaff = await seedLimitedStaff(container, seed, [
+      { permission: 'checkins.templates.read', effect: 'ALLOW' },
+      { permission: 'checkins.assignments.read', effect: 'ALLOW' },
+    ]);
+    await expect(
+      container.checkins.getInstance(
+        templateOnly.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        instance._id.toHexString(),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.checkins.listInstances(
+        assignmentOnly.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        {},
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.checkins.getInstance(
+        noReadStaff.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        instance._id.toHexString(),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const deniedOwnerProfile = await container.permissionProfiles.create({
+      context: 'WORKSPACE',
+      workspaceId: seed.workspaceObjectId,
+      name: `No checkins read ${new ObjectId().toHexString()}`,
+      permissions: [{ permission: 'checkins.read', effect: 'DENY' }],
+    });
+    const currentOwnerMembership = await container.workspaceMemberships.findByIdInWorkspace(
+      seed.workspaceObjectId,
+      seed.ownerMembershipId,
+    );
+    if (!currentOwnerMembership) throw new Error('expected owner membership');
+    await container.workspaceMemberships.updateRoleAndProfileContributions(
+      seed.workspaceObjectId,
+      seed.ownerMembershipId,
+      currentOwnerMembership.accessVersion ?? 0,
+      { roles: ['GYM_OWNER'], permissionProfileIds: [deniedOwnerProfile._id] },
+    );
+    await expect(
+      container.checkins.getInstance(
+        seed.ownerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        instance._id.toHexString(),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const otherTrainee = await seedOtherTraineeInWorkspace(container, seed);
+    await expect(
+      container.checkins.getInstance(
+        otherTrainee.ctx,
+        seed.workspaceId,
+        seed.relationshipId,
+        instance._id.toHexString(),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    const selfList = await container.checkins.listInstances(
+      seed.traineeCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      {},
+    );
+    expect(JSON.stringify(selfList)).toContain('sensitive trainee text');
+  });
+
   test('commercial write restrictions and transaction rollback preserve Stage 12 consistency', async () => {
     const seed = await seedGym(container);
     await db
@@ -593,6 +1287,506 @@ describe('Stage 12 check-ins integration', () => {
 
 function indexes(calls: Array<{ collection: string; indexes: unknown[] }>, collection: string) {
   return calls.find((call) => call.collection === collection)?.indexes;
+}
+
+async function expectGeneratedPeriod(
+  container: AppContainer,
+  seed: Awaited<ReturnType<typeof seedGym>>,
+  input: {
+    localName: string;
+    startedAt: string;
+    now: string;
+    timezone: string;
+    dayOfWeek: number;
+    periodKey: string;
+    periodStartAt: string;
+    periodEndAt: string;
+    dueAt: string;
+  },
+) {
+  const template = await createTemplate(container, seed, `${input.localName} ${new ObjectId()}`);
+  const assignment = await createAssignment(container, seed, template.template.id, {
+    startedAt: input.startedAt,
+    recurrence: {
+      frequency: 'WEEKLY',
+      dayOfWeek: input.dayOfWeek,
+      timezone: input.timezone,
+    },
+  });
+  await container.checkins.generateDueInstances(new Date(input.now));
+  const instance = await container.database.db.collection('checkin_instances').findOne({
+    assignmentId: new ObjectId(assignment.assignment.id),
+  });
+  if (!instance) throw new Error(`expected generated period for ${input.localName}`);
+  expect(instance.periodKey).toBe(input.periodKey);
+  expect(instance.periodStartAt.toISOString()).toBe(input.periodStartAt);
+  expect(instance.periodEndAt.toISOString()).toBe(input.periodEndAt);
+  expect(instance.dueAt.toISOString()).toBe(input.dueAt);
+}
+
+async function preparedDueInstance(container: AppContainer, label: string) {
+  const seed = await seedGym(container);
+  const template = await createTemplate(container, seed, `${label} template ${new ObjectId()}`);
+  const assignment = await createAssignment(container, seed, template.template.id);
+  await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+  const instance = await container.database.db.collection('checkin_instances').findOne({
+    assignmentId: new ObjectId(assignment.assignment.id),
+  });
+  if (!instance) throw new Error(`expected due instance for ${label}`);
+  return { seed, template, assignment, instance };
+}
+
+async function preparedSubmittedInstance(container: AppContainer, label: string) {
+  const setup = await preparedDueInstance(container, label);
+  const submitted = await submitIdempotently(
+    container,
+    setup.seed,
+    setup.instance._id.toHexString(),
+    `${label}-submit`,
+    setup.instance.version,
+    [
+      { fieldKey: 'energy', value: 4 },
+      { fieldKey: 'ready', value: true },
+    ],
+  );
+  const instance = await container.database.db.collection('checkin_instances').findOne({
+    _id: new ObjectId(submitted.checkin.id),
+  });
+  if (!instance) throw new Error(`expected submitted instance for ${label}`);
+  return { ...setup, instance };
+}
+
+async function verifyTemplateCreateRollback(container: AppContainer) {
+  const seed = await seedGym(container);
+  const beforeAudit = await auditCount(container, 'CheckInTemplateCreated');
+  await failAuditFor(container, 'CheckInTemplateCreated', async () => {
+    await expect(createTemplate(container, seed, 'FI template create')).rejects.toThrow(
+      'forced audit failure',
+    );
+  });
+  expect(
+    await container.database.db
+      .collection('checkin_templates')
+      .countDocuments({ name: 'FI template create' }),
+  ).toBe(0);
+  expect(
+    await container.database.db
+      .collection('checkin_template_revisions')
+      .countDocuments({ workspaceId: seed.workspaceObjectId }),
+  ).toBe(0);
+  expect(await auditCount(container, 'CheckInTemplateCreated')).toBe(beforeAudit);
+}
+
+async function verifyRevisionCreateRollback(container: AppContainer) {
+  const seed = await seedGym(container);
+  const template = await createTemplate(container, seed);
+  const beforeAudit = await auditCount(container, 'CheckInTemplateRevisionCreated');
+  const before = await container.database.db.collection('checkin_templates').findOne({
+    _id: new ObjectId(template.template.id),
+  });
+  await failAuditFor(container, 'CheckInTemplateRevisionCreated', async () => {
+    await expect(
+      container.checkins.createRevision(seed.ownerCtx, seed.workspaceId, template.template.id, {
+        expectedVersion: template.template.version,
+        fields: [{ fieldKey: 'sleep', type: 'NUMBER', label: 'Sleep', required: true }],
+      }),
+    ).rejects.toThrow('forced audit failure');
+  });
+  const after = await container.database.db.collection('checkin_templates').findOne({
+    _id: new ObjectId(template.template.id),
+  });
+  expect(await revisionCount(container, template.template.id)).toBe(1);
+  expect(after?.currentRevisionId).toEqual(before?.currentRevisionId);
+  expect(after?.version).toBe(before?.version);
+  expect(after?.templateUseRevision).toBe(before?.templateUseRevision);
+  expect(await auditCount(container, 'CheckInTemplateRevisionCreated')).toBe(beforeAudit);
+}
+
+async function verifyAssignmentCreateRollback(container: AppContainer) {
+  const seed = await seedGym(container);
+  const template = await createTemplate(container, seed);
+  const beforeAudit = await auditCount(container, 'CheckInAssignmentCreated');
+  await failAuditFor(container, 'CheckInAssignmentCreated', async () => {
+    await expect(createAssignment(container, seed, template.template.id)).rejects.toThrow(
+      'forced audit failure',
+    );
+  });
+  expect(await assignmentCount(container, seed.relationshipObjectId)).toBe(0);
+  expect(await auditCount(container, 'CheckInAssignmentCreated')).toBe(beforeAudit);
+}
+
+async function verifyAssignmentEndRollback(container: AppContainer) {
+  const seed = await seedGym(container);
+  const template = await createTemplate(container, seed);
+  const assignment = await createAssignment(container, seed, template.template.id);
+  const beforeAudit = await auditCount(container, 'CheckInAssignmentEnded');
+  await failAuditFor(container, 'CheckInAssignmentEnded', async () => {
+    await expect(
+      container.checkins.endAssignment(
+        seed.ownerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        assignment.assignment.id,
+        { expectedVersion: assignment.assignment.version },
+      ),
+    ).rejects.toThrow('forced audit failure');
+  });
+  const after = await container.database.db.collection('checkin_assignments').findOne({
+    _id: new ObjectId(assignment.assignment.id),
+  });
+  expect(after?.active).toBe(true);
+  expect(after?.endedAt).toBeUndefined();
+  expect(after?.version).toBe(assignment.assignment.version);
+  expect(await auditCount(container, 'CheckInAssignmentEnded')).toBe(beforeAudit);
+}
+
+async function verifyGenerationRollback(container: AppContainer) {
+  const setup = await preparedAssignmentOnly(container, 'FI generation');
+  const beforeAudit = await auditCount(container, 'CheckInGenerated');
+  const beforeDueOutbox = await outboxCount(container, 'CheckInDue');
+  await failAuditFor(container, 'CheckInGenerated', async () => {
+    await expect(
+      container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z')),
+    ).rejects.toThrow('forced audit failure');
+  });
+  expect(
+    await container.database.db.collection('checkin_instances').countDocuments({
+      assignmentId: new ObjectId(setup.assignment.assignment.id),
+    }),
+  ).toBe(0);
+  expect(await auditCount(container, 'CheckInGenerated')).toBe(beforeAudit);
+  expect(await outboxCount(container, 'CheckInDue')).toBe(beforeDueOutbox);
+  await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+  expect(
+    await container.database.db.collection('checkin_instances').countDocuments({
+      assignmentId: new ObjectId(setup.assignment.assignment.id),
+    }),
+  ).toBeGreaterThan(0);
+  expect(
+    await container.database.db.collection('checkin_instances').countDocuments({
+      assignmentId: new ObjectId(setup.assignment.assignment.id),
+      periodKey: '2026-W02',
+    }),
+  ).toBe(1);
+}
+
+async function verifyDueTransitionRollback(container: AppContainer) {
+  const setup = await preparedAssignmentOnly(container, 'FI due');
+  await container.checkins.generateDueInstances(new Date('2026-01-07T12:00:00.000Z'));
+  const instance = await firstInstance(container, setup.assignment.assignment.id, {
+    status: 'UPCOMING',
+  });
+  expect(instance.status).toBe('UPCOMING');
+  const beforeAudit = await auditCount(container, 'CheckInDue');
+  const beforeOutbox = await outboxCount(container, 'CheckInDue', instance._id);
+  await failAuditFor(container, 'CheckInDue', async () => {
+    await expect(container.checkins.generateDueInstances(instance.opensAt)).rejects.toThrow(
+      'forced audit failure',
+    );
+  });
+  expect(
+    (await firstInstance(container, setup.assignment.assignment.id, { _id: instance._id })).status,
+  ).toBe('UPCOMING');
+  expect(await auditCount(container, 'CheckInDue')).toBe(beforeAudit);
+  expect(await outboxCount(container, 'CheckInDue', instance._id)).toBe(beforeOutbox);
+  await container.checkins.generateDueInstances(instance.opensAt);
+  expect(
+    (await firstInstance(container, setup.assignment.assignment.id, { _id: instance._id })).status,
+  ).toBe('DUE');
+  expect(await outboxCount(container, 'CheckInDue', instance._id)).toBe(beforeOutbox + 1);
+}
+
+async function verifyOverdueTransitionRollback(container: AppContainer) {
+  const setup = await preparedDueInstance(container, 'FI overdue');
+  const beforeAudit = await auditCount(container, 'CheckInOverdue');
+  const beforeOutbox = await outboxCount(container, 'CheckInOverdue', setup.instance._id);
+  await failAuditFor(container, 'CheckInOverdue', async () => {
+    await expect(
+      container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z')),
+    ).rejects.toThrow('forced audit failure');
+  });
+  const after = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  expect(after?.status).toBe('DUE');
+  expect(await auditCount(container, 'CheckInOverdue')).toBe(beforeAudit);
+  expect(await outboxCount(container, 'CheckInOverdue', setup.instance._id)).toBe(beforeOutbox);
+  await container.checkins.markOverdue(new Date('2026-01-08T00:00:00.000Z'));
+  const retried = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  expect(retried?.status).toBe('OVERDUE');
+  expect(await outboxCount(container, 'CheckInOverdue', setup.instance._id)).toBe(beforeOutbox + 1);
+}
+
+async function verifySubmissionRollback(container: AppContainer) {
+  const setup = await preparedDueInstance(container, 'FI submit');
+  const beforeAudit = await auditCount(container, 'CheckInSubmitted');
+  const beforeOutbox = await outboxCount(container, 'CheckInSubmitted', setup.instance._id);
+  await failOutboxFor(container, 'CheckInSubmitted', async () => {
+    await expect(
+      submitIdempotently(
+        container,
+        setup.seed,
+        setup.instance._id.toHexString(),
+        'fi-submit',
+        setup.instance.version,
+        [
+          { fieldKey: 'energy', value: 4 },
+          { fieldKey: 'ready', value: true },
+        ],
+      ),
+    ).rejects.toThrow('forced outbox failure');
+  });
+  const after = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  expect(after?.status).toBe('DUE');
+  expect(after?.responses).toEqual([]);
+  expect(after?.submittedAt).toBeUndefined();
+  expect(await auditCount(container, 'CheckInSubmitted')).toBe(beforeAudit);
+  expect(await outboxCount(container, 'CheckInSubmitted', setup.instance._id)).toBe(beforeOutbox);
+  const idem = await container.database.db.collection('idempotency_records').findOne({
+    key: 'fi-submit',
+  });
+  expect(idem?.state).toBe('FAILED');
+  const submitted = await submitIdempotently(
+    container,
+    setup.seed,
+    setup.instance._id.toHexString(),
+    'fi-submit-retry',
+    setup.instance.version,
+    [
+      { fieldKey: 'energy', value: 4 },
+      { fieldKey: 'ready', value: true },
+    ],
+  );
+  expect(submitted.checkin.status).toBe('SUBMITTED');
+  expect(await outboxCount(container, 'CheckInSubmitted', setup.instance._id)).toBe(
+    beforeOutbox + 1,
+  );
+}
+
+async function verifyReviewRollback(container: AppContainer) {
+  const setup = await preparedSubmittedInstance(container, 'FI review');
+  const beforeAudit = await auditCount(container, 'CheckInReviewed');
+  const beforeOutbox = await outboxCount(container, 'CheckInReviewed', setup.instance._id);
+  await failOutboxFor(container, 'CheckInReviewed', async () => {
+    await expect(
+      reviewIdempotently(
+        container,
+        setup.seed,
+        setup.seed.trainerCtx,
+        setup.instance._id.toHexString(),
+        'fi-review',
+        setup.instance.version,
+      ),
+    ).rejects.toThrow('forced outbox failure');
+  });
+  const after = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  expect(after?.status).toBe('SUBMITTED');
+  expect(after?.trainerFeedback).toBeUndefined();
+  expect(after?.reviewedAt).toBeUndefined();
+  expect(await auditCount(container, 'CheckInReviewed')).toBe(beforeAudit);
+  expect(await outboxCount(container, 'CheckInReviewed', setup.instance._id)).toBe(beforeOutbox);
+  const reviewed = await reviewIdempotently(
+    container,
+    setup.seed,
+    setup.seed.trainerCtx,
+    setup.instance._id.toHexString(),
+    'fi-review-retry',
+    setup.instance.version,
+  );
+  expect(reviewed.checkin.status).toBe('REVIEWED');
+  expect(await outboxCount(container, 'CheckInReviewed', setup.instance._id)).toBe(
+    beforeOutbox + 1,
+  );
+}
+
+async function verifyRelationshipEndRollback(container: AppContainer) {
+  const setup = await preparedDueInstance(container, 'FI relationship end');
+  const submitted = await preparedSubmittedInstance(container, 'FI relationship end submitted');
+  const beforeRel = await container.database.db.collection('coaching_relationships').findOne({
+    _id: setup.seed.relationshipObjectId,
+  });
+  const beforeAudit = await auditCount(container, 'CheckInsSkippedForRelationshipEnd');
+  await failAuditFor(container, 'CheckInsSkippedForRelationshipEnd', async () => {
+    await expect(
+      container.trainees.endRelationship(
+        setup.seed.ownerCtx,
+        setup.seed.workspaceId,
+        setup.seed.relationshipId,
+        { expectedVersion: beforeRel?.version ?? -1 },
+      ),
+    ).rejects.toThrow('forced audit failure');
+  });
+  const rel = await container.database.db.collection('coaching_relationships').findOne({
+    _id: setup.seed.relationshipObjectId,
+  });
+  const assignment = await container.database.db.collection('checkin_assignments').findOne({
+    _id: new ObjectId(setup.assignment.assignment.id),
+  });
+  const open = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  const submittedAfter = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: submitted.instance._id });
+  expect(rel?.status).toBe('ACTIVE');
+  expect(rel?.checkinLifecycleRevision).toBe(beforeRel?.checkinLifecycleRevision);
+  expect(assignment?.active).toBe(true);
+  expect(open?.status).toBe('DUE');
+  expect(submittedAfter?.status).toBe('SUBMITTED');
+  expect(await auditCount(container, 'CheckInsSkippedForRelationshipEnd')).toBe(beforeAudit);
+  await container.trainees.endRelationship(
+    setup.seed.ownerCtx,
+    setup.seed.workspaceId,
+    setup.seed.relationshipId,
+    { expectedVersion: beforeRel?.version ?? -1 },
+  );
+  const endedOpen = await container.database.db
+    .collection('checkin_instances')
+    .findOne({ _id: setup.instance._id });
+  expect(endedOpen?.status).toBe('SKIPPED');
+}
+
+async function preparedAssignmentOnly(
+  container: AppContainer,
+  label: string,
+  override: Partial<{
+    startedAt: string;
+    recurrence: { frequency: 'WEEKLY'; dayOfWeek?: number; timezone: string };
+  }> = {},
+) {
+  const seed = await seedGym(container);
+  const template = await createTemplate(container, seed, `${label} template ${new ObjectId()}`);
+  const assignment = await createAssignment(container, seed, template.template.id, override);
+  return { seed, template, assignment };
+}
+
+async function firstInstance(
+  container: AppContainer,
+  assignmentId: string,
+  extraFilter: Record<string, unknown> = {},
+) {
+  const instance = await container.database.db.collection('checkin_instances').findOne({
+    assignmentId: new ObjectId(assignmentId),
+    ...extraFilter,
+  });
+  if (!instance) throw new Error('expected check-in instance');
+  return instance;
+}
+
+async function auditCount(container: AppContainer, eventType: string) {
+  return await container.database.db.collection('audit_events').countDocuments({ eventType });
+}
+
+async function outboxCount(container: AppContainer, eventType: string, aggregateId?: ObjectId) {
+  return await container.database.db.collection('outbox_events').countDocuments({
+    eventType,
+    ...(aggregateId ? { aggregateId } : {}),
+  });
+}
+
+async function revisionCount(container: AppContainer, templateId: string) {
+  return await container.database.db.collection('checkin_template_revisions').countDocuments({
+    templateId: new ObjectId(templateId),
+  });
+}
+
+async function assignmentCount(container: AppContainer, relationshipId: ObjectId) {
+  return await container.database.db.collection('checkin_assignments').countDocuments({
+    relationshipId,
+  });
+}
+
+async function failAuditFor(
+  container: AppContainer,
+  eventType: string,
+  operation: () => Promise<void>,
+) {
+  const original = container.audit.write.bind(container.audit);
+  container.audit.write = (async (input, tx) => {
+    if (input.eventType === eventType) throw new Error('forced audit failure');
+    return await original(input, tx);
+  }) as typeof container.audit.write;
+  try {
+    await operation();
+  } finally {
+    container.audit.write = original;
+  }
+}
+
+async function failOutboxFor(
+  container: AppContainer,
+  eventType: string,
+  operation: () => Promise<void>,
+) {
+  const original = container.outbox.write.bind(container.outbox);
+  container.outbox.write = (async (input, tx) => {
+    if (input.eventType === eventType) throw new Error('forced outbox failure');
+    return await original(input, tx);
+  }) as typeof container.outbox.write;
+  try {
+    await operation();
+  } finally {
+    container.outbox.write = original;
+  }
+}
+
+async function withBarrierOn<T extends object>(
+  target: T,
+  method: keyof T,
+  participants: number,
+  operation: (stats: { calls: number }) => Promise<void>,
+) {
+  await withBarrierOnMethods(target, [method], participants, operation);
+}
+
+async function withBarrierOnMethods<T extends object>(
+  target: T,
+  methods: Array<keyof T>,
+  participants: number,
+  operation: (stats: { calls: number }) => Promise<void>,
+) {
+  let calls = 0;
+  let waiting = 0;
+  let readyResolve!: () => void;
+  let releaseResolve!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    readyResolve = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseResolve = resolve;
+  });
+  const originals = new Map<keyof T, unknown>();
+  for (const method of methods) {
+    originals.set(method, target[method]);
+    const original = target[method] as unknown as (...args: unknown[]) => Promise<unknown>;
+    target[method] = (async (...args: unknown[]) => {
+      calls++;
+      waiting++;
+      if (waiting >= participants) readyResolve();
+      if (waiting <= participants) await release;
+      return await original.apply(target, args);
+    }) as T[keyof T];
+  }
+  const op = operation({
+    get calls() {
+      return calls;
+    },
+  });
+  await ready;
+  releaseResolve();
+  try {
+    await op;
+  } finally {
+    for (const [method, original] of originals) {
+      target[method] = original as T[keyof T];
+    }
+  }
 }
 
 async function createTemplate(
@@ -695,6 +1889,74 @@ async function reviewIdempotently(
   return result.body as Awaited<ReturnType<AppContainer['checkins']['review']>>;
 }
 
+async function seedLimitedStaff(
+  container: AppContainer,
+  seed: Awaited<ReturnType<typeof seedGym>>,
+  permissions: Array<{
+    permission: string;
+    effect: 'ALLOW' | 'DENY';
+  }>,
+) {
+  const user = await seedUser(
+    container.database.db,
+    `limited-${new ObjectId().toHexString()}@example.com`,
+  );
+  const membership = await container.workspaceMemberships.createActive({
+    workspaceId: seed.workspaceObjectId,
+    userId: user._id,
+    roles: ['TRAINER'],
+  });
+  const profile = await container.permissionProfiles.create({
+    context: 'WORKSPACE',
+    workspaceId: seed.workspaceObjectId,
+    name: `Limited ${new ObjectId().toHexString()}`,
+    permissions,
+  });
+  await container.workspaceMemberships.updateRoleAndProfileContributions(
+    seed.workspaceObjectId,
+    membership._id,
+    membership.accessVersion ?? 0,
+    { roles: ['TRAINER'], permissionProfileIds: [profile._id] },
+  );
+  await container.membershipBranchAssignments.createActive(
+    seed.workspaceObjectId,
+    membership._id,
+    seed.branchObjectId,
+  );
+  await container.coachingRelationships.createAssignment({
+    workspaceId: seed.workspaceObjectId,
+    relationshipId: seed.relationshipObjectId,
+    staffMembershipId: membership._id,
+    assignmentType: 'ASSISTANT_TRAINER',
+    assignedBy: seed.ownerUserId,
+  });
+  return { ctx: ctx(user._id, membership._id), membershipId: membership._id };
+}
+
+async function seedOtherTraineeInWorkspace(
+  container: AppContainer,
+  seed: Awaited<ReturnType<typeof seedGym>>,
+) {
+  const user = await seedUser(
+    container.database.db,
+    `other-trainee-${new ObjectId().toHexString()}@example.com`,
+  );
+  const membership = await container.workspaceMemberships.createActive({
+    workspaceId: seed.workspaceObjectId,
+    userId: user._id,
+    roles: ['TRAINEE'],
+  });
+  await assignSystemProfile(container, seed.workspaceObjectId, membership._id, 'TRAINEE');
+  await container.coachingRelationships.createActive({
+    workspaceId: seed.workspaceObjectId,
+    traineeUserId: user._id,
+    traineeMembershipId: membership._id,
+    homeBranchId: seed.branchObjectId,
+    activatedBy: seed.ownerUserId,
+  });
+  return { ctx: ctx(user._id, membership._id), membershipId: membership._id };
+}
+
 async function seedGym(container: AppContainer) {
   const db = container.database.db;
   const owner = await seedUser(db, `owner-${new ObjectId()}@example.com`);
@@ -779,8 +2041,14 @@ async function seedGym(container: AppContainer) {
   return {
     workspaceId: workspace._id.toHexString(),
     workspaceObjectId: workspace._id,
+    branchId: branch._id.toHexString(),
+    branchObjectId: branch._id,
     relationshipId: active._id.toHexString(),
     relationshipObjectId: active._id,
+    ownerUserId: owner._id,
+    ownerMembershipId: ownerMembership._id,
+    ownerAccessVersion: ownerMembership.accessVersion ?? 0,
+    trainerMembershipId: trainerMembership._id.toHexString(),
     ownerCtx: ctx(owner._id, ownerMembership._id),
     trainerCtx: ctx(trainer._id, trainerMembership._id),
     traineeCtx: ctx(trainee._id, traineeMembership._id),

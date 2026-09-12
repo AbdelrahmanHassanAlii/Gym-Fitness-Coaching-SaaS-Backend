@@ -12,7 +12,7 @@ const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
 registerTraineeOutboxHandlers(outbox, container.trainees);
 const subscriptionJobs = new SubscriptionJobRunner(container);
-const checkInJobs = new CheckInJobRunner(container, config.worker.id);
+const checkInJobs = new CheckInJobRunner(container);
 
 let shuttingDown = false;
 

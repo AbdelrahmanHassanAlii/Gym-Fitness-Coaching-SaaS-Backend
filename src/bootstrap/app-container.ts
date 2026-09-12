@@ -32,6 +32,8 @@ import {
 } from '../modules/permissions/permission.repository';
 import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
+import { ProgressRepository } from '../modules/progress/progress.repository';
+import { ProgressApplicationService } from '../modules/progress/progress.service';
 import {
   ManualPaymentRepository,
   SubscriptionPlanRepository,
@@ -87,6 +89,7 @@ export interface AppContainer {
   manualPayments: ManualPaymentRepository;
   leadsRepo: LeadRepository;
   nutritionRepo: NutritionRepository;
+  progressRepo: ProgressRepository;
   coachingRelationships: CoachingRelationshipRepository;
   trainingRepo: TrainingRepository;
   workoutsRepo: WorkoutRepository;
@@ -103,6 +106,7 @@ export interface AppContainer {
   subscriptions: SubscriptionApplicationService;
   leads: LeadApplicationService;
   nutrition: NutritionApplicationService;
+  progress: ProgressApplicationService;
   trainees: TraineeApplicationService;
   training: TrainingApplicationService;
   workouts: WorkoutApplicationService;
@@ -141,6 +145,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const manualPayments = new ManualPaymentRepository(database);
   const leadsRepo = new LeadRepository(database);
   const nutritionRepo = new NutritionRepository(database);
+  const progressRepo = new ProgressRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
   const trainingRepo = new TrainingRepository(database);
   const workoutsRepo = new WorkoutRepository(database);
@@ -247,6 +252,17 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const progress = new ProgressApplicationService(
+    unitOfWork,
+    progressRepo,
+    coachingRelationships,
+    workspaceRepo,
+    workspaceMemberships,
+    accessControl,
+    entitlements,
+    audit,
+    outbox,
+  );
   const trainees = new TraineeApplicationService(
     unitOfWork,
     coachingRelationships,
@@ -297,6 +313,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     manualPayments,
     leadsRepo,
     nutritionRepo,
+    progressRepo,
     coachingRelationships,
     trainingRepo,
     workoutsRepo,
@@ -325,6 +342,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     subscriptions,
     leads,
     nutrition,
+    progress,
     trainees,
     training,
     workouts,

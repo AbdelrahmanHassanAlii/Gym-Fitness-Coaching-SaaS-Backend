@@ -35,6 +35,7 @@ export interface CoachingRelationshipDocument {
   trainingLifecycleRevision?: number;
   workoutLifecycleRevision?: number;
   nutritionLifecycleRevision?: number;
+  progressLifecycleRevision?: number;
   requestedBy?: ObjectId;
   requestedAt?: Date;
   activatedBy?: ObjectId;

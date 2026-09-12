@@ -335,6 +335,20 @@ export class CoachingRelationshipRepository {
     return result;
   }
 
+  async guardProgressLifecycleOpen(
+    relationshipId: ObjectId,
+    workspaceId: ObjectId,
+    tx: TransactionContext,
+  ): Promise<CoachingRelationshipDocument> {
+    const result = await this.relationships.findOneAndUpdate(
+      { _id: relationshipId, workspaceId, status: { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] } },
+      { $inc: { progressLifecycleRevision: 1 } },
+      { returnDocument: 'after', session: tx.session },
+    );
+    if (!result) throw conflict('RELATIONSHIP_NOT_PROGRESS_OPEN');
+    return result;
+  }
+
   async countActiveForUsage(workspaceId: ObjectId): Promise<number> {
     return await this.relationships.countDocuments({
       workspaceId,

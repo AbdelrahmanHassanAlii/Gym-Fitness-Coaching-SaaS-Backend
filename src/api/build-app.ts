@@ -13,6 +13,7 @@ import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerLeadRoutes } from '../modules/leads/lead.routes';
 import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
+import { registerProgressRoutes } from '../modules/progress/progress.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
 import { registerTraineeRoutes } from '../modules/trainees/trainee.routes';
 import { registerTrainingRoutes } from '../modules/training/training.routes';
@@ -88,6 +89,7 @@ export async function buildApp(container: AppContainer) {
   await registerTrainingRoutes(app, container);
   await registerWorkoutRoutes(app, container);
   await registerNutritionRoutes(app, container);
+  await registerProgressRoutes(app, container);
 
   return app;
 }

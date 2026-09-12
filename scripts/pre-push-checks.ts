@@ -14,8 +14,8 @@ const reportPath = resolve('reports/pre-push-checks.md');
 const checks = [
   {
     name: 'Tests (unit / integration)',
-    command: 'bun test',
-    args: ['test'],
+    command: 'bun test --parallel=1 --timeout=120000',
+    args: ['test', '--parallel=1', '--timeout=120000'],
   },
   {
     name: 'Lint',
@@ -30,7 +30,7 @@ const checks = [
 ];
 
 function stripAnsi(value: string): string {
-  return value.replace(/\u001b\[[0-9;]*m/g, '');
+  return value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '');
 }
 
 function runCheck(check: (typeof checks)[number]): Promise<CheckResult> {
@@ -124,7 +124,9 @@ function createReport(results: CheckResult[]): string {
     '',
     '| Check | Status |',
     '| --- | --- |',
-    ...results.map((result) => `| ${result.name} | ${result.exitCode === 0 ? 'PASSED' : 'FAILED'} |`),
+    ...results.map(
+      (result) => `| ${result.name} | ${result.exitCode === 0 ? 'PASSED' : 'FAILED'} |`,
+    ),
     '',
     ...sections,
     '',

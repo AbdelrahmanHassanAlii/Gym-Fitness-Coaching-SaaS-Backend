@@ -2,6 +2,7 @@ import { createAppContainer } from '../bootstrap/app-container';
 import { loadConfig } from '../config/config';
 import { OutboxProcessor } from '../core/events/outbox.processor';
 import { createLogger } from '../core/logging/logger';
+import { CheckInJobRunner } from '../modules/checkins/checkin.jobs';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
 import { registerTraineeOutboxHandlers } from '../modules/trainees/trainee.outbox-handlers';
 
@@ -11,6 +12,7 @@ const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
 registerTraineeOutboxHandlers(outbox, container.trainees);
 const subscriptionJobs = new SubscriptionJobRunner(container);
+const checkInJobs = new CheckInJobRunner(container, config.worker.id);
 
 let shuttingDown = false;
 
@@ -25,6 +27,7 @@ async function run(): Promise<void> {
     try {
       const processed = await outbox.processOne();
       await subscriptionJobs.runDueJobs();
+      await checkInJobs.runDueJobs();
       if (!processed && !shuttingDown) {
         await sleep(config.worker.outboxPollIntervalMs);
       }

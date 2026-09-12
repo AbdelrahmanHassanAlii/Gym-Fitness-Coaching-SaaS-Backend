@@ -8,6 +8,7 @@ import { AppError } from '../../core/errors/app-error';
 import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import { normalizeEmail } from '../auth/auth.normalization';
+import type { CheckInRelationshipLifecyclePort } from '../checkins/checkin.service';
 import type { IdentityRepository } from '../identity/identity.repository';
 import type { UserDocument } from '../identity/identity.types';
 import type { NutritionRelationshipLifecyclePort } from '../nutrition/nutrition.service';
@@ -71,6 +72,7 @@ export class TraineeApplicationService {
     private readonly outbox: OutboxWriter,
     private readonly trainingLifecycle?: TrainingRelationshipLifecyclePort,
     private readonly nutritionLifecycle?: NutritionRelationshipLifecyclePort,
+    private readonly checkInLifecycle?: CheckInRelationshipLifecyclePort,
   ) {}
 
   async listRelationships(
@@ -453,6 +455,10 @@ export class TraineeApplicationService {
       workspaceId,
       relationshipId,
       async ({ workspace, relationship, actorId, now, tx }) => {
+        if (relationship.version !== input.expectedVersion)
+          throw conflict('COACHING_RELATIONSHIP_VERSION_CONFLICT');
+        if (!['ACTIVE', 'NEEDS_REASSIGNMENT'].includes(relationship.status))
+          throw conflict('COACHING_RELATIONSHIP_STATUS_INVALID');
         await this.trainingLifecycle?.closeActiveProgramForRelationshipEnd(
           ctx,
           workspace._id,
@@ -461,6 +467,13 @@ export class TraineeApplicationService {
           tx,
         );
         await this.nutritionLifecycle?.closeActiveNutritionPlanForRelationshipEnd(
+          ctx,
+          workspace._id,
+          relationship._id,
+          now,
+          tx,
+        );
+        await this.checkInLifecycle?.closeCheckInsForRelationshipEnd(
           ctx,
           workspace._id,
           relationship._id,

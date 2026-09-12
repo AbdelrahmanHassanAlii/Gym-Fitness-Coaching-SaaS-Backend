@@ -76,10 +76,11 @@ describe('Stage 10 migration 015', () => {
       integrationConfig(`stage10_upgrade_${new ObjectId().toHexString()}`),
     );
     try {
-      await new MigrationRunner(clean.database.db, migrations).migrate();
+      const through15 = migrations.filter((migration) => migration.id !== '016-stage11-progress');
+      await new MigrationRunner(clean.database.db, through15).migrate();
       await assertStage10DbShape(clean.database.db);
 
-      const through14 = migrations.filter((migration) => migration.id !== '015-stage10-nutrition');
+      const through14 = through15.filter((migration) => migration.id !== '015-stage10-nutrition');
       await new MigrationRunner(upgrade.database.db, through14).migrate();
       expect(
         await upgrade.database.db
@@ -87,8 +88,8 @@ describe('Stage 10 migration 015', () => {
           .countDocuments({ migrationId: '014-stage9-workout-execution' }),
       ).toBe(1);
       expect(await upgrade.database.db.listCollections({ name: 'foods' }).hasNext()).toBe(false);
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
+      await new MigrationRunner(upgrade.database.db, through15).migrate();
+      await new MigrationRunner(upgrade.database.db, through15).migrate();
       await assertStage10DbShape(upgrade.database.db);
     } finally {
       await clean.database.db.dropDatabase();

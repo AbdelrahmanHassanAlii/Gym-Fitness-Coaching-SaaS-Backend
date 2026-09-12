@@ -64,7 +64,8 @@ describe('Stage 9 migration 014', () => {
       integrationConfig(`stage9_upgrade_${new ObjectId().toHexString()}`),
     );
     try {
-      await new MigrationRunner(clean.database.db, migrations).migrate();
+      const through14 = migrations.filter((migration) => migrationNumber(migration.id) <= 14);
+      await new MigrationRunner(clean.database.db, through14).migrate();
       expect(
         await clean.database.db
           .collection('db_migrations')
@@ -74,17 +75,15 @@ describe('Stage 9 migration 014', () => {
         await clean.database.db.listCollections({ name: 'workout_corrections' }).hasNext(),
       ).toBe(false);
 
-      const through13 = migrations.filter(
-        (migration) => migration.id !== '014-stage9-workout-execution',
-      );
+      const through13 = migrations.filter((migration) => migrationNumber(migration.id) <= 13);
       await new MigrationRunner(upgrade.database.db, through13).migrate();
       expect(
         await upgrade.database.db
           .collection('db_migrations')
           .countDocuments({ migrationId: '013-stage8-training-foundation' }),
       ).toBe(1);
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
+      await new MigrationRunner(upgrade.database.db, through14).migrate();
+      await new MigrationRunner(upgrade.database.db, through14).migrate();
       expect(
         await upgrade.database.db
           .collection('db_migrations')
@@ -2578,6 +2577,10 @@ function ctx(userId: ObjectId, membershipId?: ObjectId) {
 
 function indexes(calls: Array<{ collection: string; indexes: unknown[] }>, collection: string) {
   return calls.find((call) => call.collection === collection)?.indexes;
+}
+
+function migrationNumber(id: string) {
+  return Number(id.slice(0, 3));
 }
 
 async function installFailureValidator(db: Db, collection: string) {

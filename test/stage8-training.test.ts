@@ -69,7 +69,7 @@ describe('Stage 8 migration 013', () => {
     );
     try {
       const lockedThroughStage8 = migrations.filter(
-        (migration) => migration.id !== '014-stage9-workout-execution',
+        (migration) => migrationNumber(migration.id) <= 13,
       );
       await new MigrationRunner(cleanContainer.database.db, lockedThroughStage8).migrate();
       expect(
@@ -81,11 +81,7 @@ describe('Stage 8 migration 013', () => {
         await cleanContainer.database.db.listCollections({ name: 'workout_sessions' }).hasNext(),
       ).toBe(false);
 
-      const lockedStage7 = migrations.filter(
-        (migration) =>
-          migration.id !== '013-stage8-training-foundation' &&
-          migration.id !== '014-stage9-workout-execution',
-      );
+      const lockedStage7 = migrations.filter((migration) => migrationNumber(migration.id) <= 12);
       await new MigrationRunner(upgradeContainer.database.db, lockedStage7).migrate();
       expect(
         await upgradeContainer.database.db
@@ -2100,6 +2096,10 @@ function ctx(userId: ObjectId, membershipId?: ObjectId) {
 
 function indexes(calls: Array<{ collection: string; indexes: unknown[] }>, collection: string) {
   return calls.find((call) => call.collection === collection)?.indexes;
+}
+
+function migrationNumber(id: string) {
+  return Number(id.slice(0, 3));
 }
 
 function mongoUri(): string {

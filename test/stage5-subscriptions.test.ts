@@ -9,10 +9,8 @@ import { UnitOfWork } from '../src/core/database/unit-of-work';
 import { AppError } from '../src/core/errors/app-error';
 import { OutboxWriter } from '../src/core/events/outbox.writer';
 import { IdempotencyService } from '../src/core/idempotency/idempotency.service';
-import { migrations } from '../src/migrations';
 import { migration009Stage5ExistingWorkspaceBackfill } from '../src/migrations/009-stage5-existing-workspace-backfill';
 import { migration010Stage5WorkspaceUsageRevision } from '../src/migrations/010-stage5-workspace-usage-revision';
-import { MigrationRunner } from '../src/migrations/migration-runner';
 import {
   Permissions,
   systemPermissionProfiles,
@@ -334,7 +332,7 @@ describe('Stage 5 corrective integration coverage', () => {
       ping: async () => true,
       close: async () => undefined,
     };
-    await new MigrationRunner(db, migrations).migrate();
+    await initializeStage5CorrectiveFixture(db);
   });
 
   afterAll(async () => {
@@ -367,6 +365,19 @@ describe('Stage 5 corrective integration coverage', () => {
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
     expect(saved?.activeStaff).toBe(1);
     expect(saved?.revision).toBe(1);
+  });
+
+  test('corrective fixture uses local Stage 5 indexes without migration replay', async () => {
+    expect(await db.listCollections({ name: 'db_migrations' }).hasNext()).toBe(false);
+    const idempotencyIndexNames = (await db.collection('idempotency_records').indexes()).map(
+      (index) => index.name,
+    );
+    const usageIndexNames = (await db.collection('workspace_usage').indexes()).map(
+      (index) => index.name,
+    );
+
+    expect(idempotencyIndexNames).toContain('idempotency_command_key');
+    expect(usageIndexNames).toContain('workspace_usage_workspace_unique');
   });
 
   test('quota reservation rolls back with its surrounding transaction', async () => {
@@ -1233,6 +1244,76 @@ function testConfig(): AppConfig {
     },
     support: { defaultSessionMinutes: 30, maxSessionMinutes: 60 },
   };
+}
+
+async function initializeStage5CorrectiveFixture(db: Db) {
+  await Promise.all([
+    db.collection('audit_events').createIndexes([
+      { key: { occurredAt: -1 }, name: 'audit_occurred_at' },
+      { key: { workspaceId: 1, occurredAt: -1 }, name: 'audit_workspace_time' },
+    ]),
+    db.collection('outbox_events').createIndexes([
+      {
+        key: { status: 1, nextAttemptAt: 1, lockedUntil: 1, occurredAt: 1 },
+        name: 'outbox_claim',
+      },
+      { key: { correlationId: 1 }, name: 'outbox_correlation' },
+    ]),
+    db.collection('idempotency_records').createIndexes([
+      {
+        key: { actorId: 1, routeKey: 1, key: 1 },
+        unique: true,
+        name: 'idempotency_command_key',
+      },
+      {
+        key: { expiresAt: 1 },
+        expireAfterSeconds: 0,
+        name: 'idempotency_expiry_ttl',
+      },
+    ]),
+    db.collection('subscription_plans').createIndexes([
+      { key: { key: 1 }, unique: true, name: 'subscription_plans_key_unique' },
+      { key: { active: 1, customerType: 1 }, name: 'subscription_plans_active_customer_type' },
+    ]),
+    db.collection('subscription_plan_versions').createIndexes([
+      {
+        key: { planId: 1, version: 1 },
+        unique: true,
+        name: 'subscription_plan_versions_plan_version_unique',
+      },
+      { key: { planId: 1, effectiveFrom: -1 }, name: 'subscription_plan_versions_plan_effective' },
+    ]),
+    db.collection('subscriptions').createIndexes([
+      { key: { workspaceId: 1 }, unique: true, name: 'subscriptions_workspace_unique' },
+      { key: { lifecycleStatus: 1, expiresAt: 1 }, name: 'subscriptions_lifecycle_expires' },
+      { key: { lifecycleStatus: 1, graceEndsAt: 1 }, name: 'subscriptions_lifecycle_grace' },
+      { key: { lifecycleStatus: 1, frozenAt: 1 }, name: 'subscriptions_lifecycle_frozen' },
+    ]),
+    db.collection('subscription_terms').createIndexes([
+      {
+        key: { subscriptionId: 1, effectiveFrom: -1 },
+        name: 'subscription_terms_subscription_effective',
+      },
+      {
+        key: { workspaceId: 1, effectiveFrom: -1 },
+        name: 'subscription_terms_workspace_effective',
+      },
+      { key: { planVersionId: 1 }, name: 'subscription_terms_plan_version' },
+    ]),
+    db
+      .collection('workspace_usage')
+      .createIndexes([
+        { key: { workspaceId: 1 }, unique: true, name: 'workspace_usage_workspace_unique' },
+      ]),
+    db.collection('manual_payments').createIndexes([
+      {
+        key: { workspaceId: 1, status: 1, createdAt: -1 },
+        name: 'manual_payments_workspace_status',
+      },
+      { key: { status: 1, createdAt: -1 }, name: 'manual_payments_status_created' },
+      { key: { subscriptionId: 1, createdAt: -1 }, name: 'manual_payments_subscription_created' },
+    ]),
+  ]);
 }
 
 function ctxFixture() {

@@ -30,6 +30,7 @@ export async function registerLeadRoutes(
     {
       schema: {
         tags: ['Leads'],
+        security: [],
         body: PublicCreateLeadBody,
         response: { 201: {}, 400: ErrorResponse, 422: ErrorResponse },
       },
@@ -135,6 +136,7 @@ export async function registerLeadRoutes(
     {
       schema: {
         tags: ['Owner activations'],
+        security: [],
         body: CompleteOwnerActivationBody,
         response: { 200: {}, 400: ErrorResponse, 401: ErrorResponse, 409: ErrorResponse },
       },

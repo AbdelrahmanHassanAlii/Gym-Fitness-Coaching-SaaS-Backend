@@ -41,6 +41,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: RegisterBody,
         response: {
           201: AuthTokenResponse,
@@ -70,6 +71,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: LoginBody,
         response: { 200: LoginResponse, 401: ErrorResponse, 429: ErrorResponse },
       },
@@ -97,6 +99,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: MfaLoginVerifyBody,
         response: { 200: AuthTokenResponse, 401: ErrorResponse, 409: ErrorResponse },
       },
@@ -275,6 +278,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: RefreshBody,
         response: { 200: AuthTokenResponse, 401: ErrorResponse, 403: ErrorResponse },
       },
@@ -307,6 +311,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         response: { 200: SuccessResponse, 401: ErrorResponse },
       },
     },
@@ -363,6 +368,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: ResendVerificationBody,
         response: { 200: SuccessResponse, 429: ErrorResponse },
       },
@@ -380,6 +386,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: ForgotPasswordBody,
         response: { 200: SuccessResponse, 429: ErrorResponse },
       },
@@ -397,6 +404,7 @@ export async function registerAuthRoutes(
     {
       schema: {
         tags: ['Auth'],
+        security: [],
         body: ResetPasswordBody,
         response: { 200: SuccessResponse, 401: ErrorResponse, 409: ErrorResponse },
       },

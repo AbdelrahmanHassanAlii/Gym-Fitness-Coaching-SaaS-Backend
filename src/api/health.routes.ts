@@ -17,6 +17,7 @@ export async function registerHealthRoutes(
     {
       schema: {
         tags: ['Health'],
+        security: [],
         response: { 200: HealthResponse },
       },
     },
@@ -28,6 +29,7 @@ export async function registerHealthRoutes(
     {
       schema: {
         tags: ['Health'],
+        security: [],
         response: {
           200: HealthResponse,
           503: HealthResponse,

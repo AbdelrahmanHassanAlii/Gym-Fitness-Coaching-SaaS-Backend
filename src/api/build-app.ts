@@ -61,12 +61,45 @@ export async function buildApp(container: AppContainer) {
   await app.register(swagger, {
     openapi: {
       info: {
-        title: 'Gym Platform API',
+        title: 'Gym & Fitness Coaching SaaS API',
         version: '0.1.0',
         description: 'V1 backend foundation for the multi-tenant Gym/Fitness Coaching SaaS.',
       },
-      servers: [{ url: '/' }],
-      tags: [{ name: 'Health' }],
+      servers: [{ url: process.env.OPENAPI_SERVER_URL?.trim() || 'http://localhost:3000' }],
+      tags: [
+        { name: 'Health' },
+        { name: 'Auth' },
+        { name: 'Me' },
+        { name: 'Platform' },
+        { name: 'Workspaces' },
+        { name: 'Branches' },
+        { name: 'Memberships' },
+        { name: 'Invitations' },
+        { name: 'Permissions' },
+        { name: 'Subscriptions' },
+        { name: 'Payments' },
+        { name: 'Leads' },
+        { name: 'Owner activations' },
+        { name: 'Trainees' },
+        { name: 'Training' },
+        { name: 'Workouts' },
+        { name: 'Nutrition' },
+        { name: 'Progress' },
+        { name: 'Check-Ins' },
+        { name: 'Files' },
+      ],
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT',
+            description:
+              'Use the access token returned by the Auth endpoints. In Apidog, store it as an environment/global variable such as accessToken and send it as a Bearer token.',
+          },
+        },
+      },
+      security: [{ bearerAuth: [] }],
     },
   });
 

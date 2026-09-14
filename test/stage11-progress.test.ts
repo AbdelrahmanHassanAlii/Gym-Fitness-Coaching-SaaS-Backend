@@ -78,16 +78,20 @@ describe('Stage 11 migration 016', () => {
       integrationConfig(`stage11_upgrade_${new ObjectId().toHexString()}`),
     );
     try {
-      await new MigrationRunner(clean.database.db, migrations).migrate();
+      const through16 = migrations.slice(
+        0,
+        migrations.findIndex((migration) => migration.id === '016-stage11-progress') + 1,
+      );
+      await new MigrationRunner(clean.database.db, through16).migrate();
       await assertStage11DbShape(clean.database.db);
 
-      const through15 = migrations.filter((migration) => migration.id !== '016-stage11-progress');
+      const through15 = through16.filter((migration) => migration.id !== '016-stage11-progress');
       await new MigrationRunner(upgrade.database.db, through15).migrate();
       expect(
         await upgrade.database.db.listCollections({ name: 'metric_definitions' }).hasNext(),
       ).toBe(false);
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
-      await new MigrationRunner(upgrade.database.db, migrations).migrate();
+      await new MigrationRunner(upgrade.database.db, through16).migrate();
+      await new MigrationRunner(upgrade.database.db, through16).migrate();
       await assertStage11DbShape(upgrade.database.db);
     } finally {
       await clean.database.db.dropDatabase();

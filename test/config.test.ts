@@ -35,4 +35,35 @@ describe('loadConfig', () => {
     delete process.env.OTP_HMAC_SECRET;
     expect(() => loadConfig()).toThrow('OTP_HMAC_SECRET');
   });
+
+  test('requires explicit storage configuration in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.MONGODB_URI = 'mongodb://localhost:27017/test';
+    process.env.WEB_ALLOWED_ORIGINS = 'https://example.com';
+    process.env.JWT_ACTIVE_KEY_ID = 'local';
+    process.env.JWT_PRIVATE_KEY =
+      '-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VwBCIEIP27WzZ2lrwob/CusOSRmtVPlS0TPTrBOFjTuBztUPm8\\n-----END PRIVATE KEY-----';
+    process.env.JWT_PUBLIC_KEYS =
+      '{"local":"-----BEGIN PUBLIC KEY-----\\\\nMCowBQYDK2VwAyEAVk4E+7jo4OHXHcYC1lvT+vqaViaFNdUPnMcuSDPpp60=\\\\n-----END PUBLIC KEY-----"}';
+    process.env.TOTP_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    process.env.OTP_HMAC_SECRET = 'otp-secret';
+    delete process.env.STORAGE_ENDPOINT;
+    process.env.STORAGE_REGION = 'us-east-1';
+    process.env.STORAGE_BUCKET_PRIVATE = 'private';
+    process.env.STORAGE_ACCESS_KEY = 'access';
+    process.env.STORAGE_SECRET_KEY = 'secret';
+    expect(() => loadConfig()).toThrow('STORAGE_ENDPOINT');
+
+    process.env.STORAGE_ENDPOINT = 'https://storage.example.com';
+    delete process.env.STORAGE_BUCKET_PRIVATE;
+    expect(() => loadConfig()).toThrow('STORAGE_BUCKET_PRIVATE');
+
+    process.env.STORAGE_BUCKET_PRIVATE = 'private';
+    delete process.env.STORAGE_REGION;
+    expect(() => loadConfig()).toThrow('STORAGE_REGION');
+
+    process.env.STORAGE_REGION = 'us-east-1';
+    delete process.env.STORAGE_SECRET_KEY;
+    expect(() => loadConfig()).toThrow('STORAGE_SECRET_KEY');
+  });
 });

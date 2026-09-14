@@ -18,6 +18,12 @@ const redactPaths = [
   '*.totpSecret',
   'signedUrl',
   '*.signedUrl',
+  'uploadUrl',
+  '*.uploadUrl',
+  'downloadUrl',
+  '*.downloadUrl',
+  'url',
+  '*.url',
 ];
 
 export function createLoggerOptions(config: AppConfig): LoggerOptions {

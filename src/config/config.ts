@@ -184,6 +184,14 @@ export function loadConfig(): AppConfig {
     logging: {
       level: process.env.LOG_LEVEL?.trim() || (env === 'production' ? 'info' : 'debug'),
     },
+    storage: {
+      provider: storageProvider(),
+      endpoint: process.env.STORAGE_ENDPOINT?.trim() || 'http://localhost:9000',
+      region: process.env.STORAGE_REGION?.trim() || 'us-east-1',
+      privateBucket: process.env.STORAGE_BUCKET_PRIVATE?.trim() || 'gym-private',
+      accessKey: secret('STORAGE_ACCESS_KEY', env, 'minioadmin'),
+      secretKey: secret('STORAGE_SECRET_KEY', env, 'minioadmin'),
+    },
     auth: {
       jwtActiveKeyId: activeJwtKeyId,
       jwtPrivateKey: privateJwtKey,
@@ -233,4 +241,12 @@ export function loadConfig(): AppConfig {
       maxSessionMinutes: maxSupportMinutes,
     },
   };
+}
+
+function storageProvider(): 's3' {
+  const value = process.env.STORAGE_PROVIDER?.trim().toLowerCase() || 's3';
+  if (value !== 's3') {
+    throw new Error(`Invalid STORAGE_PROVIDER: ${value}`);
+  }
+  return value;
 }

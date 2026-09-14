@@ -17,6 +17,14 @@ export interface AppConfig {
   logging: {
     level: string;
   };
+  storage?: {
+    provider: 's3';
+    endpoint: string;
+    region: string;
+    privateBucket: string;
+    accessKey: string;
+    secretKey: string;
+  };
   auth: {
     jwtActiveKeyId: string;
     jwtPrivateKey: string;

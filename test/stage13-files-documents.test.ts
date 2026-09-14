@@ -159,7 +159,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_flow_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const intent = await container.unitOfWork.withTransaction((tx) =>
           container.files.createUploadIntent(
@@ -230,7 +230,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_mismatch_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const intent = await container.unitOfWork.withTransaction((tx) =>
           container.files.createUploadIntent(
@@ -290,7 +290,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_checksum_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const verified = await confirmedFile(container, storage, seed, 'verified.pdf', {
           checksumSha256: checksum,
@@ -376,7 +376,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_sensitive_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const file = await confirmedFile(container, storage, seed);
         try {
@@ -415,7 +415,7 @@ describe('Stage 13 files and documents', () => {
       );
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         await replaceWorkspaceGrants(container, seed, [
           { permission: Permissions.MedicalDocumentsUpload, effect: 'ALLOW' },
@@ -484,7 +484,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_freeze_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const intent = await container.unitOfWork.withTransaction((tx) =>
           container.files.createUploadIntent(
@@ -554,7 +554,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_restore_boundary_${new ObjectId()}`);
       const storage = installFakeStorage(container, () => current.value);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const confirmed = await confirmedFile(container, storage, seed, 'restore.pdf');
         await container.unitOfWork.withTransaction((tx) =>
@@ -617,7 +617,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_quota_${new ObjectId()}`);
       installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         await container.database.db
           .collection('subscription_terms')
@@ -662,7 +662,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_presign_failure_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         storage.failNextUploadUrl = true;
         await expect(
@@ -701,7 +701,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_lifecycle_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const confirmed = await confirmedFile(container, storage, seed);
         await container.unitOfWork.withTransaction((tx) =>
@@ -763,29 +763,53 @@ describe('Stage 13 files and documents', () => {
     async () => {
       const container = await createStage13Container(`stage13_purge_retry_${new ObjectId()}`);
       const storage = installFakeStorage(container);
+      const workspaceId = new ObjectId();
+      const fileId = new ObjectId();
+      const storageKey = `workspaces/${workspaceId.toHexString()}/2026/01/purge-retry`;
+      const originalDelete = storage.deleteObject.bind(storage);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
-        const seed = await seedGym(container);
-        const confirmed = await confirmedFile(container, storage, seed, 'purge-retry.pdf');
-        await container.unitOfWork.withTransaction((tx) =>
-          container.files.deleteFile(
-            seed.trainerCtx,
-            seed.workspaceId,
-            confirmed.file.id,
-            { expectedVersion: 0 },
-            tx,
-          ),
-        );
-        await container.database.db
-          .collection('files')
-          .updateOne(
-            { _id: new ObjectId(confirmed.file.id) },
-            { $set: { purgeEligibleAt: new Date(0) } },
-          );
+        const now = new Date();
+        await container.database.db.collection('workspace_usage').insertOne({
+          _id: new ObjectId(),
+          workspaceId,
+          activeTrainees: 0,
+          activeStaff: 0,
+          storageBytes: 400,
+          reservedStorageBytes: 0,
+          revision: 0,
+          calculatedAt: now,
+          updatedAt: now,
+        });
+        await container.database.db.collection('files').insertOne({
+          _id: fileId,
+          workspaceId,
+          uploadIntentId: new ObjectId(),
+          uploaderUserId: new ObjectId(),
+          subjectType: 'WORKSPACE',
+          storageProvider: 'fake',
+          storageKey,
+          originalName: 'purge-retry.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 400,
+          classification: 'STANDARD',
+          status: 'SOFT_DELETED',
+          version: 1,
+          createdAt: now,
+          confirmedAt: now,
+          deletedAt: now,
+          deletedBy: new ObjectId(),
+          purgeEligibleAt: new Date(0),
+        });
+        storage.putObject({
+          key: storageKey,
+          sizeBytes: 400,
+          contentType: 'application/pdf',
+        });
         const originalRelease = container.workspaceUsage.releaseCommittedStorage.bind(
           container.workspaceUsage,
         );
         let injected = false;
+        let deleteCalls = 0;
         container.workspaceUsage.releaseCommittedStorage = (async (...args) => {
           if (!injected) {
             injected = true;
@@ -793,6 +817,10 @@ describe('Stage 13 files and documents', () => {
           }
           return await originalRelease(...args);
         }) as typeof container.workspaceUsage.releaseCommittedStorage;
+        storage.deleteObject = async (key) => {
+          deleteCalls++;
+          await originalDelete(key);
+        };
         try {
           await expect(container.files.purgeFiles()).rejects.toThrow(
             'injected finalization failure',
@@ -800,32 +828,31 @@ describe('Stage 13 files and documents', () => {
         } finally {
           container.workspaceUsage.releaseCommittedStorage = originalRelease;
         }
+        expect(deleteCalls).toBe(1);
         expect(storage.objects.size).toBe(0);
-        const pending = await container.database.db
-          .collection('files')
-          .findOne({ _id: new ObjectId(confirmed.file.id) });
+        const pending = await container.database.db.collection('files').findOne({ _id: fileId });
         expect(pending?.status).toBe('PURGE_PENDING');
         const charged = await container.database.db
           .collection('workspace_usage')
-          .findOne({ workspaceId: seed.workspaceObjectId });
+          .findOne({ workspaceId });
         expect(charged?.storageBytes).toBe(400);
 
         await container.files.purgeFiles();
-        const purged = await container.database.db
-          .collection('files')
-          .findOne({ _id: new ObjectId(confirmed.file.id) });
+        expect(deleteCalls).toBe(2);
+        const purged = await container.database.db.collection('files').findOne({ _id: fileId });
         expect(purged?.status).toBe('PURGED');
         const released = await container.database.db
           .collection('workspace_usage')
-          .findOne({ workspaceId: seed.workspaceObjectId });
+          .findOne({ workspaceId });
         expect(released?.storageBytes).toBe(0);
         expect(
           await container.database.db.collection('audit_events').countDocuments({
             eventType: 'FilePurged',
-            'entity.id': new ObjectId(confirmed.file.id),
+            'entity.id': fileId,
           }),
         ).toBe(1);
       } finally {
+        storage.deleteObject = originalDelete;
         await container.database.db.dropDatabase();
         await container.database.close();
       }
@@ -839,7 +866,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_confirm_failures_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const missing = await createIntent(container, seed, { fileName: 'missing.pdf' });
         await expect(
@@ -890,7 +917,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_duplicates_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const intent = await createIntent(container, seed, { fileName: 'duplicate-confirm.pdf' });
         storage.putObject({
@@ -946,7 +973,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_duplicate_workers_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const intent = await createIntent(container, seed, { fileName: 'expire.pdf' });
         await container.database.db
@@ -995,7 +1022,7 @@ describe('Stage 13 files and documents', () => {
       const container = await createStage13Container(`stage13_provider_failures_${new ObjectId()}`);
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const confirmed = await confirmedFile(container, storage, seed, 'provider-failure.pdf');
         await container.unitOfWork.withTransaction((tx) =>
@@ -1059,7 +1086,7 @@ describe('Stage 13 files and documents', () => {
       );
       const storage = installFakeStorage(container);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         const confirmed = await confirmedFile(container, storage, seed, 'relationship.pdf');
         await container.unitOfWork.withTransaction((tx) =>
@@ -1093,7 +1120,7 @@ describe('Stage 13 files and documents', () => {
     async () => {
       const container = await createStage13Container(`stage13_accounting_${new ObjectId()}`);
       try {
-        await new MigrationRunner(container.database.db, migrations).migrate();
+        await installStage13BusinessSchema(container.database.db);
         const seed = await seedGym(container);
         await container.workspaceUsage.reserveStorage(seed.workspaceObjectId, 500, 1_000_000);
         await expect(
@@ -1123,6 +1150,10 @@ describe('Stage 13 files and documents', () => {
 
 async function createStage13Container(dbName: string): Promise<AppContainer> {
   return await createAppContainer(integrationConfig(dbName));
+}
+
+async function installStage13BusinessSchema(db: Db): Promise<void> {
+  await migration018Stage13FilesDocuments.up(db as never);
 }
 
 function installFakeStorage(container: AppContainer, clock?: () => Date): FakeStorageProvider {

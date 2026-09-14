@@ -455,6 +455,59 @@ export class WorkspaceUsageRepository {
     if (result.modifiedCount !== 1) throw limitExceeded('STORAGE_LIMIT_EXCEEDED', limit);
   }
 
+  async commitReservedStorage(
+    workspaceId: ObjectId,
+    reservedBytes: number,
+    actualBytes: number,
+    tx?: TransactionContext,
+  ): Promise<void> {
+    const result = await this.usage.updateOne(
+      { workspaceId, reservedStorageBytes: { $gte: reservedBytes } },
+      {
+        $inc: {
+          reservedStorageBytes: -reservedBytes,
+          storageBytes: actualBytes,
+          revision: 1,
+        },
+        $set: { updatedAt: new Date() },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+    if (result.modifiedCount !== 1) throw limitExceeded('STORAGE_ACCOUNTING_CONFLICT', 0);
+  }
+
+  async releaseReservedStorage(
+    workspaceId: ObjectId,
+    reservedBytes: number,
+    tx?: TransactionContext,
+  ): Promise<void> {
+    const result = await this.usage.updateOne(
+      { workspaceId, reservedStorageBytes: { $gte: reservedBytes } },
+      {
+        $inc: { reservedStorageBytes: -reservedBytes, revision: 1 },
+        $set: { updatedAt: new Date() },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+    if (result.modifiedCount !== 1) throw limitExceeded('STORAGE_ACCOUNTING_CONFLICT', 0);
+  }
+
+  async releaseCommittedStorage(
+    workspaceId: ObjectId,
+    bytes: number,
+    tx?: TransactionContext,
+  ): Promise<void> {
+    const result = await this.usage.updateOne(
+      { workspaceId, storageBytes: { $gte: bytes } },
+      {
+        $inc: { storageBytes: -bytes, revision: 1 },
+        $set: { updatedAt: new Date() },
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+    if (result.modifiedCount !== 1) throw limitExceeded('STORAGE_ACCOUNTING_CONFLICT', 0);
+  }
+
   private async reserveCounter(
     workspaceId: ObjectId,
     field: 'activeTrainees' | 'activeStaff',

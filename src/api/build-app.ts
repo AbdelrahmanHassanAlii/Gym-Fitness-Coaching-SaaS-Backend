@@ -11,6 +11,7 @@ import { registerRequestContext } from '../core/request-context/request-context.
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerCheckInRoutes } from '../modules/checkins/checkin.routes';
+import { registerFileRoutes } from '../modules/files/file.routes';
 import { registerLeadRoutes } from '../modules/leads/lead.routes';
 import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
@@ -92,6 +93,7 @@ export async function buildApp(container: AppContainer) {
   await registerNutritionRoutes(app, container);
   await registerProgressRoutes(app, container);
   await registerCheckInRoutes(app, container);
+  await registerFileRoutes(app, container);
 
   return app;
 }

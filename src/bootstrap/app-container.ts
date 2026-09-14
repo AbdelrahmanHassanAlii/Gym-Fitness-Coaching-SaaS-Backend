@@ -10,6 +10,8 @@ import { UnitOfWork } from '../core/database/unit-of-work';
 import { OutboxWriter } from '../core/events/outbox.writer';
 import { IdempotencyService } from '../core/idempotency/idempotency.service';
 import { JobLeaseManager } from '../core/jobs/job-lease.manager';
+import { S3CompatibleStorageProvider } from '../core/storage/s3-storage.provider';
+import type { StorageProvider } from '../core/storage/storage.provider';
 import {
   AuthChallengeRepository,
   AuthMfaMethodRepository,
@@ -22,6 +24,8 @@ import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { CheckInRepository } from '../modules/checkins/checkin.repository';
 import { CheckInApplicationService } from '../modules/checkins/checkin.service';
+import { FileRepository } from '../modules/files/file.repository';
+import { FileApplicationService } from '../modules/files/file.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
 import { LeadRepository } from '../modules/leads/lead.repository';
 import { LeadApplicationService } from '../modules/leads/lead.service';
@@ -70,6 +74,7 @@ export interface AppContainer {
   accessControl: AccessControlService;
   idempotency: IdempotencyService;
   jobLeases: JobLeaseManager;
+  storage: StorageProvider;
   identity: IdentityRepository;
   authSessions: AuthSessionRepository;
   authChallenges: AuthChallengeRepository;
@@ -93,6 +98,7 @@ export interface AppContainer {
   nutritionRepo: NutritionRepository;
   progressRepo: ProgressRepository;
   checkInRepo: CheckInRepository;
+  filesRepo: FileRepository;
   coachingRelationships: CoachingRelationshipRepository;
   trainingRepo: TrainingRepository;
   workoutsRepo: WorkoutRepository;
@@ -111,6 +117,7 @@ export interface AppContainer {
   nutrition: NutritionApplicationService;
   progress: ProgressApplicationService;
   checkins: CheckInApplicationService;
+  files: FileApplicationService;
   trainees: TraineeApplicationService;
   training: TrainingApplicationService;
   workouts: WorkoutApplicationService;
@@ -151,6 +158,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const nutritionRepo = new NutritionRepository(database);
   const progressRepo = new ProgressRepository(database);
   const checkInRepo = new CheckInRepository(database);
+  const filesRepo = new FileRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
   const trainingRepo = new TrainingRepository(database);
   const workoutsRepo = new WorkoutRepository(database);
@@ -163,6 +171,21 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     permissionProfiles,
     accessGrants,
   );
+  const storageConfig = config.storage ?? {
+    provider: 's3' as const,
+    endpoint: 'http://localhost:9000',
+    region: 'us-east-1',
+    privateBucket: 'gym-private',
+    accessKey: 'minioadmin',
+    secretKey: 'minioadmin',
+  };
+  const storage = new S3CompatibleStorageProvider({
+    endpoint: storageConfig.endpoint,
+    region: storageConfig.region,
+    bucket: storageConfig.privateBucket,
+    accessKey: storageConfig.accessKey,
+    secretKey: storageConfig.secretKey,
+  });
 
   const entitlements = new EntitlementService(subscriptionsRepo, workspaceUsage);
   const subscriptions = new SubscriptionApplicationService(
@@ -278,6 +301,18 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const files = new FileApplicationService(
+    unitOfWork,
+    filesRepo,
+    coachingRelationships,
+    workspaceMemberships,
+    accessControl,
+    entitlements,
+    workspaceUsage,
+    storage,
+    audit,
+    outbox,
+  );
   const trainees = new TraineeApplicationService(
     unitOfWork,
     coachingRelationships,
@@ -308,6 +343,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     accessControl,
     idempotency,
     jobLeases: new JobLeaseManager(database),
+    storage,
     identity,
     authSessions,
     authChallenges,
@@ -331,6 +367,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     nutritionRepo,
     progressRepo,
     checkInRepo,
+    filesRepo,
     coachingRelationships,
     trainingRepo,
     workoutsRepo,
@@ -361,6 +398,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     nutrition,
     progress,
     checkins,
+    files,
     trainees,
     training,
     workouts,

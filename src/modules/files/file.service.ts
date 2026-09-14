@@ -81,6 +81,7 @@ export class FileApplicationService {
     private readonly storage: StorageProvider,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   async createUploadIntent(
@@ -109,7 +110,9 @@ export class FileApplicationService {
       originalName: input.fileName.trim(),
       mimeType: input.mimeType.trim().toLowerCase(),
       reservedBytes: input.sizeBytes,
-      ...(input.checksumSha256 ? { checksumSha256: normalizeChecksum(input.checksumSha256) } : {}),
+      ...(input.checksumSha256
+        ? { expectedChecksumSha256: normalizeChecksum(input.checksumSha256) }
+        : {}),
       classification,
       status: 'PENDING',
       version: 0,
@@ -131,7 +134,7 @@ export class FileApplicationService {
       key: intent.storageKey,
       contentType: intent.mimeType,
       sizeBytes: intent.reservedBytes,
-      ...(intent.checksumSha256 ? { checksumSha256: intent.checksumSha256 } : {}),
+      ...(intent.expectedChecksumSha256 ? { checksumSha256: intent.expectedChecksumSha256 } : {}),
       expiresAt: uploadExpiresAt,
     });
     return {
@@ -167,10 +170,13 @@ export class FileApplicationService {
     if (stat.contentType && stat.contentType.toLowerCase() !== intent.mimeType) {
       throw conflict('UPLOAD_OBJECT_MISMATCH');
     }
+    if (intent.expectedChecksumSha256 && !stat.checksumSha256) {
+      throw conflict('UPLOAD_CHECKSUM_NOT_VERIFIABLE');
+    }
     if (
-      intent.checksumSha256 &&
+      intent.expectedChecksumSha256 &&
       stat.checksumSha256 &&
-      stat.checksumSha256.toLowerCase() !== intent.checksumSha256
+      stat.checksumSha256.toLowerCase() !== intent.expectedChecksumSha256
     ) {
       throw conflict('UPLOAD_OBJECT_MISMATCH');
     }
@@ -188,7 +194,9 @@ export class FileApplicationService {
       originalName: intent.originalName,
       mimeType: intent.mimeType,
       sizeBytes: stat.sizeBytes,
-      ...(intent.checksumSha256 ? { checksumSha256: intent.checksumSha256 } : {}),
+      ...(intent.expectedChecksumSha256
+        ? { verifiedChecksumSha256: intent.expectedChecksumSha256 }
+        : {}),
       classification: intent.classification,
       status: 'ACTIVE',
       version: 0,
@@ -216,13 +224,14 @@ export class FileApplicationService {
   }
 
   async createDownloadUrl(ctx: RequestContext, workspaceId: string, fileId: string) {
-    const file = await this.loadAuthorizedFile(ctx, workspaceId, fileId, {
-      permission: Permissions.FilesDownload,
-      requireActive: true,
-    });
+    const { file, effectiveClassification } = await this.loadAuthorizedDownloadFile(
+      ctx,
+      workspaceId,
+      fileId,
+    );
     await this.entitlements.assert(file.workspaceId, 'READ', 'documents');
     const ttl =
-      file.classification === 'SENSITIVE' ? sensitiveDownloadTtlMs : standardDownloadTtlMs;
+      effectiveClassification === 'SENSITIVE' ? sensitiveDownloadTtlMs : standardDownloadTtlMs;
     const expiresAt = new Date(Date.now() + ttl);
     const signed = await this.storage.createDownloadUrl({
       key: file.storageKey,
@@ -230,7 +239,7 @@ export class FileApplicationService {
       contentType: file.mimeType,
       expiresAt,
     });
-    if (file.classification === 'SENSITIVE') {
+    if (effectiveClassification === 'SENSITIVE') {
       await this.audit.write(
         auditEvent(ctx, file.workspaceId, 'SensitiveFileDownloadUrlIssued', file._id, 'read', {
           fileId: file._id.toHexString(),
@@ -258,7 +267,7 @@ export class FileApplicationService {
       expectedVersion: input.expectedVersion,
       actorId: actorId(ctx),
       now: new Date(),
-      purgeEligibleAt: new Date(Date.now() + restoreWindowMs),
+      purgeEligibleAt: new Date(this.clock().getTime() + restoreWindowMs),
       tx,
     });
     await this.audit.write(
@@ -287,7 +296,7 @@ export class FileApplicationService {
       fileId: file._id,
       expectedVersion: input.expectedVersion,
       actorId: actorId(ctx),
-      now: new Date(),
+      now: this.clock(),
       tx,
     });
     await this.audit.write(
@@ -473,7 +482,7 @@ export class FileApplicationService {
         expectedVersion: file.version,
         actorId: actorId(ctx),
         now: new Date(),
-        purgeEligibleAt: new Date(Date.now() + restoreWindowMs),
+        purgeEligibleAt: new Date(this.clock().getTime() + restoreWindowMs),
         tx,
       });
     }
@@ -567,6 +576,38 @@ export class FileApplicationService {
     await this.authorizeFileContext(ctx, file, options.permission);
     if (file.classification === 'SENSITIVE') await this.requireSensitive(ctx, id, 'download');
     return file;
+  }
+
+  private async loadAuthorizedDownloadFile(
+    ctx: RequestContext,
+    workspaceId: string,
+    fileId: string,
+  ): Promise<{ file: FileDocument; effectiveClassification: FileClassification }> {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const file = await this.files.findFile(id, objectId(fileId, 'FILE_NOT_FOUND'));
+    if (!file) throw notFound('FILE_NOT_FOUND');
+    if (file.status !== 'ACTIVE') throw conflict('FILE_NOT_AVAILABLE');
+    const linkedDocument = await this.files.findDocumentForFile(id, file._id);
+    if (linkedDocument?.status === 'ACTIVE') {
+      await this.authorizeRelationship(
+        ctx,
+        file.workspaceId.toHexString(),
+        linkedDocument.relationshipId.toHexString(),
+        Permissions.FilesDownload,
+        false,
+      );
+      const effectiveClassification = strongestClassification(
+        file.classification,
+        classificationForDocument(linkedDocument.category, linkedDocument.classification),
+      );
+      if (effectiveClassification === 'SENSITIVE') {
+        await this.requireSensitive(ctx, id, 'download');
+      }
+      return { file, effectiveClassification };
+    }
+    await this.authorizeFileContext(ctx, file, Permissions.FilesDownload);
+    if (file.classification === 'SENSITIVE') await this.requireSensitive(ctx, id, 'download');
+    return { file, effectiveClassification: file.classification };
   }
 
   private async authorizeFileContext(ctx: RequestContext, file: FileDocument, permission: string) {
@@ -742,6 +783,13 @@ function classificationForDocument(
 ): FileClassification {
   if (mandatorySensitiveCategories.has(category)) return 'SENSITIVE';
   return requested;
+}
+
+function strongestClassification(
+  left: FileClassification,
+  right: FileClassification,
+): FileClassification {
+  return left === 'SENSITIVE' || right === 'SENSITIVE' ? 'SENSITIVE' : 'STANDARD';
 }
 
 function storageKey(workspaceId: ObjectId, now: Date): string {

@@ -42,7 +42,7 @@ export interface UploadIntentDocument {
   originalName: string;
   mimeType: string;
   reservedBytes: number;
-  checksumSha256?: string;
+  expectedChecksumSha256?: string;
   classification: FileClassification;
   status: UploadIntentStatus;
   version: number;
@@ -69,7 +69,7 @@ export interface FileDocument {
   originalName: string;
   mimeType: string;
   sizeBytes: number;
-  checksumSha256?: string;
+  verifiedChecksumSha256?: string;
   classification: FileClassification;
   status: FileStatus;
   version: number;

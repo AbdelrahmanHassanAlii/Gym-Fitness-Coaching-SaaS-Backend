@@ -1,6 +1,7 @@
 export interface PresignedUrl {
   url: string;
   expiresAt: Date;
+  headers?: Record<string, string>;
 }
 
 export interface ObjectMetadata {
@@ -8,6 +9,7 @@ export interface ObjectMetadata {
   sizeBytes: number;
   contentType?: string;
   checksumSha256?: string;
+  eTag?: string;
 }
 
 export interface CreateUploadUrlInput {

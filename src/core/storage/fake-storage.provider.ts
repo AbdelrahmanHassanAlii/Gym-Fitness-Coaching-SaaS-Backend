@@ -22,6 +22,12 @@ export class FakeStorageProvider implements StorageProvider {
     return {
       url: `https://storage.test/upload/${encodeURIComponent(input.key)}?signature=test`,
       expiresAt: input.expiresAt,
+      headers: {
+        'content-length': String(input.sizeBytes),
+        'content-type': input.contentType,
+        'if-none-match': '*',
+        ...(input.checksumSha256 ? { 'x-checksum-sha256': input.checksumSha256 } : {}),
+      },
     };
   }
 
@@ -52,7 +58,10 @@ export class FakeStorageProvider implements StorageProvider {
     this.objects.delete(key);
   }
 
-  putObject(input: ObjectMetadata): void {
+  putObject(input: ObjectMetadata, options: { overwrite?: boolean } = {}): void {
+    if (!options.overwrite && this.objects.has(input.key)) {
+      throw new Error('Object already exists');
+    }
     this.objects.set(input.key, input);
   }
 }

@@ -24,36 +24,54 @@ export class S3CompatibleStorageProvider implements StorageProvider {
   constructor(private readonly config: S3Config) {}
 
   async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUrl> {
+    const headers = {
+      'content-length': String(input.sizeBytes),
+      'content-type': input.contentType,
+      'if-none-match': '*',
+      ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
+    };
     return {
-      url: this.presign('PUT', input.key, input.expiresAt, {
-        'content-type': input.contentType,
-        ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
-      }),
+      url: this.presign('PUT', input.key, input.expiresAt, headers),
       expiresAt: input.expiresAt,
+      headers,
     };
   }
 
   async statObject(key: string): Promise<ObjectMetadata | null> {
-    const response = await fetch(this.objectUrl(key), { method: 'HEAD' });
+    const response = await fetch(this.objectUrl(key), {
+      method: 'HEAD',
+      headers: this.signedHeaders('HEAD', key),
+    });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`Object storage HEAD failed with status ${response.status}`);
     const size = Number.parseInt(response.headers.get('content-length') ?? '', 10);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error('Object storage HEAD returned an invalid content length');
+    }
     const contentType = response.headers.get('content-type');
     const checksumSha256 = response.headers.get('x-amz-checksum-sha256');
+    const eTag = response.headers.get('etag');
     return {
       key,
-      sizeBytes: Number.isFinite(size) ? size : 0,
+      sizeBytes: size,
       ...(contentType ? { contentType } : {}),
       ...(checksumSha256 ? { checksumSha256 } : {}),
+      ...(eTag ? { eTag } : {}),
     };
   }
 
   async createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl> {
     return {
-      url: this.presign('GET', input.key, input.expiresAt, {
-        'response-content-disposition': `attachment; filename="${safeFileName(input.fileName)}"`,
-        'response-content-type': input.contentType,
-      }),
+      url: this.presign(
+        'GET',
+        input.key,
+        input.expiresAt,
+        {},
+        {
+          'response-content-disposition': `attachment; filename="${safeFileName(input.fileName)}"`,
+          'response-content-type': input.contentType,
+        },
+      ),
       expiresAt: input.expiresAt,
     };
   }
@@ -76,7 +94,8 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     method: 'GET' | 'PUT',
     key: string,
     expiresAt: Date,
-    extraParams: Record<string, string>,
+    signedRequestHeaders: Record<string, string>,
+    queryParams: Record<string, string> = {},
   ): string {
     const now = new Date();
     const amzDate = amzTimestamp(now);
@@ -85,21 +104,23 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     const credentialScope = `${dateStamp}/${this.config.region}/${service}/aws4_request`;
     const host = new URL(this.config.endpoint).host;
     const path = `/${this.config.bucket}/${encodeKey(key)}`;
+    const normalizedHeaders = normalizeHeaders({ host, ...signedRequestHeaders });
+    const signedHeaders = Object.keys(normalizedHeaders).sort().join(';');
     const query = new URLSearchParams({
-      ...extraParams,
+      ...queryParams,
       'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
       'X-Amz-Credential': `${this.config.accessKey}/${credentialScope}`,
       'X-Amz-Date': amzDate,
       'X-Amz-Expires': String(expires),
-      'X-Amz-SignedHeaders': 'host',
+      'X-Amz-SignedHeaders': signedHeaders,
     });
     const canonicalQuery = canonicalSearch(query);
     const canonicalRequest = [
       method,
       path,
       canonicalQuery,
-      `host:${host}\n`,
-      'host',
+      canonicalHeaders(normalizedHeaders),
+      signedHeaders,
       emptyPayloadHash,
     ].join('\n');
     const stringToSign = [
@@ -115,19 +136,25 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     return `${this.config.endpoint.replace(/\/$/, '')}${path}?${canonicalQuery}&X-Amz-Signature=${signature}`;
   }
 
-  private signedHeaders(method: 'DELETE', key: string): Record<string, string> {
+  private signedHeaders(method: 'DELETE' | 'HEAD', key: string): Record<string, string> {
     const now = new Date();
     const amzDate = amzTimestamp(now);
     const dateStamp = amzDate.slice(0, 8);
     const host = new URL(this.config.endpoint).host;
     const path = `/${this.config.bucket}/${encodeKey(key)}`;
     const credentialScope = `${dateStamp}/${this.config.region}/${service}/aws4_request`;
+    const headers = normalizeHeaders({
+      host,
+      'x-amz-content-sha256': emptyPayloadHash,
+      'x-amz-date': amzDate,
+    });
+    const signedHeaders = Object.keys(headers).sort().join(';');
     const canonicalRequest = [
       method,
       path,
       '',
-      `host:${host}\nx-amz-content-sha256:${emptyPayloadHash}\nx-amz-date:${amzDate}\n`,
-      'host;x-amz-content-sha256;x-amz-date',
+      canonicalHeaders(headers),
+      signedHeaders,
       emptyPayloadHash,
     ].join('\n');
     const stringToSign = [
@@ -141,7 +168,7 @@ export class S3CompatibleStorageProvider implements StorageProvider {
       stringToSign,
     );
     return {
-      Authorization: `AWS4-HMAC-SHA256 Credential=${this.config.accessKey}/${credentialScope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${signature}`,
+      Authorization: `AWS4-HMAC-SHA256 Credential=${this.config.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
       'x-amz-content-sha256': emptyPayloadHash,
       'x-amz-date': amzDate,
     };
@@ -157,6 +184,19 @@ function canonicalSearch(params: URLSearchParams): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
+}
+
+function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value.trim()]),
+  );
+}
+
+function canonicalHeaders(headers: Record<string, string>): string {
+  return Object.entries(headers)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}:${value}\n`)
+    .join('');
 }
 
 function amzTimestamp(date: Date): string {

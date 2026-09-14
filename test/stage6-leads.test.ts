@@ -20,6 +20,7 @@ import {
 import { SubscriptionApplicationService } from '../src/modules/subscriptions/subscription.service';
 import { WorkspaceApplicationService } from '../src/modules/workspaces/workspace.service';
 import type { InvitationDocument } from '../src/modules/workspaces/workspace.types';
+import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 6 permission registry', () => {
   test('adds duplicate, merge, and Sales/Lead Admin platform defaults', () => {
@@ -658,13 +659,13 @@ describe('Stage 6 owner activation integration', () => {
     db = container.database.db;
     await new MigrationRunner(db, migrations).migrate();
     app = await buildApp(container);
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (app) await app.close();
     if (container) await container.database.close();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   test('reissues a lost owner activation token without persisting raw token secrets', async () => {
     const plan = await seedIntegrationPlan(db, { activeStaff: 2, trialDays: 9 });

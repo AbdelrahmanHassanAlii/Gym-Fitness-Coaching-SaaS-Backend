@@ -11,6 +11,7 @@ import {
   Permissions,
   systemPermissionProfiles,
 } from '../src/modules/permissions/permission.registry';
+import { INTEGRATION_TEST_TIMEOUT_MS, MIGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 8 migration 013', () => {
   test('creates training indexes and Stage 8 permission seeds without Stage 9 collections', async () => {
@@ -60,61 +61,67 @@ describe('Stage 8 migration 013', () => {
     expect(JSON.stringify(updates)).toContain('system_exercises.archive');
   });
 
-  test('runs clean 001-013 and locked 012-to-013 upgrades without Stage 9 collections', async () => {
-    const cleanContainer = await createAppContainer(
-      integrationConfig(`stage8_clean_migration_${new ObjectId().toHexString()}`),
-    );
-    const upgradeContainer = await createAppContainer(
-      integrationConfig(`stage8_upgrade_migration_${new ObjectId().toHexString()}`),
-    );
-    try {
-      const lockedThroughStage8 = migrations.filter(
-        (migration) => migrationNumber(migration.id) <= 13,
+  test(
+    'runs clean 001-013 and locked 012-to-013 upgrades without Stage 9 collections',
+    async () => {
+      const cleanContainer = await createAppContainer(
+        integrationConfig(`stage8_clean_migration_${new ObjectId().toHexString()}`),
       );
-      await new MigrationRunner(cleanContainer.database.db, lockedThroughStage8).migrate();
-      expect(
-        await cleanContainer.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '013-stage8-training-foundation' }),
-      ).toBe(1);
-      expect(
-        await cleanContainer.database.db.listCollections({ name: 'workout_sessions' }).hasNext(),
-      ).toBe(false);
+      const upgradeContainer = await createAppContainer(
+        integrationConfig(`stage8_upgrade_migration_${new ObjectId().toHexString()}`),
+      );
+      try {
+        const lockedThroughStage8 = migrations.filter(
+          (migration) => migrationNumber(migration.id) <= 13,
+        );
+        await new MigrationRunner(cleanContainer.database.db, lockedThroughStage8).migrate();
+        expect(
+          await cleanContainer.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '013-stage8-training-foundation' }),
+        ).toBe(1);
+        expect(
+          await cleanContainer.database.db.listCollections({ name: 'workout_sessions' }).hasNext(),
+        ).toBe(false);
 
-      const lockedStage7 = migrations.filter((migration) => migrationNumber(migration.id) <= 12);
-      await new MigrationRunner(upgradeContainer.database.db, lockedStage7).migrate();
-      expect(
-        await upgradeContainer.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '012-stage7-trainee-relationships' }),
-      ).toBe(1);
-      expect(
-        await upgradeContainer.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '013-stage8-training-foundation' }),
-      ).toBe(0);
-      await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
-      await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
-      expect(
-        await upgradeContainer.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '013-stage8-training-foundation' }),
-      ).toBe(1);
-      expect(
-        await upgradeContainer.database.db
-          .collection('permission_definitions')
-          .countDocuments({ key: 'programs.activate', state: 'ACTIVE' }),
-      ).toBe(1);
-      expect(
-        await upgradeContainer.database.db.listCollections({ name: 'workout_sessions' }).hasNext(),
-      ).toBe(false);
-    } finally {
-      await cleanContainer.database.db.dropDatabase();
-      await cleanContainer.database.close();
-      await upgradeContainer.database.db.dropDatabase();
-      await upgradeContainer.database.close();
-    }
-  }, 30_000);
+        const lockedStage7 = migrations.filter((migration) => migrationNumber(migration.id) <= 12);
+        await new MigrationRunner(upgradeContainer.database.db, lockedStage7).migrate();
+        expect(
+          await upgradeContainer.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '012-stage7-trainee-relationships' }),
+        ).toBe(1);
+        expect(
+          await upgradeContainer.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '013-stage8-training-foundation' }),
+        ).toBe(0);
+        await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
+        await new MigrationRunner(upgradeContainer.database.db, lockedThroughStage8).migrate();
+        expect(
+          await upgradeContainer.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '013-stage8-training-foundation' }),
+        ).toBe(1);
+        expect(
+          await upgradeContainer.database.db
+            .collection('permission_definitions')
+            .countDocuments({ key: 'programs.activate', state: 'ACTIVE' }),
+        ).toBe(1);
+        expect(
+          await upgradeContainer.database.db
+            .listCollections({ name: 'workout_sessions' })
+            .hasNext(),
+        ).toBe(false);
+      } finally {
+        await cleanContainer.database.db.dropDatabase();
+        await cleanContainer.database.close();
+        await upgradeContainer.database.db.dropDatabase();
+        await upgradeContainer.database.close();
+      }
+    },
+    MIGRATION_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('Stage 8 training foundation integration', () => {
@@ -127,12 +134,12 @@ describe('Stage 8 training foundation integration', () => {
     );
     db = container.database.db;
     await new MigrationRunner(db, migrations).migrate();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (container) await container.database.close();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   test('SYSTEM, GYM and PRIVATE exercises obey scope, duplicates, archive, and reuse rules', async () => {
     const seed = await seedGym(container);
@@ -354,50 +361,54 @@ describe('Stage 8 training foundation integration', () => {
     ).toBe(2);
   });
 
-  test('program copy creates an independent same-workspace snapshot and denies cross-workspace source IDs', async () => {
-    const sourceSeed = await seedGym(container);
-    const targetSeed = await seedGym(container);
-    const exercise = await activeGymExercise(container, sourceSeed, 'Copy Lift');
-    const source = await container.training.createProgram(
-      sourceSeed.trainerCtx,
-      sourceSeed.workspaceId,
-      sourceSeed.relationshipId,
-      {
-        source: { type: 'SCRATCH' },
-        name: 'Source Program',
-        days: [day(exercise.exercise.id, 1, 'Source Day')],
-      },
-    );
-    const copied = await container.training.createProgram(
-      sourceSeed.trainerCtx,
-      sourceSeed.workspaceId,
-      sourceSeed.relationshipId,
-      {
-        source: { type: 'PROGRAM', programId: source.program.id },
-        name: 'Copied Program',
-      },
-    );
-    const copiedRead = await container.training.getProgram(
-      sourceSeed.trainerCtx,
-      sourceSeed.workspaceId,
-      sourceSeed.relationshipId,
-      copied.program.id,
-    );
-    expect(copiedRead.revision.days[0]?.name).toBe('Source Day');
-    expect(copied.program.sourceProgramId).toBe(source.program.id);
-
-    await expect(
-      container.training.createProgram(
-        targetSeed.ownerCtx,
-        targetSeed.workspaceId,
-        targetSeed.relationshipId,
+  test(
+    'program copy creates an independent same-workspace snapshot and denies cross-workspace source IDs',
+    async () => {
+      const sourceSeed = await seedGym(container);
+      const targetSeed = await seedGym(container);
+      const exercise = await activeGymExercise(container, sourceSeed, 'Copy Lift');
+      const source = await container.training.createProgram(
+        sourceSeed.trainerCtx,
+        sourceSeed.workspaceId,
+        sourceSeed.relationshipId,
+        {
+          source: { type: 'SCRATCH' },
+          name: 'Source Program',
+          days: [day(exercise.exercise.id, 1, 'Source Day')],
+        },
+      );
+      const copied = await container.training.createProgram(
+        sourceSeed.trainerCtx,
+        sourceSeed.workspaceId,
+        sourceSeed.relationshipId,
         {
           source: { type: 'PROGRAM', programId: source.program.id },
-          name: 'Cross Workspace Copy',
+          name: 'Copied Program',
         },
-      ),
-    ).rejects.toMatchObject({ code: 'PROGRAM_NOT_FOUND' });
-  });
+      );
+      const copiedRead = await container.training.getProgram(
+        sourceSeed.trainerCtx,
+        sourceSeed.workspaceId,
+        sourceSeed.relationshipId,
+        copied.program.id,
+      );
+      expect(copiedRead.revision.days[0]?.name).toBe('Source Day');
+      expect(copied.program.sourceProgramId).toBe(source.program.id);
+
+      await expect(
+        container.training.createProgram(
+          targetSeed.ownerCtx,
+          targetSeed.workspaceId,
+          targetSeed.relationshipId,
+          {
+            source: { type: 'PROGRAM', programId: source.program.id },
+            name: 'Cross Workspace Copy',
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'PROGRAM_NOT_FOUND' });
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
   test('program copy revalidates private and archived exercise usability for new prescriptions', async () => {
     const seed = await seedGym(container);
@@ -1159,245 +1170,258 @@ describe('Stage 8 training foundation integration', () => {
     ).rejects.toMatchObject({ code: 'EXERCISE_NOT_FOUND' });
   });
 
-  test('separate concurrency races preserve Stage 8 invariants', async () => {
-    const activationSeed = await seedGym(container);
-    const activationExercise = await activeGymExercise(container, activationSeed, 'Race A');
-    const activationProgram = await container.training.createProgram(
-      activationSeed.trainerCtx,
-      activationSeed.workspaceId,
-      activationSeed.relationshipId,
-      {
-        source: { type: 'SCRATCH' },
-        name: 'Activation Wins',
-        days: [day(activationExercise.exercise.id)],
-      },
-    );
-    await container.training.activateProgram(
-      activationSeed.trainerCtx,
-      activationSeed.workspaceId,
-      activationSeed.relationshipId,
-      activationProgram.program.id,
-      { expectedVersion: activationProgram.program.version },
-    );
-    const activationRelationship = await container.coachingRelationships.findByIdInWorkspace(
-      activationSeed.workspaceObjectId,
-      activationSeed.relationshipObjectId,
-    );
-    await container.trainees.endRelationship(
-      activationSeed.ownerCtx,
-      activationSeed.workspaceId,
-      activationSeed.relationshipId,
-      { expectedVersion: activationRelationship?.version ?? -1 },
-    );
-    expect(
-      (await db.collection('programs').findOne({ _id: new ObjectId(activationProgram.program.id) }))
-        ?.status,
-    ).toBe('COMPLETED');
+  test(
+    'separate concurrency races preserve Stage 8 invariants',
+    async () => {
+      const activationSeed = await seedGym(container);
+      const activationExercise = await activeGymExercise(container, activationSeed, 'Race A');
+      const activationProgram = await container.training.createProgram(
+        activationSeed.trainerCtx,
+        activationSeed.workspaceId,
+        activationSeed.relationshipId,
+        {
+          source: { type: 'SCRATCH' },
+          name: 'Activation Wins',
+          days: [day(activationExercise.exercise.id)],
+        },
+      );
+      await container.training.activateProgram(
+        activationSeed.trainerCtx,
+        activationSeed.workspaceId,
+        activationSeed.relationshipId,
+        activationProgram.program.id,
+        { expectedVersion: activationProgram.program.version },
+      );
+      const activationRelationship = await container.coachingRelationships.findByIdInWorkspace(
+        activationSeed.workspaceObjectId,
+        activationSeed.relationshipObjectId,
+      );
+      await container.trainees.endRelationship(
+        activationSeed.ownerCtx,
+        activationSeed.workspaceId,
+        activationSeed.relationshipId,
+        { expectedVersion: activationRelationship?.version ?? -1 },
+      );
+      expect(
+        (
+          await db
+            .collection('programs')
+            .findOne({ _id: new ObjectId(activationProgram.program.id) })
+        )?.status,
+      ).toBe('COMPLETED');
 
-    const endSeed = await seedGym(container);
-    const endExercise = await activeGymExercise(container, endSeed, 'Race B');
-    const endProgram = await container.training.createProgram(
-      endSeed.trainerCtx,
-      endSeed.workspaceId,
-      endSeed.relationshipId,
-      {
-        source: { type: 'SCRATCH' },
-        name: 'End Wins',
-        days: [day(endExercise.exercise.id)],
-      },
-    );
-    await container.trainees.endRelationship(
-      endSeed.ownerCtx,
-      endSeed.workspaceId,
-      endSeed.relationshipId,
-      {
-        expectedVersion: endSeed.relationshipVersion,
-      },
-    );
-    await expect(
-      container.training.activateProgram(
+      const endSeed = await seedGym(container);
+      const endExercise = await activeGymExercise(container, endSeed, 'Race B');
+      const endProgram = await container.training.createProgram(
         endSeed.trainerCtx,
         endSeed.workspaceId,
         endSeed.relationshipId,
-        endProgram.program.id,
-        { expectedVersion: endProgram.program.version },
-      ),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
-    expect(
-      await container.trainingRepo.countActivePrograms(
-        endSeed.workspaceObjectId,
-        endSeed.relationshipObjectId,
-      ),
-    ).toBe(0);
-
-    const revisionSeed = await seedGym(container);
-    const exercise = await activeGymExercise(container, revisionSeed, 'Revision Race');
-    const template = await container.training.createTemplate(
-      revisionSeed.trainerCtx,
-      revisionSeed.workspaceId,
-      { scope: 'GYM', name: 'Two Template Revisions', days: [day(exercise.exercise.id)] },
-    );
-    const templateRace = await Promise.allSettled([
-      container.training.createTemplateRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        template.template.id,
-        { expectedVersion: template.template.version, days: [day(exercise.exercise.id, 1, 'T2a')] },
-      ),
-      container.training.createTemplateRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        template.template.id,
-        { expectedVersion: template.template.version, days: [day(exercise.exercise.id, 1, 'T2b')] },
-      ),
-    ]);
-    expect(templateRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(
-      await db.collection('program_template_revisions').countDocuments({
-        templateId: new ObjectId(template.template.id),
-      }),
-    ).toBe(2);
-
-    const program = await container.training.createProgram(
-      revisionSeed.trainerCtx,
-      revisionSeed.workspaceId,
-      revisionSeed.relationshipId,
-      {
-        source: { type: 'SCRATCH' },
-        name: 'Two Program Revisions',
-        days: [day(exercise.exercise.id)],
-      },
-    );
-    const programRace = await Promise.allSettled([
-      container.training.createProgramRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        revisionSeed.relationshipId,
-        program.program.id,
-        { expectedVersion: program.program.version, days: [day(exercise.exercise.id, 1, 'P2a')] },
-      ),
-      container.training.createProgramRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        revisionSeed.relationshipId,
-        program.program.id,
-        { expectedVersion: program.program.version, days: [day(exercise.exercise.id, 1, 'P2b')] },
-      ),
-    ]);
-    expect(programRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(
-      await db.collection('program_revisions').countDocuments({
-        programId: new ObjectId(program.program.id),
-      }),
-    ).toBe(2);
-
-    const active = await container.training.activateProgram(
-      revisionSeed.trainerCtx,
-      revisionSeed.workspaceId,
-      revisionSeed.relationshipId,
-      program.program.id,
-      {
-        expectedVersion:
-          (await db.collection('programs').findOne({ _id: new ObjectId(program.program.id) }))
-            ?.version ?? -1,
-      },
-    );
-    const programStatusRace = await Promise.allSettled([
-      container.training.createProgramRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        revisionSeed.relationshipId,
-        program.program.id,
-        { expectedVersion: active.program.version, days: [day(exercise.exercise.id, 1, 'P3')] },
-      ),
-      container.training.completeProgram(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        revisionSeed.relationshipId,
-        program.program.id,
-        { expectedVersion: active.program.version },
-      ),
-    ]);
-    expect(programStatusRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(
-      await container.trainingRepo.countActivePrograms(
-        revisionSeed.workspaceObjectId,
-        revisionSeed.relationshipObjectId,
-      ),
-    ).toBeLessThanOrEqual(1);
-
-    const archiveExercise = await activeGymExercise(
-      container,
-      revisionSeed,
-      'Archive Race Exercise',
-    );
-    const archiveTemplate = await container.training.createTemplate(
-      revisionSeed.trainerCtx,
-      revisionSeed.workspaceId,
-      {
-        scope: 'GYM',
-        name: 'Archive Exercise Template Race',
-        days: [day(exercise.exercise.id)],
-      },
-    );
-    const exerciseTemplateRace = await Promise.allSettled([
-      container.training.archiveExercise(
-        revisionSeed.ownerCtx,
-        revisionSeed.workspaceId,
-        archiveExercise.exercise.id,
-        { expectedVersion: archiveExercise.exercise.version },
-      ),
-      container.training.createTemplateRevision(
-        revisionSeed.trainerCtx,
-        revisionSeed.workspaceId,
-        archiveTemplate.template.id,
         {
-          expectedVersion: archiveTemplate.template.version,
-          days: [day(archiveExercise.exercise.id)],
+          source: { type: 'SCRATCH' },
+          name: 'End Wins',
+          days: [day(endExercise.exercise.id)],
         },
-      ),
-    ]);
-    expect(
-      exerciseTemplateRace.filter((result) => result.status === 'fulfilled').length,
-    ).toBeLessThanOrEqual(1);
+      );
+      await container.trainees.endRelationship(
+        endSeed.ownerCtx,
+        endSeed.workspaceId,
+        endSeed.relationshipId,
+        {
+          expectedVersion: endSeed.relationshipVersion,
+        },
+      );
+      await expect(
+        container.training.activateProgram(
+          endSeed.trainerCtx,
+          endSeed.workspaceId,
+          endSeed.relationshipId,
+          endProgram.program.id,
+          { expectedVersion: endProgram.program.version },
+        ),
+      ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+      expect(
+        await container.trainingRepo.countActivePrograms(
+          endSeed.workspaceObjectId,
+          endSeed.relationshipObjectId,
+        ),
+      ).toBe(0);
 
-    const archiveProgram = await container.training.createProgram(
-      revisionSeed.trainerCtx,
-      revisionSeed.workspaceId,
-      revisionSeed.relationshipId,
-      {
-        source: { type: 'SCRATCH' },
-        name: 'Archive Exercise Program Race',
-        days: [day(exercise.exercise.id)],
-      },
-    );
-    const archiveProgramExercise = await activeGymExercise(
-      container,
-      revisionSeed,
-      'Archive Race Program Exercise',
-    );
-    const exerciseProgramRace = await Promise.allSettled([
-      container.training.archiveExercise(
-        revisionSeed.ownerCtx,
+      const revisionSeed = await seedGym(container);
+      const exercise = await activeGymExercise(container, revisionSeed, 'Revision Race');
+      const template = await container.training.createTemplate(
+        revisionSeed.trainerCtx,
         revisionSeed.workspaceId,
-        archiveProgramExercise.exercise.id,
-        { expectedVersion: archiveProgramExercise.exercise.version },
-      ),
-      container.training.createProgramRevision(
+        { scope: 'GYM', name: 'Two Template Revisions', days: [day(exercise.exercise.id)] },
+      );
+      const templateRace = await Promise.allSettled([
+        container.training.createTemplateRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          template.template.id,
+          {
+            expectedVersion: template.template.version,
+            days: [day(exercise.exercise.id, 1, 'T2a')],
+          },
+        ),
+        container.training.createTemplateRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          template.template.id,
+          {
+            expectedVersion: template.template.version,
+            days: [day(exercise.exercise.id, 1, 'T2b')],
+          },
+        ),
+      ]);
+      expect(templateRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(
+        await db.collection('program_template_revisions').countDocuments({
+          templateId: new ObjectId(template.template.id),
+        }),
+      ).toBe(2);
+
+      const program = await container.training.createProgram(
         revisionSeed.trainerCtx,
         revisionSeed.workspaceId,
         revisionSeed.relationshipId,
-        archiveProgram.program.id,
         {
-          expectedVersion: archiveProgram.program.version,
-          days: [day(archiveProgramExercise.exercise.id)],
+          source: { type: 'SCRATCH' },
+          name: 'Two Program Revisions',
+          days: [day(exercise.exercise.id)],
         },
-      ),
-    ]);
-    expect(
-      exerciseProgramRace.filter((result) => result.status === 'fulfilled').length,
-    ).toBeLessThanOrEqual(1);
-  }, 30_000);
+      );
+      const programRace = await Promise.allSettled([
+        container.training.createProgramRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          revisionSeed.relationshipId,
+          program.program.id,
+          { expectedVersion: program.program.version, days: [day(exercise.exercise.id, 1, 'P2a')] },
+        ),
+        container.training.createProgramRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          revisionSeed.relationshipId,
+          program.program.id,
+          { expectedVersion: program.program.version, days: [day(exercise.exercise.id, 1, 'P2b')] },
+        ),
+      ]);
+      expect(programRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(
+        await db.collection('program_revisions').countDocuments({
+          programId: new ObjectId(program.program.id),
+        }),
+      ).toBe(2);
+
+      const active = await container.training.activateProgram(
+        revisionSeed.trainerCtx,
+        revisionSeed.workspaceId,
+        revisionSeed.relationshipId,
+        program.program.id,
+        {
+          expectedVersion:
+            (await db.collection('programs').findOne({ _id: new ObjectId(program.program.id) }))
+              ?.version ?? -1,
+        },
+      );
+      const programStatusRace = await Promise.allSettled([
+        container.training.createProgramRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          revisionSeed.relationshipId,
+          program.program.id,
+          { expectedVersion: active.program.version, days: [day(exercise.exercise.id, 1, 'P3')] },
+        ),
+        container.training.completeProgram(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          revisionSeed.relationshipId,
+          program.program.id,
+          { expectedVersion: active.program.version },
+        ),
+      ]);
+      expect(programStatusRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(
+        await container.trainingRepo.countActivePrograms(
+          revisionSeed.workspaceObjectId,
+          revisionSeed.relationshipObjectId,
+        ),
+      ).toBeLessThanOrEqual(1);
+
+      const archiveExercise = await activeGymExercise(
+        container,
+        revisionSeed,
+        'Archive Race Exercise',
+      );
+      const archiveTemplate = await container.training.createTemplate(
+        revisionSeed.trainerCtx,
+        revisionSeed.workspaceId,
+        {
+          scope: 'GYM',
+          name: 'Archive Exercise Template Race',
+          days: [day(exercise.exercise.id)],
+        },
+      );
+      const exerciseTemplateRace = await Promise.allSettled([
+        container.training.archiveExercise(
+          revisionSeed.ownerCtx,
+          revisionSeed.workspaceId,
+          archiveExercise.exercise.id,
+          { expectedVersion: archiveExercise.exercise.version },
+        ),
+        container.training.createTemplateRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          archiveTemplate.template.id,
+          {
+            expectedVersion: archiveTemplate.template.version,
+            days: [day(archiveExercise.exercise.id)],
+          },
+        ),
+      ]);
+      expect(
+        exerciseTemplateRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeLessThanOrEqual(1);
+
+      const archiveProgram = await container.training.createProgram(
+        revisionSeed.trainerCtx,
+        revisionSeed.workspaceId,
+        revisionSeed.relationshipId,
+        {
+          source: { type: 'SCRATCH' },
+          name: 'Archive Exercise Program Race',
+          days: [day(exercise.exercise.id)],
+        },
+      );
+      const archiveProgramExercise = await activeGymExercise(
+        container,
+        revisionSeed,
+        'Archive Race Program Exercise',
+      );
+      const exerciseProgramRace = await Promise.allSettled([
+        container.training.archiveExercise(
+          revisionSeed.ownerCtx,
+          revisionSeed.workspaceId,
+          archiveProgramExercise.exercise.id,
+          { expectedVersion: archiveProgramExercise.exercise.version },
+        ),
+        container.training.createProgramRevision(
+          revisionSeed.trainerCtx,
+          revisionSeed.workspaceId,
+          revisionSeed.relationshipId,
+          archiveProgram.program.id,
+          {
+            expectedVersion: archiveProgram.program.version,
+            days: [day(archiveProgramExercise.exercise.id)],
+          },
+        ),
+      ]);
+      expect(
+        exerciseProgramRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeLessThanOrEqual(1);
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
   test('activation rolls back replacement and progress when outbox persistence fails', async () => {
     const seed = await seedGym(container);

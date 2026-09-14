@@ -8,102 +8,111 @@ import { migrations } from '../src/migrations';
 import { migration014Stage9WorkoutExecution } from '../src/migrations/014-stage9-workout-execution';
 import { MigrationRunner } from '../src/migrations/migration-runner';
 import { systemPermissionProfiles } from '../src/modules/permissions/permission.registry';
+import { INTEGRATION_TEST_TIMEOUT_MS, MIGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 9 migration 014', () => {
-  test('creates workout and personal-record indexes and permission seeds only', async () => {
-    const calls: Array<{ collection: string; indexes: unknown[] }> = [];
-    const updates: Array<{ collection: string; filter: unknown; update: unknown }> = [];
-    const db = {
-      collection(name: string) {
-        return {
-          async createIndexes(indexes: unknown[]) {
-            calls.push({ collection: name, indexes });
-          },
-          async findOne() {
-            return { _id: new ObjectId() };
-          },
-          async updateOne(filter: unknown, update: unknown) {
-            updates.push({ collection: name, filter, update });
-          },
-          find() {
-            return {
-              async toArray() {
-                return [{ _id: new ObjectId() }];
-              },
-            };
-          },
-        };
-      },
-    };
+  test(
+    'creates workout and personal-record indexes and permission seeds only',
+    async () => {
+      const calls: Array<{ collection: string; indexes: unknown[] }> = [];
+      const updates: Array<{ collection: string; filter: unknown; update: unknown }> = [];
+      const db = {
+        collection(name: string) {
+          return {
+            async createIndexes(indexes: unknown[]) {
+              calls.push({ collection: name, indexes });
+            },
+            async findOne() {
+              return { _id: new ObjectId() };
+            },
+            async updateOne(filter: unknown, update: unknown) {
+              updates.push({ collection: name, filter, update });
+            },
+            find() {
+              return {
+                async toArray() {
+                  return [{ _id: new ObjectId() }];
+                },
+              };
+            },
+          };
+        },
+      };
 
-    await migration014Stage9WorkoutExecution.up(db as never);
+      await migration014Stage9WorkoutExecution.up(db as never);
 
-    expect(indexes(calls, 'workout_sessions')).toContainEqual(
-      expect.objectContaining({
-        name: 'workout_sessions_one_in_progress_per_relationship',
-        unique: true,
-        partialFilterExpression: { status: 'IN_PROGRESS' },
-      }),
-    );
-    expect(indexes(calls, 'personal_records')).toContainEqual(
-      expect.objectContaining({
-        name: 'personal_records_projection_unique',
-        unique: true,
-      }),
-    );
-    expect(indexes(calls, 'workout_corrections')).toBeUndefined();
-    expect(JSON.stringify(updates)).toContain('workouts.complete');
-    expect(JSON.stringify(updates)).toContain('personal_records.read');
-  }, 15_000);
+      expect(indexes(calls, 'workout_sessions')).toContainEqual(
+        expect.objectContaining({
+          name: 'workout_sessions_one_in_progress_per_relationship',
+          unique: true,
+          partialFilterExpression: { status: 'IN_PROGRESS' },
+        }),
+      );
+      expect(indexes(calls, 'personal_records')).toContainEqual(
+        expect.objectContaining({
+          name: 'personal_records_projection_unique',
+          unique: true,
+        }),
+      );
+      expect(indexes(calls, 'workout_corrections')).toBeUndefined();
+      expect(JSON.stringify(updates)).toContain('workouts.complete');
+      expect(JSON.stringify(updates)).toContain('personal_records.read');
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
-  test('runs clean 001-014 and locked 013-to-014 upgrades without correction/sync collections', async () => {
-    const clean = await createAppContainer(
-      integrationConfig(`stage9_clean_${new ObjectId().toHexString()}`),
-    );
-    const upgrade = await createAppContainer(
-      integrationConfig(`stage9_upgrade_${new ObjectId().toHexString()}`),
-    );
-    try {
-      const through14 = migrations.filter((migration) => migrationNumber(migration.id) <= 14);
-      await new MigrationRunner(clean.database.db, through14).migrate();
-      expect(
-        await clean.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '014-stage9-workout-execution' }),
-      ).toBe(1);
-      expect(
-        await clean.database.db.listCollections({ name: 'workout_corrections' }).hasNext(),
-      ).toBe(false);
+  test(
+    'runs clean 001-014 and locked 013-to-014 upgrades without correction/sync collections',
+    async () => {
+      const clean = await createAppContainer(
+        integrationConfig(`stage9_clean_${new ObjectId().toHexString()}`),
+      );
+      const upgrade = await createAppContainer(
+        integrationConfig(`stage9_upgrade_${new ObjectId().toHexString()}`),
+      );
+      try {
+        const through14 = migrations.filter((migration) => migrationNumber(migration.id) <= 14);
+        await new MigrationRunner(clean.database.db, through14).migrate();
+        expect(
+          await clean.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '014-stage9-workout-execution' }),
+        ).toBe(1);
+        expect(
+          await clean.database.db.listCollections({ name: 'workout_corrections' }).hasNext(),
+        ).toBe(false);
 
-      const through13 = migrations.filter((migration) => migrationNumber(migration.id) <= 13);
-      await new MigrationRunner(upgrade.database.db, through13).migrate();
-      expect(
-        await upgrade.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '013-stage8-training-foundation' }),
-      ).toBe(1);
-      await new MigrationRunner(upgrade.database.db, through14).migrate();
-      await new MigrationRunner(upgrade.database.db, through14).migrate();
-      expect(
-        await upgrade.database.db
-          .collection('db_migrations')
-          .countDocuments({ migrationId: '014-stage9-workout-execution' }),
-      ).toBe(1);
-      expect(
-        await upgrade.database.db
-          .collection('permission_definitions')
-          .countDocuments({ key: 'workouts.read', state: 'ACTIVE' }),
-      ).toBe(1);
-      expect(
-        await upgrade.database.db.listCollections({ name: 'workout_corrections' }).hasNext(),
-      ).toBe(false);
-    } finally {
-      await clean.database.db.dropDatabase();
-      await clean.database.close();
-      await upgrade.database.db.dropDatabase();
-      await upgrade.database.close();
-    }
-  }, 120_000);
+        const through13 = migrations.filter((migration) => migrationNumber(migration.id) <= 13);
+        await new MigrationRunner(upgrade.database.db, through13).migrate();
+        expect(
+          await upgrade.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '013-stage8-training-foundation' }),
+        ).toBe(1);
+        await new MigrationRunner(upgrade.database.db, through14).migrate();
+        await new MigrationRunner(upgrade.database.db, through14).migrate();
+        expect(
+          await upgrade.database.db
+            .collection('db_migrations')
+            .countDocuments({ migrationId: '014-stage9-workout-execution' }),
+        ).toBe(1);
+        expect(
+          await upgrade.database.db
+            .collection('permission_definitions')
+            .countDocuments({ key: 'workouts.read', state: 'ACTIVE' }),
+        ).toBe(1);
+        expect(
+          await upgrade.database.db.listCollections({ name: 'workout_corrections' }).hasNext(),
+        ).toBe(false);
+      } finally {
+        await clean.database.db.dropDatabase();
+        await clean.database.close();
+        await upgrade.database.db.dropDatabase();
+        await upgrade.database.close();
+      }
+    },
+    MIGRATION_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('Stage 9 workout execution integration', () => {
@@ -116,58 +125,63 @@ describe('Stage 9 workout execution integration', () => {
     );
     db = container.database.db;
     await new MigrationRunner(db, migrations).migrate();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (container) await container.database.close();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
-  test('start creates one IN_PROGRESS snapshot without touching public relationship/program/progress versions', async () => {
-    const seed = await seedGym(container);
-    const active = await activeProgram(container, seed, 'Snapshot Lift');
-    const relationshipBefore = await db
-      .collection('coaching_relationships')
-      .findOne({ _id: seed.relationshipObjectId });
-    const programBefore = await db
-      .collection('programs')
-      .findOne({ _id: new ObjectId(active.program.id) });
-    const progressBefore = await db
-      .collection('program_progress')
-      .findOne({ programId: new ObjectId(active.program.id) });
-    const first = await runStart(container, seed, `start-${new ObjectId().toHexString()}`);
-    const replay = await runStart(container, seed, first.key);
+  test(
+    'start creates one IN_PROGRESS snapshot without touching public relationship/program/progress versions',
+    async () => {
+      const seed = await seedGym(container);
+      const active = await activeProgram(container, seed, 'Snapshot Lift');
+      const relationshipBefore = await db
+        .collection('coaching_relationships')
+        .findOne({ _id: seed.relationshipObjectId });
+      const programBefore = await db
+        .collection('programs')
+        .findOne({ _id: new ObjectId(active.program.id) });
+      const progressBefore = await db
+        .collection('program_progress')
+        .findOne({ programId: new ObjectId(active.program.id) });
+      const first = await runStart(container, seed, `start-${new ObjectId().toHexString()}`);
+      const replay = await runStart(container, seed, first.key);
 
-    expect(first.result.replayed).toBe(false);
-    expect(replay.result.replayed).toBe(true);
-    expect(replay.result.body.workout.id).toBe(first.result.body.workout.id);
-    expect(first.result.body.workout.status).toBe('IN_PROGRESS');
-    expect(first.result.body.workout.programRevisionId).toBe(active.program.currentRevisionId);
-    expect(firstExercise(first.result.body.workout).exerciseNameSnapshot).toContain(
-      'Snapshot Lift',
-    );
-    expect(
-      (await db.collection('coaching_relationships').findOne({ _id: seed.relationshipObjectId }))
-        ?.version,
-    ).toBe(relationshipBefore?.version);
-    expect(
-      (await db.collection('programs').findOne({ _id: new ObjectId(active.program.id) }))?.version,
-    ).toBe(programBefore?.version);
-    expect(
-      (
-        await db
-          .collection('program_progress')
-          .findOne({ programId: new ObjectId(active.program.id) })
-      )?.version,
-    ).toBe(progressBefore?.version);
-    expect(
-      await db.collection('workout_sessions').countDocuments({
-        workspaceId: seed.workspaceObjectId,
-        relationshipId: seed.relationshipObjectId,
-        status: 'IN_PROGRESS',
-      }),
-    ).toBe(1);
-  }, 15_000);
+      expect(first.result.replayed).toBe(false);
+      expect(replay.result.replayed).toBe(true);
+      expect(replay.result.body.workout.id).toBe(first.result.body.workout.id);
+      expect(first.result.body.workout.status).toBe('IN_PROGRESS');
+      expect(first.result.body.workout.programRevisionId).toBe(active.program.currentRevisionId);
+      expect(firstExercise(first.result.body.workout).exerciseNameSnapshot).toContain(
+        'Snapshot Lift',
+      );
+      expect(
+        (await db.collection('coaching_relationships').findOne({ _id: seed.relationshipObjectId }))
+          ?.version,
+      ).toBe(relationshipBefore?.version);
+      expect(
+        (await db.collection('programs').findOne({ _id: new ObjectId(active.program.id) }))
+          ?.version,
+      ).toBe(programBefore?.version);
+      expect(
+        (
+          await db
+            .collection('program_progress')
+            .findOne({ programId: new ObjectId(active.program.id) })
+        )?.version,
+      ).toBe(progressBefore?.version);
+      expect(
+        await db.collection('workout_sessions').countDocuments({
+          workspaceId: seed.workspaceObjectId,
+          relationshipId: seed.relationshipObjectId,
+          status: 'IN_PROGRESS',
+        }),
+      ).toBe(1);
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
   test('duplicate starts race to a single IN_PROGRESS workout and stable conflict', async () => {
     const seed = await seedGym(container);
@@ -490,526 +504,537 @@ describe('Stage 9 workout execution integration', () => {
     ).toBe(3);
   });
 
-  test('workout, lifecycle, and progress commands use CAS under concurrent stale mutations', async () => {
-    const patchSeed = await seedGym(container);
-    await activeProgram(container, patchSeed, 'Patch Race');
-    const live = (
-      await runStart(container, patchSeed, `patch-race-start-${new ObjectId().toHexString()}`)
-    ).result.body.workout;
-    const patchA = patchFirstSet(container, patchSeed, live, 40, 5);
-    const patchB = patchFirstSet(container, patchSeed, live, 45, 5);
-    const patchRace = await Promise.allSettled([patchA, patchB]);
-    expect(patchRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(patchRace)).toContain('WORKOUT_VERSION_CONFLICT');
+  test(
+    'workout, lifecycle, and progress commands use CAS under concurrent stale mutations',
+    async () => {
+      const patchSeed = await seedGym(container);
+      await activeProgram(container, patchSeed, 'Patch Race');
+      const live = (
+        await runStart(container, patchSeed, `patch-race-start-${new ObjectId().toHexString()}`)
+      ).result.body.workout;
+      const patchA = patchFirstSet(container, patchSeed, live, 40, 5);
+      const patchB = patchFirstSet(container, patchSeed, live, 45, 5);
+      const patchRace = await Promise.allSettled([patchA, patchB]);
+      expect(patchRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(patchRace)).toContain('WORKOUT_VERSION_CONFLICT');
 
-    const patchCompleteSeed = await seedGym(container);
-    await activeProgram(container, patchCompleteSeed, 'Patch Complete Race');
-    const started = (
-      await runStart(
-        container,
-        patchCompleteSeed,
-        `patch-complete-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const completeRace = await Promise.allSettled([
-      patchFirstSet(container, patchCompleteSeed, started, 55, 5),
-      runComplete(
-        container,
-        patchCompleteSeed,
-        started.id,
-        started.version,
-        `patch-complete-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(completeRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    const afterPatchComplete = await db
-      .collection('workout_sessions')
-      .findOne({ _id: new ObjectId(started.id) });
-    if (afterPatchComplete?.status === 'COMPLETED') {
-      await expect(
-        patchFirstSet(container, patchCompleteSeed, started, 60, 6),
-      ).rejects.toMatchObject({ code: 'WORKOUT_VERSION_CONFLICT' });
-    } else {
-      expect(afterPatchComplete?.status).toBe('IN_PROGRESS');
-      expect(rejectedCodes(completeRace)).toContain('WORKOUT_NOT_IN_PROGRESS');
-    }
+      const patchCompleteSeed = await seedGym(container);
+      await activeProgram(container, patchCompleteSeed, 'Patch Complete Race');
+      const started = (
+        await runStart(
+          container,
+          patchCompleteSeed,
+          `patch-complete-start-${new ObjectId().toHexString()}`,
+        )
+      ).result.body.workout;
+      const completeRace = await Promise.allSettled([
+        patchFirstSet(container, patchCompleteSeed, started, 55, 5),
+        runComplete(
+          container,
+          patchCompleteSeed,
+          started.id,
+          started.version,
+          `patch-complete-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(completeRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const afterPatchComplete = await db
+        .collection('workout_sessions')
+        .findOne({ _id: new ObjectId(started.id) });
+      if (afterPatchComplete?.status === 'COMPLETED') {
+        await expect(
+          patchFirstSet(container, patchCompleteSeed, started, 60, 6),
+        ).rejects.toMatchObject({ code: 'WORKOUT_VERSION_CONFLICT' });
+      } else {
+        expect(afterPatchComplete?.status).toBe('IN_PROGRESS');
+        expect(rejectedCodes(completeRace)).toContain('WORKOUT_NOT_IN_PROGRESS');
+      }
 
-    const completeAbandonSeed = await seedGym(container);
-    const completeAbandonProgram = await activeProgram(
-      container,
-      completeAbandonSeed,
-      'Complete Abandon Race',
-    );
-    const completeAbandonStarted = (
-      await runStart(
+      const completeAbandonSeed = await seedGym(container);
+      const completeAbandonProgram = await activeProgram(
         container,
         completeAbandonSeed,
-        `complete-abandon-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const completeAbandonPatched = await patchFirstSet(
-      container,
-      completeAbandonSeed,
-      completeAbandonStarted,
-      75,
-      3,
-    );
-    const completeAbandonRace = await Promise.allSettled([
-      runComplete(
+        'Complete Abandon Race',
+      );
+      const completeAbandonStarted = (
+        await runStart(
+          container,
+          completeAbandonSeed,
+          `complete-abandon-start-${new ObjectId().toHexString()}`,
+        )
+      ).result.body.workout;
+      const completeAbandonPatched = await patchFirstSet(
         container,
         completeAbandonSeed,
-        completeAbandonStarted.id,
-        completeAbandonPatched.workout.version,
-        `complete-abandon-complete-${new ObjectId().toHexString()}`,
-      ),
-      runAbandon(
-        container,
-        completeAbandonSeed,
-        completeAbandonStarted.id,
-        completeAbandonPatched.workout.version,
-        `complete-abandon-abandon-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(completeAbandonRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    const finalLifecycle = await db
-      .collection('workout_sessions')
-      .findOne({ _id: new ObjectId(completeAbandonStarted.id) });
-    expect(['COMPLETED', 'ABANDONED']).toContain(finalLifecycle?.status);
-    const lifecycleProgress = await db
-      .collection('program_progress')
-      .findOne({ programId: new ObjectId(completeAbandonProgram.program.id) });
-    expect(lifecycleProgress?.completedDayCount).toBe(
-      finalLifecycle?.status === 'COMPLETED' ? 1 : 0,
-    );
-    expect(
-      await db
-        .collection('personal_records')
-        .countDocuments({ relationshipId: completeAbandonSeed.relationshipObjectId }),
-    ).toBe(finalLifecycle?.status === 'COMPLETED' ? 3 : 0);
-
-    const concurrentCompleteSeed = await seedGym(container);
-    const concurrentCompleteProgram = await activeProgram(
-      container,
-      concurrentCompleteSeed,
-      'Concurrent Complete Race',
-    );
-    const concurrentCompleteStarted = (
-      await runStart(
-        container,
-        concurrentCompleteSeed,
-        `concurrent-complete-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const concurrentCompletePatched = await patchFirstSet(
-      container,
-      concurrentCompleteSeed,
-      concurrentCompleteStarted,
-      82,
-      3,
-    );
-    const concurrentCompleteRace = await Promise.allSettled([
-      runComplete(
-        container,
-        concurrentCompleteSeed,
-        concurrentCompleteStarted.id,
-        concurrentCompletePatched.workout.version,
-        `concurrent-complete-a-${new ObjectId().toHexString()}`,
-      ),
-      runComplete(
-        container,
-        concurrentCompleteSeed,
-        concurrentCompleteStarted.id,
-        concurrentCompletePatched.workout.version,
-        `concurrent-complete-b-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(concurrentCompleteRace.filter((result) => result.status === 'fulfilled')).toHaveLength(
-      1,
-    );
-    expect(rejectedCodes(concurrentCompleteRace)).toContain('WORKOUT_ALREADY_COMPLETED');
-    expect(
-      (
+        completeAbandonStarted,
+        75,
+        3,
+      );
+      const completeAbandonRace = await Promise.allSettled([
+        runComplete(
+          container,
+          completeAbandonSeed,
+          completeAbandonStarted.id,
+          completeAbandonPatched.workout.version,
+          `complete-abandon-complete-${new ObjectId().toHexString()}`,
+        ),
+        runAbandon(
+          container,
+          completeAbandonSeed,
+          completeAbandonStarted.id,
+          completeAbandonPatched.workout.version,
+          `complete-abandon-abandon-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(completeAbandonRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const finalLifecycle = await db
+        .collection('workout_sessions')
+        .findOne({ _id: new ObjectId(completeAbandonStarted.id) });
+      expect(['COMPLETED', 'ABANDONED']).toContain(finalLifecycle?.status);
+      const lifecycleProgress = await db
+        .collection('program_progress')
+        .findOne({ programId: new ObjectId(completeAbandonProgram.program.id) });
+      expect(lifecycleProgress?.completedDayCount).toBe(
+        finalLifecycle?.status === 'COMPLETED' ? 1 : 0,
+      );
+      expect(
         await db
-          .collection('program_progress')
-          .findOne({ programId: new ObjectId(concurrentCompleteProgram.program.id) })
-      )?.completedDayCount,
-    ).toBe(1);
-    expect(
-      await db.collection('program_progress_events').countDocuments({
-        workoutSessionId: new ObjectId(concurrentCompleteStarted.id),
-        type: 'COMPLETED',
-      }),
-    ).toBe(1);
+          .collection('personal_records')
+          .countDocuments({ relationshipId: completeAbandonSeed.relationshipObjectId }),
+      ).toBe(finalLifecycle?.status === 'COMPLETED' ? 3 : 0);
 
-    const twoCompleteSeed = await seedGym(container);
-    const twoCompleteProgram = await activeProgram(container, twoCompleteSeed, 'Two Complete Race');
-    const twoCompleteStarted = (
-      await runStart(
+      const concurrentCompleteSeed = await seedGym(container);
+      const concurrentCompleteProgram = await activeProgram(
+        container,
+        concurrentCompleteSeed,
+        'Concurrent Complete Race',
+      );
+      const concurrentCompleteStarted = (
+        await runStart(
+          container,
+          concurrentCompleteSeed,
+          `concurrent-complete-start-${new ObjectId().toHexString()}`,
+        )
+      ).result.body.workout;
+      const concurrentCompletePatched = await patchFirstSet(
+        container,
+        concurrentCompleteSeed,
+        concurrentCompleteStarted,
+        82,
+        3,
+      );
+      const concurrentCompleteRace = await Promise.allSettled([
+        runComplete(
+          container,
+          concurrentCompleteSeed,
+          concurrentCompleteStarted.id,
+          concurrentCompletePatched.workout.version,
+          `concurrent-complete-a-${new ObjectId().toHexString()}`,
+        ),
+        runComplete(
+          container,
+          concurrentCompleteSeed,
+          concurrentCompleteStarted.id,
+          concurrentCompletePatched.workout.version,
+          `concurrent-complete-b-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(concurrentCompleteRace.filter((result) => result.status === 'fulfilled')).toHaveLength(
+        1,
+      );
+      expect(rejectedCodes(concurrentCompleteRace)).toContain('WORKOUT_ALREADY_COMPLETED');
+      expect(
+        (
+          await db
+            .collection('program_progress')
+            .findOne({ programId: new ObjectId(concurrentCompleteProgram.program.id) })
+        )?.completedDayCount,
+      ).toBe(1);
+      expect(
+        await db.collection('program_progress_events').countDocuments({
+          workoutSessionId: new ObjectId(concurrentCompleteStarted.id),
+          type: 'COMPLETED',
+        }),
+      ).toBe(1);
+
+      const twoCompleteSeed = await seedGym(container);
+      const twoCompleteProgram = await activeProgram(
         container,
         twoCompleteSeed,
-        `two-complete-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const twoCompletePatched = await patchFirstSet(
-      container,
-      twoCompleteSeed,
-      twoCompleteStarted,
-      88,
-      2,
-    );
-    const completeKey = `same-complete-${new ObjectId().toHexString()}`;
-    const sameKeyReplay = await runComplete(
-      container,
-      twoCompleteSeed,
-      twoCompleteStarted.id,
-      twoCompletePatched.workout.version,
-      completeKey,
-    );
-    expect(
-      (
-        await runComplete(
+        'Two Complete Race',
+      );
+      const twoCompleteStarted = (
+        await runStart(
           container,
           twoCompleteSeed,
-          twoCompleteStarted.id,
-          twoCompletePatched.workout.version,
-          completeKey,
+          `two-complete-start-${new ObjectId().toHexString()}`,
         )
-      ).result.replayed,
-    ).toBe(true);
-    await expect(
-      runComplete(
+      ).result.body.workout;
+      const twoCompletePatched = await patchFirstSet(
+        container,
+        twoCompleteSeed,
+        twoCompleteStarted,
+        88,
+        2,
+      );
+      const completeKey = `same-complete-${new ObjectId().toHexString()}`;
+      const sameKeyReplay = await runComplete(
         container,
         twoCompleteSeed,
         twoCompleteStarted.id,
         twoCompletePatched.workout.version,
-        `different-complete-${new ObjectId().toHexString()}`,
-      ),
-    ).rejects.toMatchObject({ code: 'WORKOUT_ALREADY_COMPLETED' });
-    expect(sameKeyReplay.result.body.workout.status).toBe('COMPLETED');
-    expect(
-      (
-        await db
-          .collection('program_progress')
-          .findOne({ programId: new ObjectId(twoCompleteProgram.program.id) })
-      )?.completedDayCount,
-    ).toBe(1);
-    expect(
-      await db.collection('program_progress_events').countDocuments({
-        workoutSessionId: new ObjectId(twoCompleteStarted.id),
-        type: 'COMPLETED',
-      }),
-    ).toBe(1);
-    expect(
-      await db.collection('outbox_events').countDocuments({
-        aggregateId: new ObjectId(twoCompleteStarted.id),
-        eventType: 'WorkoutCompleted',
-      }),
-    ).toBe(1);
-
-    const progressSeed = await seedGym(container);
-    const progressProgram = await activeProgram(container, progressSeed, 'Progress Race', [1, 3]);
-    const progress = await container.training.getProgress(
-      progressSeed.traineeCtx,
-      progressSeed.workspaceId,
-      progressSeed.relationshipId,
-      progressProgram.program.id,
-    );
-    const skipDeferRace = await Promise.allSettled([
-      runProgress(
-        container,
-        progressSeed,
-        progressProgram.program.id,
-        progress.progress.version,
-        'SKIPPED',
-        `skip-defer-skip-${new ObjectId().toHexString()}`,
-      ),
-      runProgress(
-        container,
-        progressSeed,
-        progressProgram.program.id,
-        progress.progress.version,
-        'DEFERRED',
-        `skip-defer-defer-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(skipDeferRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(skipDeferRace)).toContain('PROGRAM_PROGRESS_CONFLICT');
-    expect(
-      await db
-        .collection('program_progress_events')
-        .countDocuments({ programId: new ObjectId(progressProgram.program.id) }),
-    ).toBe(2);
-
-    const twoSkipSeed = await seedGym(container);
-    const twoSkipProgram = await activeProgram(container, twoSkipSeed, 'Two Skip Race', [1, 3]);
-    const twoSkipProgress = await container.training.getProgress(
-      twoSkipSeed.traineeCtx,
-      twoSkipSeed.workspaceId,
-      twoSkipSeed.relationshipId,
-      twoSkipProgram.program.id,
-    );
-    const twoSkipRace = await Promise.allSettled([
-      runProgress(
-        container,
-        twoSkipSeed,
-        twoSkipProgram.program.id,
-        twoSkipProgress.progress.version,
-        'SKIPPED',
-        `two-skip-a-${new ObjectId().toHexString()}`,
-      ),
-      runProgress(
-        container,
-        twoSkipSeed,
-        twoSkipProgram.program.id,
-        twoSkipProgress.progress.version,
-        'SKIPPED',
-        `two-skip-b-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(twoSkipRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(
-      (
-        await db
-          .collection('program_progress')
-          .findOne({ programId: new ObjectId(twoSkipProgram.program.id) })
-      )?.skippedDayCount,
-    ).toBe(1);
-
-    const twoDeferSeed = await seedGym(container);
-    const twoDeferProgram = await activeProgram(container, twoDeferSeed, 'Two Defer Race');
-    const twoDeferProgress = await container.training.getProgress(
-      twoDeferSeed.traineeCtx,
-      twoDeferSeed.workspaceId,
-      twoDeferSeed.relationshipId,
-      twoDeferProgram.program.id,
-    );
-    const deferKey = `same-defer-${new ObjectId().toHexString()}`;
-    expect(
-      (
-        await runProgress(
-          container,
-          twoDeferSeed,
-          twoDeferProgram.program.id,
-          twoDeferProgress.progress.version,
-          'DEFERRED',
-          deferKey,
-        )
-      ).result.replayed,
-    ).toBe(false);
-    expect(
-      (
-        await runProgress(
-          container,
-          twoDeferSeed,
-          twoDeferProgram.program.id,
-          twoDeferProgress.progress.version,
-          'DEFERRED',
-          deferKey,
-        )
-      ).result.replayed,
-    ).toBe(true);
-    await expect(
-      runProgress(
-        container,
-        twoDeferSeed,
-        twoDeferProgram.program.id,
-        twoDeferProgress.progress.version,
-        'DEFERRED',
-        `stale-defer-${new ObjectId().toHexString()}`,
-      ),
-    ).rejects.toMatchObject({ code: 'PROGRAM_PROGRESS_CONFLICT' });
-    expect(
-      await db
-        .collection('program_progress_events')
-        .countDocuments({ programId: new ObjectId(twoDeferProgram.program.id), type: 'DEFERRED' }),
-    ).toBe(1);
-
-    const concurrentDeferSeed = await seedGym(container);
-    const concurrentDeferProgram = await activeProgram(
-      container,
-      concurrentDeferSeed,
-      'Concurrent Defer Race',
-    );
-    const concurrentDeferProgress = await container.training.getProgress(
-      concurrentDeferSeed.traineeCtx,
-      concurrentDeferSeed.workspaceId,
-      concurrentDeferSeed.relationshipId,
-      concurrentDeferProgram.program.id,
-    );
-    const concurrentDeferRace = await Promise.allSettled([
-      runProgress(
-        container,
-        concurrentDeferSeed,
-        concurrentDeferProgram.program.id,
-        concurrentDeferProgress.progress.version,
-        'DEFERRED',
-        `concurrent-defer-a-${new ObjectId().toHexString()}`,
-      ),
-      runProgress(
-        container,
-        concurrentDeferSeed,
-        concurrentDeferProgram.program.id,
-        concurrentDeferProgress.progress.version,
-        'DEFERRED',
-        `concurrent-defer-b-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(concurrentDeferRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(concurrentDeferRace)).toContain('PROGRAM_PROGRESS_CONFLICT');
-    expect(
-      await db.collection('program_progress_events').countDocuments({
-        programId: new ObjectId(concurrentDeferProgram.program.id),
-        type: 'DEFERRED',
-      }),
-    ).toBe(1);
-
-    for (const kind of ['SKIPPED', 'DEFERRED'] as const) {
-      const raceSeed = await seedGym(container);
-      const raceProgram = await activeProgram(container, raceSeed, `Start ${kind} Race`, [1, 3]);
-      const raceProgress = await container.training.getProgress(
-        raceSeed.traineeCtx,
-        raceSeed.workspaceId,
-        raceSeed.relationshipId,
-        raceProgram.program.id,
+        completeKey,
       );
-      await Promise.allSettled([
-        runStart(container, raceSeed, `start-${kind}-${new ObjectId().toHexString()}`),
+      expect(
+        (
+          await runComplete(
+            container,
+            twoCompleteSeed,
+            twoCompleteStarted.id,
+            twoCompletePatched.workout.version,
+            completeKey,
+          )
+        ).result.replayed,
+      ).toBe(true);
+      await expect(
+        runComplete(
+          container,
+          twoCompleteSeed,
+          twoCompleteStarted.id,
+          twoCompletePatched.workout.version,
+          `different-complete-${new ObjectId().toHexString()}`,
+        ),
+      ).rejects.toMatchObject({ code: 'WORKOUT_ALREADY_COMPLETED' });
+      expect(sameKeyReplay.result.body.workout.status).toBe('COMPLETED');
+      expect(
+        (
+          await db
+            .collection('program_progress')
+            .findOne({ programId: new ObjectId(twoCompleteProgram.program.id) })
+        )?.completedDayCount,
+      ).toBe(1);
+      expect(
+        await db.collection('program_progress_events').countDocuments({
+          workoutSessionId: new ObjectId(twoCompleteStarted.id),
+          type: 'COMPLETED',
+        }),
+      ).toBe(1);
+      expect(
+        await db.collection('outbox_events').countDocuments({
+          aggregateId: new ObjectId(twoCompleteStarted.id),
+          eventType: 'WorkoutCompleted',
+        }),
+      ).toBe(1);
+
+      const progressSeed = await seedGym(container);
+      const progressProgram = await activeProgram(container, progressSeed, 'Progress Race', [1, 3]);
+      const progress = await container.training.getProgress(
+        progressSeed.traineeCtx,
+        progressSeed.workspaceId,
+        progressSeed.relationshipId,
+        progressProgram.program.id,
+      );
+      const skipDeferRace = await Promise.allSettled([
         runProgress(
           container,
-          raceSeed,
-          raceProgram.program.id,
-          raceProgress.progress.version,
-          kind,
-          `${kind}-start-${new ObjectId().toHexString()}`,
+          progressSeed,
+          progressProgram.program.id,
+          progress.progress.version,
+          'SKIPPED',
+          `skip-defer-skip-${new ObjectId().toHexString()}`,
+        ),
+        runProgress(
+          container,
+          progressSeed,
+          progressProgram.program.id,
+          progress.progress.version,
+          'DEFERRED',
+          `skip-defer-defer-${new ObjectId().toHexString()}`,
         ),
       ]);
-      const finalProgress = await db
-        .collection('program_progress')
-        .findOne({ programId: new ObjectId(raceProgram.program.id) });
-      const liveCount = await db.collection('workout_sessions').countDocuments({
-        relationshipId: raceSeed.relationshipObjectId,
-        status: 'IN_PROGRESS',
-      });
-      if (liveCount === 1) {
-        const liveWorkout = await db.collection('workout_sessions').findOne({
+      expect(skipDeferRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(skipDeferRace)).toContain('PROGRAM_PROGRESS_CONFLICT');
+      expect(
+        await db
+          .collection('program_progress_events')
+          .countDocuments({ programId: new ObjectId(progressProgram.program.id) }),
+      ).toBe(2);
+
+      const twoSkipSeed = await seedGym(container);
+      const twoSkipProgram = await activeProgram(container, twoSkipSeed, 'Two Skip Race', [1, 3]);
+      const twoSkipProgress = await container.training.getProgress(
+        twoSkipSeed.traineeCtx,
+        twoSkipSeed.workspaceId,
+        twoSkipSeed.relationshipId,
+        twoSkipProgram.program.id,
+      );
+      const twoSkipRace = await Promise.allSettled([
+        runProgress(
+          container,
+          twoSkipSeed,
+          twoSkipProgram.program.id,
+          twoSkipProgress.progress.version,
+          'SKIPPED',
+          `two-skip-a-${new ObjectId().toHexString()}`,
+        ),
+        runProgress(
+          container,
+          twoSkipSeed,
+          twoSkipProgram.program.id,
+          twoSkipProgress.progress.version,
+          'SKIPPED',
+          `two-skip-b-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(twoSkipRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(
+        (
+          await db
+            .collection('program_progress')
+            .findOne({ programId: new ObjectId(twoSkipProgram.program.id) })
+        )?.skippedDayCount,
+      ).toBe(1);
+
+      const twoDeferSeed = await seedGym(container);
+      const twoDeferProgram = await activeProgram(container, twoDeferSeed, 'Two Defer Race');
+      const twoDeferProgress = await container.training.getProgress(
+        twoDeferSeed.traineeCtx,
+        twoDeferSeed.workspaceId,
+        twoDeferSeed.relationshipId,
+        twoDeferProgram.program.id,
+      );
+      const deferKey = `same-defer-${new ObjectId().toHexString()}`;
+      expect(
+        (
+          await runProgress(
+            container,
+            twoDeferSeed,
+            twoDeferProgram.program.id,
+            twoDeferProgress.progress.version,
+            'DEFERRED',
+            deferKey,
+          )
+        ).result.replayed,
+      ).toBe(false);
+      expect(
+        (
+          await runProgress(
+            container,
+            twoDeferSeed,
+            twoDeferProgram.program.id,
+            twoDeferProgress.progress.version,
+            'DEFERRED',
+            deferKey,
+          )
+        ).result.replayed,
+      ).toBe(true);
+      await expect(
+        runProgress(
+          container,
+          twoDeferSeed,
+          twoDeferProgram.program.id,
+          twoDeferProgress.progress.version,
+          'DEFERRED',
+          `stale-defer-${new ObjectId().toHexString()}`,
+        ),
+      ).rejects.toMatchObject({ code: 'PROGRAM_PROGRESS_CONFLICT' });
+      expect(
+        await db.collection('program_progress_events').countDocuments({
+          programId: new ObjectId(twoDeferProgram.program.id),
+          type: 'DEFERRED',
+        }),
+      ).toBe(1);
+
+      const concurrentDeferSeed = await seedGym(container);
+      const concurrentDeferProgram = await activeProgram(
+        container,
+        concurrentDeferSeed,
+        'Concurrent Defer Race',
+      );
+      const concurrentDeferProgress = await container.training.getProgress(
+        concurrentDeferSeed.traineeCtx,
+        concurrentDeferSeed.workspaceId,
+        concurrentDeferSeed.relationshipId,
+        concurrentDeferProgram.program.id,
+      );
+      const concurrentDeferRace = await Promise.allSettled([
+        runProgress(
+          container,
+          concurrentDeferSeed,
+          concurrentDeferProgram.program.id,
+          concurrentDeferProgress.progress.version,
+          'DEFERRED',
+          `concurrent-defer-a-${new ObjectId().toHexString()}`,
+        ),
+        runProgress(
+          container,
+          concurrentDeferSeed,
+          concurrentDeferProgram.program.id,
+          concurrentDeferProgress.progress.version,
+          'DEFERRED',
+          `concurrent-defer-b-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(concurrentDeferRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(concurrentDeferRace)).toContain('PROGRAM_PROGRESS_CONFLICT');
+      expect(
+        await db.collection('program_progress_events').countDocuments({
+          programId: new ObjectId(concurrentDeferProgram.program.id),
+          type: 'DEFERRED',
+        }),
+      ).toBe(1);
+
+      for (const kind of ['SKIPPED', 'DEFERRED'] as const) {
+        const raceSeed = await seedGym(container);
+        const raceProgram = await activeProgram(container, raceSeed, `Start ${kind} Race`, [1, 3]);
+        const raceProgress = await container.training.getProgress(
+          raceSeed.traineeCtx,
+          raceSeed.workspaceId,
+          raceSeed.relationshipId,
+          raceProgram.program.id,
+        );
+        await Promise.allSettled([
+          runStart(container, raceSeed, `start-${kind}-${new ObjectId().toHexString()}`),
+          runProgress(
+            container,
+            raceSeed,
+            raceProgram.program.id,
+            raceProgress.progress.version,
+            kind,
+            `${kind}-start-${new ObjectId().toHexString()}`,
+          ),
+        ]);
+        const finalProgress = await db
+          .collection('program_progress')
+          .findOne({ programId: new ObjectId(raceProgram.program.id) });
+        const liveCount = await db.collection('workout_sessions').countDocuments({
           relationshipId: raceSeed.relationshipObjectId,
           status: 'IN_PROGRESS',
         });
-        expect(liveWorkout?.daySequence).toBe(finalProgress?.currentDaySequence);
-      } else if (kind === 'SKIPPED') {
-        expect(finalProgress?.skippedDayCount).toBe(1);
-        expect(finalProgress?.currentDaySequence).toBe(3);
-      } else {
-        expect(finalProgress?.skippedDayCount).toBe(0);
-        expect(finalProgress?.currentDaySequence).toBe(1);
-        expect(finalProgress?.version).toBe(1);
+        if (liveCount === 1) {
+          const liveWorkout = await db.collection('workout_sessions').findOne({
+            relationshipId: raceSeed.relationshipObjectId,
+            status: 'IN_PROGRESS',
+          });
+          expect(liveWorkout?.daySequence).toBe(finalProgress?.currentDaySequence);
+        } else if (kind === 'SKIPPED') {
+          expect(finalProgress?.skippedDayCount).toBe(1);
+          expect(finalProgress?.currentDaySequence).toBe(3);
+        } else {
+          expect(finalProgress?.skippedDayCount).toBe(0);
+          expect(finalProgress?.currentDaySequence).toBe(1);
+          expect(finalProgress?.version).toBe(1);
+        }
       }
-    }
 
-    const completeSkipSeed = await seedGym(container);
-    const completeSkipProgram = await activeProgram(
-      container,
-      completeSkipSeed,
-      'Complete Skip Race',
-      [1, 3],
-    );
-    const completeSkipStarted = (
-      await runStart(
+      const completeSkipSeed = await seedGym(container);
+      const completeSkipProgram = await activeProgram(
         container,
         completeSkipSeed,
-        `complete-skip-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const completeSkipPatched = await patchFirstSet(
-      container,
-      completeSkipSeed,
-      completeSkipStarted,
-      91,
-      4,
-    );
-    const completeSkipRace = await Promise.allSettled([
-      runComplete(
+        'Complete Skip Race',
+        [1, 3],
+      );
+      const completeSkipStarted = (
+        await runStart(
+          container,
+          completeSkipSeed,
+          `complete-skip-start-${new ObjectId().toHexString()}`,
+        )
+      ).result.body.workout;
+      const completeSkipPatched = await patchFirstSet(
         container,
         completeSkipSeed,
-        completeSkipStarted.id,
-        completeSkipPatched.workout.version,
-        `complete-skip-complete-${new ObjectId().toHexString()}`,
-      ),
-      runProgress(
-        container,
-        completeSkipSeed,
-        completeSkipProgram.program.id,
-        0,
-        'SKIPPED',
-        `complete-skip-skip-${new ObjectId().toHexString()}`,
-      ),
-    ]);
-    expect(completeSkipRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    const completeSkipProgress = await db
-      .collection('program_progress')
-      .findOne({ programId: new ObjectId(completeSkipProgram.program.id) });
-    expect(completeSkipProgress?.completedDayCount + completeSkipProgress?.skippedDayCount).toBe(1);
-    expect(
-      await db.collection('program_progress_events').countDocuments({
-        programId: new ObjectId(completeSkipProgram.program.id),
-        type: { $in: ['COMPLETED', 'SKIPPED'] },
-      }),
-    ).toBe(1);
+        completeSkipStarted,
+        91,
+        4,
+      );
+      const completeSkipRace = await Promise.allSettled([
+        runComplete(
+          container,
+          completeSkipSeed,
+          completeSkipStarted.id,
+          completeSkipPatched.workout.version,
+          `complete-skip-complete-${new ObjectId().toHexString()}`,
+        ),
+        runProgress(
+          container,
+          completeSkipSeed,
+          completeSkipProgram.program.id,
+          0,
+          'SKIPPED',
+          `complete-skip-skip-${new ObjectId().toHexString()}`,
+        ),
+      ]);
+      expect(completeSkipRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const completeSkipProgress = await db
+        .collection('program_progress')
+        .findOne({ programId: new ObjectId(completeSkipProgram.program.id) });
+      expect(completeSkipProgress?.completedDayCount + completeSkipProgress?.skippedDayCount).toBe(
+        1,
+      );
+      expect(
+        await db.collection('program_progress_events').countDocuments({
+          programId: new ObjectId(completeSkipProgram.program.id),
+          type: { $in: ['COMPLETED', 'SKIPPED'] },
+        }),
+      ).toBe(1);
 
-    const abandonReplaySeed = await seedGym(container);
-    await activeProgram(container, abandonReplaySeed, 'Abandon Replay');
-    const abandonStarted = (
-      await runStart(
-        container,
-        abandonReplaySeed,
-        `abandon-replay-start-${new ObjectId().toHexString()}`,
-      )
-    ).result.body.workout;
-    const abandonKey = `abandon-replay-${new ObjectId().toHexString()}`;
-    const abandoned = await runAbandon(
-      container,
-      abandonReplaySeed,
-      abandonStarted.id,
-      abandonStarted.version,
-      abandonKey,
-    );
-    expect(abandoned.result.body.workout.status).toBe('ABANDONED');
-    expect(
-      (
-        await runAbandon(
+      const abandonReplaySeed = await seedGym(container);
+      await activeProgram(container, abandonReplaySeed, 'Abandon Replay');
+      const abandonStarted = (
+        await runStart(
           container,
           abandonReplaySeed,
-          abandonStarted.id,
-          abandonStarted.version,
-          abandonKey,
+          `abandon-replay-start-${new ObjectId().toHexString()}`,
         )
-      ).result.replayed,
-    ).toBe(true);
-    await expect(
-      container.idempotency.runInTransaction(abandonReplaySeed.traineeCtx, {
-        routeKey:
-          'POST /workspaces/:workspaceId/relationships/:relationshipId/workouts/:workoutId/abandon',
-        key: abandonKey,
-        fingerprint: {
-          workspaceId: abandonReplaySeed.workspaceId,
-          relationshipId: abandonReplaySeed.relationshipId,
-          workoutId: abandonStarted.id,
-          expectedVersion: abandonStarted.version + 1,
-        },
-        unitOfWork: container.unitOfWork,
-        operation: async (tx) => ({
-          body: await container.workouts.abandon(
-            abandonReplaySeed.traineeCtx,
-            abandonReplaySeed.workspaceId,
-            abandonReplaySeed.relationshipId,
+      ).result.body.workout;
+      const abandonKey = `abandon-replay-${new ObjectId().toHexString()}`;
+      const abandoned = await runAbandon(
+        container,
+        abandonReplaySeed,
+        abandonStarted.id,
+        abandonStarted.version,
+        abandonKey,
+      );
+      expect(abandoned.result.body.workout.status).toBe('ABANDONED');
+      expect(
+        (
+          await runAbandon(
+            container,
+            abandonReplaySeed,
             abandonStarted.id,
-            { expectedVersion: abandonStarted.version + 1 },
-            tx,
-          ),
+            abandonStarted.version,
+            abandonKey,
+          )
+        ).result.replayed,
+      ).toBe(true);
+      await expect(
+        container.idempotency.runInTransaction(abandonReplaySeed.traineeCtx, {
+          routeKey:
+            'POST /workspaces/:workspaceId/relationships/:relationshipId/workouts/:workoutId/abandon',
+          key: abandonKey,
+          fingerprint: {
+            workspaceId: abandonReplaySeed.workspaceId,
+            relationshipId: abandonReplaySeed.relationshipId,
+            workoutId: abandonStarted.id,
+            expectedVersion: abandonStarted.version + 1,
+          },
+          unitOfWork: container.unitOfWork,
+          operation: async (tx) => ({
+            body: await container.workouts.abandon(
+              abandonReplaySeed.traineeCtx,
+              abandonReplaySeed.workspaceId,
+              abandonReplaySeed.relationshipId,
+              abandonStarted.id,
+              { expectedVersion: abandonStarted.version + 1 },
+              tx,
+            ),
+          }),
         }),
-      }),
-    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
-  }, 60_000);
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
   test('active program revision while workout is running leaves session on original revision and future start uses new revision', async () => {
     const seed = await seedGym(container);

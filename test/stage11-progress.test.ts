@@ -11,6 +11,7 @@ import {
   Permissions,
   systemPermissionProfiles,
 } from '../src/modules/permissions/permission.registry';
+import { INTEGRATION_TEST_TIMEOUT_MS, MIGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 11 migration 016', () => {
   test('creates exact progress collections, indexes, BODY_WEIGHT KG metric, and permission seeds', async () => {
@@ -70,36 +71,40 @@ describe('Stage 11 migration 016', () => {
     expect(JSON.stringify(updates)).toContain('adherence.correct');
   });
 
-  test('runs clean 001-016, upgrade 001-015 to 016, and reruns idempotently', async () => {
-    const clean = await createAppContainer(
-      integrationConfig(`stage11_clean_${new ObjectId().toHexString()}`),
-    );
-    const upgrade = await createAppContainer(
-      integrationConfig(`stage11_upgrade_${new ObjectId().toHexString()}`),
-    );
-    try {
-      const through16 = migrations.slice(
-        0,
-        migrations.findIndex((migration) => migration.id === '016-stage11-progress') + 1,
+  test(
+    'runs clean 001-016, upgrade 001-015 to 016, and reruns idempotently',
+    async () => {
+      const clean = await createAppContainer(
+        integrationConfig(`stage11_clean_${new ObjectId().toHexString()}`),
       );
-      await new MigrationRunner(clean.database.db, through16).migrate();
-      await assertStage11DbShape(clean.database.db);
+      const upgrade = await createAppContainer(
+        integrationConfig(`stage11_upgrade_${new ObjectId().toHexString()}`),
+      );
+      try {
+        const through16 = migrations.slice(
+          0,
+          migrations.findIndex((migration) => migration.id === '016-stage11-progress') + 1,
+        );
+        await new MigrationRunner(clean.database.db, through16).migrate();
+        await assertStage11DbShape(clean.database.db);
 
-      const through15 = through16.filter((migration) => migration.id !== '016-stage11-progress');
-      await new MigrationRunner(upgrade.database.db, through15).migrate();
-      expect(
-        await upgrade.database.db.listCollections({ name: 'metric_definitions' }).hasNext(),
-      ).toBe(false);
-      await new MigrationRunner(upgrade.database.db, through16).migrate();
-      await new MigrationRunner(upgrade.database.db, through16).migrate();
-      await assertStage11DbShape(upgrade.database.db);
-    } finally {
-      await clean.database.db.dropDatabase();
-      await clean.database.close();
-      await upgrade.database.db.dropDatabase();
-      await upgrade.database.close();
-    }
-  }, 30_000);
+        const through15 = through16.filter((migration) => migration.id !== '016-stage11-progress');
+        await new MigrationRunner(upgrade.database.db, through15).migrate();
+        expect(
+          await upgrade.database.db.listCollections({ name: 'metric_definitions' }).hasNext(),
+        ).toBe(false);
+        await new MigrationRunner(upgrade.database.db, through16).migrate();
+        await new MigrationRunner(upgrade.database.db, through16).migrate();
+        await assertStage11DbShape(upgrade.database.db);
+      } finally {
+        await clean.database.db.dropDatabase();
+        await clean.database.close();
+        await upgrade.database.db.dropDatabase();
+        await upgrade.database.close();
+      }
+    },
+    MIGRATION_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('Stage 11 progress integration', () => {
@@ -112,12 +117,12 @@ describe('Stage 11 progress integration', () => {
     );
     db = container.database.db;
     await new MigrationRunner(db, migrations).migrate();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (container) await container.database.close();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   test('MetricDefinitions enforce scope uniqueness, immutable unit/valueType, archive, and no Stage 12 routes', async () => {
     const seed = await seedGym(container);
@@ -1031,345 +1036,367 @@ describe('Stage 11 progress integration', () => {
     });
   });
 
-  test('Concurrency matrix and failure injection preserve Stage 11 invariants transactionally', async () => {
-    const seed = await seedGym(container);
-    const duplicateCreates = await Promise.allSettled([
-      createMetric(container, seed, 'Concurrent Metric'),
-      createMetric(container, seed, 'concurrent metric'),
-    ]);
-    expect(duplicateCreates.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(duplicateCreates)).toContain('METRIC_DEFINITION_CONFLICT');
+  test(
+    'Concurrency matrix and failure injection preserve Stage 11 invariants transactionally',
+    async () => {
+      const seed = await seedGym(container);
+      const duplicateCreates = await Promise.allSettled([
+        createMetric(container, seed, 'Concurrent Metric'),
+        createMetric(container, seed, 'concurrent metric'),
+      ]);
+      expect(duplicateCreates.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(duplicateCreates)).toContain('METRIC_DEFINITION_CONFLICT');
 
-    const metric = (
-      duplicateCreates.find((result) => result.status === 'fulfilled') as PromiseFulfilledResult<
-        Awaited<ReturnType<typeof createMetric>>
-      >
-    ).value;
-    const idempotentCreates = await Promise.allSettled([
-      createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 10, 'same-key'),
-      createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 10, 'same-key'),
-    ]);
-    expect(idempotentCreates.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(idempotentCreates)).toContain('IDEMPOTENCY_REQUEST_IN_PROGRESS');
+      const metric = (
+        duplicateCreates.find((result) => result.status === 'fulfilled') as PromiseFulfilledResult<
+          Awaited<ReturnType<typeof createMetric>>
+        >
+      ).value;
+      const idempotentCreates = await Promise.allSettled([
+        createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 10, 'same-key'),
+        createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 10, 'same-key'),
+      ]);
+      expect(idempotentCreates.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(idempotentCreates)).toContain('IDEMPOTENCY_REQUEST_IN_PROGRESS');
 
-    const measurement = await createMeasurementIdempotently(
-      container,
-      seed,
-      metric.metricDefinition.id,
-      11,
-      'race-measurement',
-    );
-    const correctionRace = await Promise.allSettled([
-      container.progress.updateMeasurement(
-        seed.traineeCtx,
-        seed.workspaceId,
-        seed.relationshipId,
-        measurement.body.measurement.id,
-        { expectedVersion: 0, value: 12 },
-      ),
-      container.progress.updateMeasurement(
-        seed.traineeCtx,
-        seed.workspaceId,
-        seed.relationshipId,
-        measurement.body.measurement.id,
-        { expectedVersion: 0, value: 13 },
-      ),
-    ]);
-    expect(correctionRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(rejectedCodes(correctionRace)).toContain('MEASUREMENT_VERSION_CONFLICT');
-
-    const archiveRaceMetric = await createMetric(container, seed, 'Archive Race Metric');
-    const archiveRace = await Promise.allSettled([
-      createMeasurementIdempotently(
+      const measurement = await createMeasurementIdempotently(
         container,
         seed,
-        archiveRaceMetric.metricDefinition.id,
-        14.5,
-        'archive-race',
-      ),
-      container.progress.archiveMetricDefinition(
-        seed.ownerCtx,
-        seed.workspaceId,
-        archiveRaceMetric.metricDefinition.id,
-        { expectedVersion: 0 },
-      ),
-    ]);
-    expect(archiveRace.filter((result) => result.status === 'fulfilled').length).toBeGreaterThan(0);
-    expect(
-      await db.collection('measurement_entries').countDocuments({
-        relationshipId: seed.relationshipObjectId,
-        metricDefinitionId: new ObjectId(archiveRaceMetric.metricDefinition.id),
-      }),
-    ).toBeLessThanOrEqual(1);
+        metric.metricDefinition.id,
+        11,
+        'race-measurement',
+      );
+      const correctionRace = await Promise.allSettled([
+        container.progress.updateMeasurement(
+          seed.traineeCtx,
+          seed.workspaceId,
+          seed.relationshipId,
+          measurement.body.measurement.id,
+          { expectedVersion: 0, value: 12 },
+        ),
+        container.progress.updateMeasurement(
+          seed.traineeCtx,
+          seed.workspaceId,
+          seed.relationshipId,
+          measurement.body.measurement.id,
+          { expectedVersion: 0, value: 13 },
+        ),
+      ]);
+      expect(correctionRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(rejectedCodes(correctionRace)).toContain('MEASUREMENT_VERSION_CONFLICT');
 
-    const healthRace = await Promise.allSettled([
-      container.progress.putHealthProfile(seed.traineeCtx, seed.workspaceId, seed.relationshipId, {
-        foodAllergies: ['a'],
-      }),
-      container.progress.putHealthProfile(seed.traineeCtx, seed.workspaceId, seed.relationshipId, {
-        foodAllergies: ['b'],
-      }),
-    ]);
-    expect(
-      await db.collection('trainee_health_profiles').countDocuments({
-        workspaceId: seed.workspaceObjectId,
-        relationshipId: seed.relationshipObjectId,
-      }),
-    ).toBe(1);
-    expect(healthRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const archiveRaceMetric = await createMetric(container, seed, 'Archive Race Metric');
+      const archiveRace = await Promise.allSettled([
+        createMeasurementIdempotently(
+          container,
+          seed,
+          archiveRaceMetric.metricDefinition.id,
+          14.5,
+          'archive-race',
+        ),
+        container.progress.archiveMetricDefinition(
+          seed.ownerCtx,
+          seed.workspaceId,
+          archiveRaceMetric.metricDefinition.id,
+          { expectedVersion: 0 },
+        ),
+      ]);
+      expect(archiveRace.filter((result) => result.status === 'fulfilled').length).toBeGreaterThan(
+        0,
+      );
+      expect(
+        await db.collection('measurement_entries').countDocuments({
+          relationshipId: seed.relationshipObjectId,
+          metricDefinitionId: new ObjectId(archiveRaceMetric.metricDefinition.id),
+        }),
+      ).toBeLessThanOrEqual(1);
 
-    await container.progress.putAdherenceConfig(
-      seed.trainerCtx,
-      seed.workspaceId,
-      seed.relationshipId,
-      {
-        enabledMetrics: ['WATER', 'STEPS'],
-      },
-    );
-    const today = localDateInTimezone(new Date(), 'Africa/Cairo');
-    const dailyRace = await Promise.allSettled([
-      container.progress.putDailyTracking(
-        seed.traineeCtx,
-        seed.workspaceId,
-        seed.relationshipId,
-        today,
-        {
-          values: { WATER: { ml: 200 } },
-        },
-      ),
-      container.progress.putDailyTracking(
-        seed.traineeCtx,
-        seed.workspaceId,
-        seed.relationshipId,
-        today,
-        {
-          values: { STEPS: { count: 300 } },
-        },
-      ),
-    ]);
-    expect(
-      await db.collection('daily_tracking_entries').countDocuments({
-        workspaceId: seed.workspaceObjectId,
-        relationshipId: seed.relationshipObjectId,
-        localDate: today,
-      }),
-    ).toBe(1);
-    expect(dailyRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-
-    const current = await db.collection('coaching_relationships').findOne({
-      _id: seed.relationshipObjectId,
-    });
-    const endRace = await Promise.allSettled([
-      createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 14, 'end-race'),
-      container.coachingRelationships.transition(
-        seed.relationshipObjectId,
-        seed.workspaceObjectId,
-        current?.version ?? 0,
-        ['ACTIVE'],
-        'ENDED',
-        { endedBy: new ObjectId(seed.ownerCtx.userId), endedAt: new Date(), endReason: 'race' },
-        { closeEngagement: true },
-      ),
-    ]);
-    expect(endRace.filter((result) => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(
-      1,
-    );
-    const ended = await db.collection('coaching_relationships').findOne({
-      _id: seed.relationshipObjectId,
-    });
-    if (ended?.status === 'ENDED') {
-      await expect(
-        createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 15, 'post-end'),
-      ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-      await expect(
+      const healthRace = await Promise.allSettled([
         container.progress.putHealthProfile(
           seed.traineeCtx,
           seed.workspaceId,
           seed.relationshipId,
           {
-            foodAllergies: ['ended'],
+            foodAllergies: ['a'],
           },
         ),
-      ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-      await expect(
-        container.progress.createNote(seed.trainerCtx, seed.workspaceId, seed.relationshipId, {
-          category: 'ended',
-          content: 'ended',
+        container.progress.putHealthProfile(
+          seed.traineeCtx,
+          seed.workspaceId,
+          seed.relationshipId,
+          {
+            foodAllergies: ['b'],
+          },
+        ),
+      ]);
+      expect(
+        await db.collection('trainee_health_profiles').countDocuments({
+          workspaceId: seed.workspaceObjectId,
+          relationshipId: seed.relationshipObjectId,
         }),
-      ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-      await expect(
+      ).toBe(1);
+      expect(healthRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+
+      await container.progress.putAdherenceConfig(
+        seed.trainerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        {
+          enabledMetrics: ['WATER', 'STEPS'],
+        },
+      );
+      const today = localDateInTimezone(new Date(), 'Africa/Cairo');
+      const dailyRace = await Promise.allSettled([
         container.progress.putDailyTracking(
           seed.traineeCtx,
           seed.workspaceId,
           seed.relationshipId,
           today,
           {
-            expectedVersion: 0,
-            values: { WATER: { ml: 100 } },
+            values: { WATER: { ml: 200 } },
           },
+        ),
+        container.progress.putDailyTracking(
+          seed.traineeCtx,
+          seed.workspaceId,
+          seed.relationshipId,
+          today,
+          {
+            values: { STEPS: { count: 300 } },
+          },
+        ),
+      ]);
+      expect(
+        await db.collection('daily_tracking_entries').countDocuments({
+          workspaceId: seed.workspaceObjectId,
+          relationshipId: seed.relationshipObjectId,
+          localDate: today,
+        }),
+      ).toBe(1);
+      expect(dailyRace.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+
+      const current = await db.collection('coaching_relationships').findOne({
+        _id: seed.relationshipObjectId,
+      });
+      const endRace = await Promise.allSettled([
+        createMeasurementIdempotently(container, seed, metric.metricDefinition.id, 14, 'end-race'),
+        container.coachingRelationships.transition(
+          seed.relationshipObjectId,
+          seed.workspaceObjectId,
+          current?.version ?? 0,
+          ['ACTIVE'],
+          'ENDED',
+          { endedBy: new ObjectId(seed.ownerCtx.userId), endedAt: new Date(), endReason: 'race' },
+          { closeEngagement: true },
+        ),
+      ]);
+      expect(
+        endRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeGreaterThanOrEqual(1);
+      const ended = await db.collection('coaching_relationships').findOne({
+        _id: seed.relationshipObjectId,
+      });
+      if (ended?.status === 'ENDED') {
+        await expect(
+          createMeasurementIdempotently(
+            container,
+            seed,
+            metric.metricDefinition.id,
+            15,
+            'post-end',
+          ),
+        ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+        await expect(
+          container.progress.putHealthProfile(
+            seed.traineeCtx,
+            seed.workspaceId,
+            seed.relationshipId,
+            {
+              foodAllergies: ['ended'],
+            },
+          ),
+        ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+        await expect(
+          container.progress.createNote(seed.trainerCtx, seed.workspaceId, seed.relationshipId, {
+            category: 'ended',
+            content: 'ended',
+          }),
+        ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+        await expect(
+          container.progress.putDailyTracking(
+            seed.traineeCtx,
+            seed.workspaceId,
+            seed.relationshipId,
+            today,
+            {
+              expectedVersion: 0,
+              values: { WATER: { ml: 100 } },
+            },
+          ),
+        ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+      }
+
+      const healthEndSeed = await seedGym(container);
+      const healthCurrent = await db.collection('coaching_relationships').findOne({
+        _id: healthEndSeed.relationshipObjectId,
+      });
+      const healthEndRace = await Promise.allSettled([
+        container.progress.putHealthProfile(
+          healthEndSeed.traineeCtx,
+          healthEndSeed.workspaceId,
+          healthEndSeed.relationshipId,
+          { foodAllergies: ['race'] },
+        ),
+        container.coachingRelationships.transition(
+          healthEndSeed.relationshipObjectId,
+          healthEndSeed.workspaceObjectId,
+          healthCurrent?.version ?? 0,
+          ['ACTIVE'],
+          'ENDED',
+          { endedBy: new ObjectId(healthEndSeed.ownerCtx.userId), endedAt: new Date() },
+          { closeEngagement: true },
+        ),
+      ]);
+      expect(
+        healthEndRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeGreaterThanOrEqual(1);
+      await expect(
+        container.progress.putHealthProfile(
+          healthEndSeed.traineeCtx,
+          healthEndSeed.workspaceId,
+          healthEndSeed.relationshipId,
+          { foodAllergies: ['post-end'] },
         ),
       ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-    }
 
-    const healthEndSeed = await seedGym(container);
-    const healthCurrent = await db.collection('coaching_relationships').findOne({
-      _id: healthEndSeed.relationshipObjectId,
-    });
-    const healthEndRace = await Promise.allSettled([
-      container.progress.putHealthProfile(
-        healthEndSeed.traineeCtx,
-        healthEndSeed.workspaceId,
-        healthEndSeed.relationshipId,
-        { foodAllergies: ['race'] },
-      ),
-      container.coachingRelationships.transition(
-        healthEndSeed.relationshipObjectId,
-        healthEndSeed.workspaceObjectId,
-        healthCurrent?.version ?? 0,
-        ['ACTIVE'],
-        'ENDED',
-        { endedBy: new ObjectId(healthEndSeed.ownerCtx.userId), endedAt: new Date() },
-        { closeEngagement: true },
-      ),
-    ]);
-    expect(
-      healthEndRace.filter((result) => result.status === 'fulfilled').length,
-    ).toBeGreaterThanOrEqual(1);
-    await expect(
-      container.progress.putHealthProfile(
-        healthEndSeed.traineeCtx,
-        healthEndSeed.workspaceId,
-        healthEndSeed.relationshipId,
-        { foodAllergies: ['post-end'] },
-      ),
-    ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+      const noteEndSeed = await seedGym(container);
+      const noteCurrent = await db.collection('coaching_relationships').findOne({
+        _id: noteEndSeed.relationshipObjectId,
+      });
+      const noteEndRace = await Promise.allSettled([
+        container.progress.createNote(
+          noteEndSeed.trainerCtx,
+          noteEndSeed.workspaceId,
+          noteEndSeed.relationshipId,
+          { category: 'race', content: 'race' },
+        ),
+        container.coachingRelationships.transition(
+          noteEndSeed.relationshipObjectId,
+          noteEndSeed.workspaceObjectId,
+          noteCurrent?.version ?? 0,
+          ['ACTIVE'],
+          'ENDED',
+          { endedBy: new ObjectId(noteEndSeed.ownerCtx.userId), endedAt: new Date() },
+          { closeEngagement: true },
+        ),
+      ]);
+      expect(
+        noteEndRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeGreaterThanOrEqual(1);
+      await expect(
+        container.progress.createNote(
+          noteEndSeed.trainerCtx,
+          noteEndSeed.workspaceId,
+          noteEndSeed.relationshipId,
+          { category: 'post-end', content: 'post-end' },
+        ),
+      ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
 
-    const noteEndSeed = await seedGym(container);
-    const noteCurrent = await db.collection('coaching_relationships').findOne({
-      _id: noteEndSeed.relationshipObjectId,
-    });
-    const noteEndRace = await Promise.allSettled([
-      container.progress.createNote(
-        noteEndSeed.trainerCtx,
-        noteEndSeed.workspaceId,
-        noteEndSeed.relationshipId,
-        { category: 'race', content: 'race' },
-      ),
-      container.coachingRelationships.transition(
-        noteEndSeed.relationshipObjectId,
-        noteEndSeed.workspaceObjectId,
-        noteCurrent?.version ?? 0,
-        ['ACTIVE'],
-        'ENDED',
-        { endedBy: new ObjectId(noteEndSeed.ownerCtx.userId), endedAt: new Date() },
-        { closeEngagement: true },
-      ),
-    ]);
-    expect(
-      noteEndRace.filter((result) => result.status === 'fulfilled').length,
-    ).toBeGreaterThanOrEqual(1);
-    await expect(
-      container.progress.createNote(
-        noteEndSeed.trainerCtx,
-        noteEndSeed.workspaceId,
-        noteEndSeed.relationshipId,
-        { category: 'post-end', content: 'post-end' },
-      ),
-    ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-
-    const dailyEndSeed = await seedGym(container);
-    await container.progress.putAdherenceConfig(
-      dailyEndSeed.trainerCtx,
-      dailyEndSeed.workspaceId,
-      dailyEndSeed.relationshipId,
-      { enabledMetrics: ['WATER'] },
-    );
-    const dailyEndDate = localDateInTimezone(new Date(), 'Africa/Cairo');
-    const dailyCurrent = await db.collection('coaching_relationships').findOne({
-      _id: dailyEndSeed.relationshipObjectId,
-    });
-    const dailyEndRace = await Promise.allSettled([
-      container.progress.putDailyTracking(
-        dailyEndSeed.traineeCtx,
+      const dailyEndSeed = await seedGym(container);
+      await container.progress.putAdherenceConfig(
+        dailyEndSeed.trainerCtx,
         dailyEndSeed.workspaceId,
         dailyEndSeed.relationshipId,
-        dailyEndDate,
-        { values: { WATER: { ml: 100 } } },
-      ),
-      container.coachingRelationships.transition(
-        dailyEndSeed.relationshipObjectId,
-        dailyEndSeed.workspaceObjectId,
-        dailyCurrent?.version ?? 0,
-        ['ACTIVE'],
-        'ENDED',
-        { endedBy: new ObjectId(dailyEndSeed.ownerCtx.userId), endedAt: new Date() },
-        { closeEngagement: true },
-      ),
-    ]);
-    expect(
-      dailyEndRace.filter((result) => result.status === 'fulfilled').length,
-    ).toBeGreaterThanOrEqual(1);
-    await expect(
-      container.progress.putDailyTracking(
-        dailyEndSeed.traineeCtx,
-        dailyEndSeed.workspaceId,
-        dailyEndSeed.relationshipId,
-        dailyEndDate,
-        { expectedVersion: 0, values: { WATER: { ml: 200 } } },
-      ),
-    ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
-
-    const outboxMetricSeed = await seedGym(container);
-    const outboxMetric = await createMetric(container, outboxMetricSeed, 'Outbox Rollback');
-    const originalOutbox = container.outbox.write.bind(container.outbox);
-    container.outbox.write = (async () => {
-      throw new Error('outbox failed');
-    }) as typeof container.outbox.write;
-    try {
-      await expect(
-        createMeasurementIdempotently(
-          container,
-          outboxMetricSeed,
-          outboxMetric.metricDefinition.id,
-          20,
-          'outbox-rollback',
+        { enabledMetrics: ['WATER'] },
+      );
+      const dailyEndDate = localDateInTimezone(new Date(), 'Africa/Cairo');
+      const dailyCurrent = await db.collection('coaching_relationships').findOne({
+        _id: dailyEndSeed.relationshipObjectId,
+      });
+      const dailyEndRace = await Promise.allSettled([
+        container.progress.putDailyTracking(
+          dailyEndSeed.traineeCtx,
+          dailyEndSeed.workspaceId,
+          dailyEndSeed.relationshipId,
+          dailyEndDate,
+          { values: { WATER: { ml: 100 } } },
         ),
-      ).rejects.toThrow('outbox failed');
-    } finally {
-      container.outbox.write = originalOutbox;
-    }
-    expect(
-      await db.collection('measurement_entries').countDocuments({
-        relationshipId: outboxMetricSeed.relationshipObjectId,
-        value: 20,
-      }),
-    ).toBe(0);
-
-    const auditSeed = await seedGym(container);
-    const originalAudit = container.audit.write.bind(container.audit);
-    container.audit.write = (async () => {
-      throw new Error('daily audit failed');
-    }) as typeof container.audit.write;
-    try {
-      await expect(
-        container.progress.putAdherenceConfig(
-          auditSeed.trainerCtx,
-          auditSeed.workspaceId,
-          auditSeed.relationshipId,
-          {
-            enabledMetrics: ['WATER'],
-          },
+        container.coachingRelationships.transition(
+          dailyEndSeed.relationshipObjectId,
+          dailyEndSeed.workspaceObjectId,
+          dailyCurrent?.version ?? 0,
+          ['ACTIVE'],
+          'ENDED',
+          { endedBy: new ObjectId(dailyEndSeed.ownerCtx.userId), endedAt: new Date() },
+          { closeEngagement: true },
         ),
-      ).rejects.toThrow('daily audit failed');
-    } finally {
-      container.audit.write = originalAudit;
-    }
-    expect(
-      await db.collection('adherence_configs').countDocuments({
-        relationshipId: auditSeed.relationshipObjectId,
-      }),
-    ).toBe(0);
-  });
+      ]);
+      expect(
+        dailyEndRace.filter((result) => result.status === 'fulfilled').length,
+      ).toBeGreaterThanOrEqual(1);
+      await expect(
+        container.progress.putDailyTracking(
+          dailyEndSeed.traineeCtx,
+          dailyEndSeed.workspaceId,
+          dailyEndSeed.relationshipId,
+          dailyEndDate,
+          { expectedVersion: 0, values: { WATER: { ml: 200 } } },
+        ),
+      ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_PROGRESS_OPEN' });
+
+      const outboxMetricSeed = await seedGym(container);
+      const outboxMetric = await createMetric(container, outboxMetricSeed, 'Outbox Rollback');
+      const originalOutbox = container.outbox.write.bind(container.outbox);
+      container.outbox.write = (async () => {
+        throw new Error('outbox failed');
+      }) as typeof container.outbox.write;
+      try {
+        await expect(
+          createMeasurementIdempotently(
+            container,
+            outboxMetricSeed,
+            outboxMetric.metricDefinition.id,
+            20,
+            'outbox-rollback',
+          ),
+        ).rejects.toThrow('outbox failed');
+      } finally {
+        container.outbox.write = originalOutbox;
+      }
+      expect(
+        await db.collection('measurement_entries').countDocuments({
+          relationshipId: outboxMetricSeed.relationshipObjectId,
+          value: 20,
+        }),
+      ).toBe(0);
+
+      const auditSeed = await seedGym(container);
+      const originalAudit = container.audit.write.bind(container.audit);
+      container.audit.write = (async () => {
+        throw new Error('daily audit failed');
+      }) as typeof container.audit.write;
+      try {
+        await expect(
+          container.progress.putAdherenceConfig(
+            auditSeed.trainerCtx,
+            auditSeed.workspaceId,
+            auditSeed.relationshipId,
+            {
+              enabledMetrics: ['WATER'],
+            },
+          ),
+        ).rejects.toThrow('daily audit failed');
+      } finally {
+        container.audit.write = originalAudit;
+      }
+      expect(
+        await db.collection('adherence_configs').countDocuments({
+          relationshipId: auditSeed.relationshipObjectId,
+        }),
+      ).toBe(0);
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 });
 
 async function assertStage11DbShape(db: Db) {

@@ -7,6 +7,7 @@ import { migrations } from '../src/migrations';
 import { migration012Stage7TraineeRelationships } from '../src/migrations/012-stage7-trainee-relationships';
 import { MigrationRunner } from '../src/migrations/migration-runner';
 import { systemPermissionProfiles } from '../src/modules/permissions/permission.registry';
+import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 7 migration 012', () => {
   test('creates relationship and assignment indexes plus trainee permission seeds', async () => {
@@ -72,12 +73,12 @@ describe('Stage 7 trainee relationships integration', () => {
     );
     db = container.database.db;
     await new MigrationRunner(db, migrations).migrate();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (container) await container.database.close();
-  }, 30_000);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   test('staff invitation acceptance activates a trainee, creates one membership, primary assignment, audit/outbox, and quota', async () => {
     const seed = await seedGym(container);

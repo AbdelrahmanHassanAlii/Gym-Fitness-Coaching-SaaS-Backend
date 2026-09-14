@@ -34,6 +34,7 @@ import {
   WorkspaceMembershipRepository,
   WorkspaceRepository,
 } from '../src/modules/workspaces/workspace.repository';
+import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 describe('Stage 5 permission registry', () => {
   test('adds locked commercial permissions with intentional system-profile mapping', () => {
@@ -333,12 +334,12 @@ describe('Stage 5 corrective integration coverage', () => {
       close: async () => undefined,
     };
     await initializeStage5CorrectiveFixture(db);
-  });
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (db) await db.dropDatabase();
     if (mongo) await mongo.close();
-  });
+  }, INTEGRATION_TEST_TIMEOUT_MS);
 
   test('real Mongo staff quota race allows only one final reservation', async () => {
     const workspaceId = new ObjectId();

@@ -186,9 +186,9 @@ export function loadConfig(): AppConfig {
     },
     storage: {
       provider: storageProvider(),
-      endpoint: process.env.STORAGE_ENDPOINT?.trim() || 'http://localhost:9000',
-      region: process.env.STORAGE_REGION?.trim() || 'us-east-1',
-      privateBucket: process.env.STORAGE_BUCKET_PRIVATE?.trim() || 'gym-private',
+      endpoint: storageValue('STORAGE_ENDPOINT', env, 'http://localhost:9000'),
+      region: storageValue('STORAGE_REGION', env, 'us-east-1'),
+      privateBucket: storageValue('STORAGE_BUCKET_PRIVATE', env, 'gym-private'),
       accessKey: secret('STORAGE_ACCESS_KEY', env, 'minioadmin'),
       secretKey: secret('STORAGE_SECRET_KEY', env, 'minioadmin'),
     },
@@ -249,4 +249,9 @@ function storageProvider(): 's3' {
     throw new Error(`Invalid STORAGE_PROVIDER: ${value}`);
   }
   return value;
+}
+
+function storageValue(name: string, env: NodeEnvironment, developmentFallback: string): string {
+  if (env === 'production') return required(name);
+  return process.env[name]?.trim() || developmentFallback;
 }

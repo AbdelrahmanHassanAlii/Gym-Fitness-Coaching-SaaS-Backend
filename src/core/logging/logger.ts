@@ -20,10 +20,22 @@ const redactPaths = [
   '*.signedUrl',
   'uploadUrl',
   '*.uploadUrl',
+  '*.*.uploadUrl',
+  '*.*.*.uploadUrl',
   'downloadUrl',
   '*.downloadUrl',
+  '*.*.downloadUrl',
+  '*.*.*.downloadUrl',
   'url',
   '*.url',
+  '*.*.url',
+  '*.*.*.url',
+  'body.url',
+  'body.*.url',
+  'body.*.*.url',
+  'err.message',
+  'err.stack',
+  'msg',
 ];
 
 export function createLoggerOptions(config: AppConfig): LoggerOptions {
@@ -44,11 +56,29 @@ export function createLoggerOptions(config: AppConfig): LoggerOptions {
       : {}),
     redact: {
       paths: redactPaths,
-      censor: '[REDACTED]',
+      censor: (value, path) => censorLogValue(value, path),
     },
   };
 }
 
 export function createLogger(config: AppConfig) {
   return pino(createLoggerOptions(config));
+}
+
+function censorLogValue(value: unknown, path: string[]): unknown {
+  const key = path.join('.');
+  if (
+    key.endsWith('url') ||
+    key.endsWith('Url') ||
+    key === 'err.message' ||
+    key === 'err.stack' ||
+    key === 'msg'
+  ) {
+    if (typeof value === 'string' && !isSignedUrl(value)) return value;
+  }
+  return '[REDACTED]';
+}
+
+function isSignedUrl(value: string): boolean {
+  return /([?&](X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|signature)=)/i.test(value);
 }

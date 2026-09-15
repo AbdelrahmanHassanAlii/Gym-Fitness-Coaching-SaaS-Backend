@@ -8,7 +8,7 @@ export type OutboxHandler = (event: OutboxEventDocument) => Promise<void>;
 
 export class OutboxProcessor {
   private readonly collection: Collection<OutboxEventDocument>;
-  private readonly handlers = new Map<string, OutboxHandler>();
+  private readonly handlers = new Map<string, OutboxHandler[]>();
 
   constructor(
     database: Database,
@@ -19,10 +19,8 @@ export class OutboxProcessor {
   }
 
   register(eventType: string, handler: OutboxHandler): void {
-    if (this.handlers.has(eventType)) {
-      throw new Error(`Outbox handler already registered for ${eventType}`);
-    }
-    this.handlers.set(eventType, handler);
+    const existing = this.handlers.get(eventType) ?? [];
+    this.handlers.set(eventType, [...existing, handler]);
   }
 
   async processOne(): Promise<boolean> {
@@ -56,8 +54,8 @@ export class OutboxProcessor {
 
     if (!event) return false;
 
-    const handler = this.handlers.get(event.eventType);
-    if (!handler) {
+    const handlers = this.handlers.get(event.eventType) ?? [];
+    if (handlers.length === 0) {
       await this.markFailed(
         event._id,
         event.attempts,
@@ -67,7 +65,9 @@ export class OutboxProcessor {
     }
 
     try {
-      await handler(event);
+      for (const handler of handlers) {
+        await handler(event);
+      }
       await this.collection.updateOne(
         { _id: event._id, lockedBy: this.config.worker.id },
         {

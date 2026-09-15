@@ -13,6 +13,7 @@ import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerCheckInRoutes } from '../modules/checkins/checkin.routes';
 import { registerFileRoutes } from '../modules/files/file.routes';
 import { registerLeadRoutes } from '../modules/leads/lead.routes';
+import { registerNotificationRoutes } from '../modules/notifications/notification.routes';
 import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerProgressRoutes } from '../modules/progress/progress.routes';
@@ -87,6 +88,7 @@ export async function buildApp(container: AppContainer) {
         { name: 'Progress' },
         { name: 'Check-Ins' },
         { name: 'Files' },
+        { name: 'Notifications' },
       ],
       components: {
         securitySchemes: {
@@ -127,6 +129,7 @@ export async function buildApp(container: AppContainer) {
   await registerProgressRoutes(app, container);
   await registerCheckInRoutes(app, container);
   await registerFileRoutes(app, container);
+  await registerNotificationRoutes(app, container);
 
   return app;
 }

@@ -4,6 +4,8 @@ import { OutboxProcessor } from '../core/events/outbox.processor';
 import { createLogger } from '../core/logging/logger';
 import { CheckInJobRunner } from '../modules/checkins/checkin.jobs';
 import { FileJobRunner } from '../modules/files/file.jobs';
+import { NotificationJobRunner } from '../modules/notifications/notification.jobs';
+import { registerNotificationOutboxHandlers } from '../modules/notifications/notification.outbox-handlers';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
 import { registerTraineeOutboxHandlers } from '../modules/trainees/trainee.outbox-handlers';
 
@@ -12,9 +14,11 @@ const logger = createLogger(config).child({ process: 'worker', workerId: config.
 const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
 registerTraineeOutboxHandlers(outbox, container.trainees);
+registerNotificationOutboxHandlers(outbox, container.notifications);
 const subscriptionJobs = new SubscriptionJobRunner(container);
 const checkInJobs = new CheckInJobRunner(container);
 const fileJobs = new FileJobRunner(container);
+const notificationJobs = new NotificationJobRunner(container);
 
 let shuttingDown = false;
 
@@ -31,6 +35,7 @@ async function run(): Promise<void> {
       await subscriptionJobs.runDueJobs();
       await checkInJobs.runDueJobs();
       await fileJobs.runDueJobs();
+      await notificationJobs.runDueJobs();
       if (!processed && !shuttingDown) {
         await sleep(config.worker.outboxPollIntervalMs);
       }

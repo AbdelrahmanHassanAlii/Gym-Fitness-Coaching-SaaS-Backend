@@ -10,6 +10,8 @@ import { UnitOfWork } from '../core/database/unit-of-work';
 import { OutboxWriter } from '../core/events/outbox.writer';
 import { IdempotencyService } from '../core/idempotency/idempotency.service';
 import { JobLeaseManager } from '../core/jobs/job-lease.manager';
+import { type EmailProvider, LoggingEmailProvider } from '../core/messaging/email.provider';
+import { LoggingPushProvider, type PushProvider } from '../core/messaging/push.provider';
 import { S3CompatibleStorageProvider } from '../core/storage/s3-storage.provider';
 import type { StorageProvider } from '../core/storage/storage.provider';
 import {
@@ -29,6 +31,8 @@ import { FileApplicationService } from '../modules/files/file.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
 import { LeadRepository } from '../modules/leads/lead.repository';
 import { LeadApplicationService } from '../modules/leads/lead.service';
+import { NotificationRepository } from '../modules/notifications/notification.repository';
+import { NotificationApplicationService } from '../modules/notifications/notification.service';
 import { NutritionRepository } from '../modules/nutrition/nutrition.repository';
 import { NutritionApplicationService } from '../modules/nutrition/nutrition.service';
 import {
@@ -75,6 +79,8 @@ export interface AppContainer {
   idempotency: IdempotencyService;
   jobLeases: JobLeaseManager;
   storage: StorageProvider;
+  emailProvider: EmailProvider;
+  pushProvider: PushProvider;
   identity: IdentityRepository;
   authSessions: AuthSessionRepository;
   authChallenges: AuthChallengeRepository;
@@ -99,6 +105,7 @@ export interface AppContainer {
   progressRepo: ProgressRepository;
   checkInRepo: CheckInRepository;
   filesRepo: FileRepository;
+  notificationsRepo: NotificationRepository;
   coachingRelationships: CoachingRelationshipRepository;
   trainingRepo: TrainingRepository;
   workoutsRepo: WorkoutRepository;
@@ -118,6 +125,7 @@ export interface AppContainer {
   progress: ProgressApplicationService;
   checkins: CheckInApplicationService;
   files: FileApplicationService;
+  notifications: NotificationApplicationService;
   trainees: TraineeApplicationService;
   training: TrainingApplicationService;
   workouts: WorkoutApplicationService;
@@ -159,6 +167,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const progressRepo = new ProgressRepository(database);
   const checkInRepo = new CheckInRepository(database);
   const filesRepo = new FileRepository(database);
+  const notificationsRepo = new NotificationRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
   const trainingRepo = new TrainingRepository(database);
   const workoutsRepo = new WorkoutRepository(database);
@@ -186,6 +195,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     accessKey: storageConfig.accessKey,
     secretKey: storageConfig.secretKey,
   });
+  const emailProvider = new LoggingEmailProvider();
+  const pushProvider = new LoggingPushProvider();
 
   const entitlements = new EntitlementService(subscriptionsRepo, workspaceUsage);
   const subscriptions = new SubscriptionApplicationService(
@@ -313,6 +324,20 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const notifications = new NotificationApplicationService(
+    config,
+    database,
+    unitOfWork,
+    notificationsRepo,
+    identity,
+    workspaceRepo,
+    workspaceMemberships,
+    coachingRelationships,
+    checkInRepo,
+    audit,
+    emailProvider,
+    pushProvider,
+  );
   const trainees = new TraineeApplicationService(
     unitOfWork,
     coachingRelationships,
@@ -344,6 +369,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     idempotency,
     jobLeases: new JobLeaseManager(database),
     storage,
+    emailProvider,
+    pushProvider,
     identity,
     authSessions,
     authChallenges,
@@ -368,6 +395,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     progressRepo,
     checkInRepo,
     filesRepo,
+    notificationsRepo,
     coachingRelationships,
     trainingRepo,
     workoutsRepo,
@@ -399,6 +427,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     progress,
     checkins,
     files,
+    notifications,
     trainees,
     training,
     workouts,

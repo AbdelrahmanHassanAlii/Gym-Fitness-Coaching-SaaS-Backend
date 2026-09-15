@@ -16,6 +16,7 @@ import { migration015Stage10Nutrition } from './015-stage10-nutrition';
 import { migration016Stage11Progress } from './016-stage11-progress';
 import { migration017Stage12CheckIns } from './017-stage12-checkins';
 import { migration018Stage13FilesDocuments } from './018-stage13-files-documents';
+import { migration019Stage14Notifications } from './019-stage14-notifications';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -37,4 +38,5 @@ export const migrations: Migration[] = [
   migration016Stage11Progress,
   migration017Stage12CheckIns,
   migration018Stage13FilesDocuments,
+  migration019Stage14Notifications,
 ];

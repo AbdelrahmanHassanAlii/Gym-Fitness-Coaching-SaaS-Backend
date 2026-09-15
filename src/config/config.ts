@@ -231,6 +231,11 @@ export function loadConfig(): AppConfig {
       outboxMaxAttempts: integer('OUTBOX_MAX_ATTEMPTS', 8, 1),
       jobLeaseMs: integer('JOB_LEASE_MS', 30_000, 1_000),
     },
+    notifications: {
+      deliveryBatchSize: integer('NOTIFICATION_DELIVERY_BATCH_SIZE', 25, 1),
+      deliveryClaimMs: integer('NOTIFICATION_DELIVERY_CLAIM_MS', 60_000, 1_000),
+      deliveryMaxAttempts: integer('NOTIFICATION_DELIVERY_MAX_ATTEMPTS', 5, 1),
+    },
     subscriptions: {
       trialExpiryAction: trialExpiryAction(),
       paidGraceDays: integer('SUBSCRIPTION_PAID_GRACE_DAYS', 0, 0),

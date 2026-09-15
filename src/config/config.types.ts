@@ -56,6 +56,11 @@ export interface AppConfig {
     outboxMaxAttempts: number;
     jobLeaseMs: number;
   };
+  notifications?: {
+    deliveryBatchSize: number;
+    deliveryClaimMs: number;
+    deliveryMaxAttempts: number;
+  };
   subscriptions: {
     trialExpiryAction: 'FROZEN' | 'GRACE_PERIOD';
     paidGraceDays: number;

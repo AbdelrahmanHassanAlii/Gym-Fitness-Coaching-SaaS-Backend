@@ -7,8 +7,12 @@ export function registerNotificationOutboxHandlers(
   notifications: NotificationApplicationService,
 ): void {
   for (const eventType of registeredEventTypes()) {
-    processor.register(eventType, async (event) => {
-      await notifications.handleOutboxEvent(event);
-    });
+    processor.register(
+      eventType,
+      async (event) => {
+        await notifications.handleOutboxEvent(event);
+      },
+      { handlerKey: 'notifications.stage14' },
+    );
   }
 }

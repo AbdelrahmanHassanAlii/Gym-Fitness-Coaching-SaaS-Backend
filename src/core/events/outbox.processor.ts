@@ -6,9 +6,18 @@ import type { OutboxEventDocument } from './outbox.types';
 
 export type OutboxHandler = (event: OutboxEventDocument) => Promise<void>;
 
+interface OutboxHandlerRegistration {
+  handler: OutboxHandler;
+  handlerKey: string;
+}
+
+interface OutboxHandlerOptions {
+  handlerKey?: string;
+}
+
 export class OutboxProcessor {
   private readonly collection: Collection<OutboxEventDocument>;
-  private readonly handlers = new Map<string, OutboxHandler[]>();
+  private readonly handlers = new Map<string, OutboxHandlerRegistration[]>();
 
   constructor(
     database: Database,
@@ -18,9 +27,13 @@ export class OutboxProcessor {
     this.collection = database.db.collection<OutboxEventDocument>('outbox_events');
   }
 
-  register(eventType: string, handler: OutboxHandler): void {
+  register(eventType: string, handler: OutboxHandler, options: OutboxHandlerOptions = {}): void {
     const existing = this.handlers.get(eventType) ?? [];
-    this.handlers.set(eventType, [...existing, handler]);
+    const handlerKey = options.handlerKey ?? `${eventType}:default`;
+    if (existing.some((registration) => registration.handlerKey === handlerKey)) {
+      throw new Error(`Duplicate outbox handler key "${handlerKey}" for event "${eventType}"`);
+    }
+    this.handlers.set(eventType, [...existing, { handler, handlerKey }]);
   }
 
   async processOne(): Promise<boolean> {
@@ -65,8 +78,7 @@ export class OutboxProcessor {
     }
 
     try {
-      for (const [index, handler] of handlers.entries()) {
-        const handlerKey = `${event.eventType}#${index}`;
+      for (const { handler, handlerKey } of handlers) {
         if (event.completedHandlers?.includes(handlerKey)) continue;
         await handler(event);
         await this.collection.updateOne(

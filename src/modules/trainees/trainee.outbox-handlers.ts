@@ -7,31 +7,43 @@ export function registerTraineeOutboxHandlers(
   processor: OutboxProcessor,
   trainees: TraineeApplicationService,
 ): void {
-  processor.register('StaffMembershipEnded', async (event) => {
-    const membershipId = aggregateId(event);
-    if (!event.workspaceId || !membershipId) return;
-    await trainees.reconcilePrimaryEligibility(event.workspaceId, membershipId, 'staff-ended');
-  });
+  processor.register(
+    'StaffMembershipEnded',
+    async (event) => {
+      const membershipId = aggregateId(event);
+      if (!event.workspaceId || !membershipId) return;
+      await trainees.reconcilePrimaryEligibility(event.workspaceId, membershipId, 'staff-ended');
+    },
+    { handlerKey: 'trainees.primary-eligibility.staff-ended' },
+  );
 
-  processor.register('MembershipBranchAssignmentEnded', async (event) => {
-    const membershipId = payloadObjectId(event, 'membershipId');
-    if (!event.workspaceId || !membershipId) return;
-    await trainees.reconcilePrimaryEligibility(
-      event.workspaceId,
-      membershipId,
-      'branch-eligibility-ended',
-    );
-  });
+  processor.register(
+    'MembershipBranchAssignmentEnded',
+    async (event) => {
+      const membershipId = payloadObjectId(event, 'membershipId');
+      if (!event.workspaceId || !membershipId) return;
+      await trainees.reconcilePrimaryEligibility(
+        event.workspaceId,
+        membershipId,
+        'branch-eligibility-ended',
+      );
+    },
+    { handlerKey: 'trainees.primary-eligibility.branch-assignment-ended' },
+  );
 
-  processor.register('MembershipPermissionProfilesReplaced', async (event) => {
-    const membershipId = aggregateId(event);
-    if (!event.workspaceId || !membershipId) return;
-    await trainees.reconcilePrimaryEligibility(
-      event.workspaceId,
-      membershipId,
-      'staff-capability-changed',
-    );
-  });
+  processor.register(
+    'MembershipPermissionProfilesReplaced',
+    async (event) => {
+      const membershipId = aggregateId(event);
+      if (!event.workspaceId || !membershipId) return;
+      await trainees.reconcilePrimaryEligibility(
+        event.workspaceId,
+        membershipId,
+        'staff-capability-changed',
+      );
+    },
+    { handlerKey: 'trainees.primary-eligibility.permission-profiles-replaced' },
+  );
 }
 
 function aggregateId(event: OutboxEventDocument): ObjectId | null {

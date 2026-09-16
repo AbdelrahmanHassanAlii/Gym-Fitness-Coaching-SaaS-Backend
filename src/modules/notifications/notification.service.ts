@@ -454,7 +454,19 @@ export class NotificationApplicationService {
       notification.workspaceId,
       delivery.recipientUserId,
     );
-    return membership?.status === 'ACTIVE';
+    if (membership?.status !== 'ACTIVE') return false;
+    const relationshipId = notification.payload?.relationshipId;
+    if (!relationshipId || !ObjectId.isValid(relationshipId)) return true;
+    const relationship = await this.relationships.findByIdInWorkspace(
+      notification.workspaceId,
+      new ObjectId(relationshipId),
+    );
+    if (!relationship || !['ACTIVE', 'NEEDS_REASSIGNMENT'].includes(relationship.status)) {
+      return false;
+    }
+    if (relationship.traineeUserId.equals(delivery.recipientUserId)) return true;
+    const assignments = await this.relationships.listActiveAssignments(relationship._id);
+    return assignments.some((assignment) => assignment.staffMembershipId.equals(membership._id));
   }
 
   private async isEventStillMeaningful(
@@ -637,14 +649,7 @@ function safePushDevice(device: {
 
 function safePayload(event: OutboxEventDocument): Record<string, string> {
   const output: Record<string, string> = {};
-  for (const key of [
-    'relationshipId',
-    'checkinId',
-    'assignmentId',
-    'templateId',
-    'documentId',
-    'aggregateId',
-  ]) {
+  for (const key of ['relationshipId', 'checkinId', 'assignmentId', 'templateId', 'documentId']) {
     const value = event.payload[key];
     if (typeof value === 'string' && ObjectId.isValid(value)) output[key] = value;
   }

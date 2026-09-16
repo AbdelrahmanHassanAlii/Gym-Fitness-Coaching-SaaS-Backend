@@ -65,8 +65,15 @@ export class OutboxProcessor {
     }
 
     try {
-      for (const handler of handlers) {
+      for (const [index, handler] of handlers.entries()) {
+        const handlerKey = `${event.eventType}#${index}`;
+        if (event.completedHandlers?.includes(handlerKey)) continue;
         await handler(event);
+        await this.collection.updateOne(
+          { _id: event._id, lockedBy: this.config.worker.id },
+          { $addToSet: { completedHandlers: handlerKey } },
+        );
+        event.completedHandlers = [...(event.completedHandlers ?? []), handlerKey];
       }
       await this.collection.updateOne(
         { _id: event._id, lockedBy: this.config.worker.id },
@@ -80,6 +87,7 @@ export class OutboxProcessor {
             lockedUntil: '',
             nextAttemptAt: '',
             lastError: '',
+            completedHandlers: '',
           },
         },
       );

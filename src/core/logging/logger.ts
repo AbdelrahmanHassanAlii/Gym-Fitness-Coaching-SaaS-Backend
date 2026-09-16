@@ -90,6 +90,14 @@ export function createLogger(config: AppConfig) {
 function censorLogValue(value: unknown, path: string[]): unknown {
   const key = path.join('.');
   if (
+    key.endsWith('invitationUrl') ||
+    key.endsWith('activationUrl') ||
+    key.endsWith('resetUrl') ||
+    key.endsWith('verificationUrl')
+  ) {
+    return '[REDACTED]';
+  }
+  if (
     key.endsWith('url') ||
     key.endsWith('Url') ||
     key === 'err.message' ||

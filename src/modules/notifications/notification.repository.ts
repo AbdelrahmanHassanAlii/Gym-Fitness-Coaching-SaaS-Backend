@@ -96,10 +96,17 @@ export class NotificationRepository {
 
   async markRead(userId: ObjectId, notificationId: ObjectId, now: Date, tx?: TransactionContext) {
     const result = await this.notifications.findOneAndUpdate(
-      { _id: notificationId, recipientUserId: userId },
+      { _id: notificationId, recipientUserId: userId, readAt: { $exists: false } },
       { $set: { readAt: now, updatedAt: now } },
       { returnDocument: 'after', ...opts(tx) },
     );
+    if (!result) {
+      const existing = await this.notifications.findOne(
+        { _id: notificationId, recipientUserId: userId },
+        opts(tx),
+      );
+      if (existing) return existing;
+    }
     if (!result) {
       throw new AppError({
         code: 'NOTIFICATION_NOT_FOUND',
@@ -164,6 +171,20 @@ export class NotificationRepository {
     now: Date;
   }) {
     const tokenFingerprint = fingerprint(input.token);
+    const staleDevices = await this.devices
+      .find({ tokenFingerprint, userId: { $ne: input.userId }, status: 'ACTIVE' })
+      .toArray();
+    await this.devices.updateMany(
+      { tokenFingerprint, userId: { $ne: input.userId }, status: 'ACTIVE' },
+      { $set: { status: 'REVOKED', revokedAt: input.now, updatedAt: input.now } },
+    );
+    for (const staleDevice of staleDevices) {
+      await this.cancelDeliveriesForPushDevice(
+        staleDevice._id,
+        'PUSH_DEVICE_TOKEN_REASSIGNED',
+        input.now,
+      );
+    }
     const result = await this.devices.findOneAndUpdate(
       { userId: input.userId, tokenFingerprint },
       {

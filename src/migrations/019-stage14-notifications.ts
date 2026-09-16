@@ -61,6 +61,8 @@ export const migration019Stage14Notifications: Migration = {
       },
       {
         key: { tokenFingerprint: 1 },
+        unique: true,
+        partialFilterExpression: { status: 'ACTIVE' },
         name: 'push_devices_token_fingerprint',
       },
       {

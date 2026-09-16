@@ -20,6 +20,7 @@ export interface OutboxEventDocument extends OutboxEventInput {
   lockedBy?: string;
   lockedUntil?: Date;
   lastError?: string;
+  completedHandlers?: string[];
   occurredAt: Date;
   processedAt?: Date;
 }

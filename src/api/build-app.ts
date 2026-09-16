@@ -8,6 +8,7 @@ import type { AppContainer } from '../bootstrap/app-container';
 import { registerErrorHandler } from '../core/errors/error-handler';
 import { createLoggerOptions } from '../core/logging/logger';
 import { registerRequestContext } from '../core/request-context/request-context.plugin';
+import { registerAuditRoutes } from '../modules/audit/audit.routes';
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerCheckInRoutes } from '../modules/checkins/checkin.routes';
@@ -89,6 +90,7 @@ export async function buildApp(container: AppContainer) {
         { name: 'Check-Ins' },
         { name: 'Files' },
         { name: 'Notifications' },
+        { name: 'Audit' },
       ],
       components: {
         securitySchemes: {
@@ -130,6 +132,7 @@ export async function buildApp(container: AppContainer) {
   await registerCheckInRoutes(app, container);
   await registerFileRoutes(app, container);
   await registerNotificationRoutes(app, container);
+  await registerAuditRoutes(app, container);
 
   return app;
 }

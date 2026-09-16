@@ -14,6 +14,8 @@ import { type EmailProvider, LoggingEmailProvider } from '../core/messaging/emai
 import { LoggingPushProvider, type PushProvider } from '../core/messaging/push.provider';
 import { S3CompatibleStorageProvider } from '../core/storage/s3-storage.provider';
 import type { StorageProvider } from '../core/storage/storage.provider';
+import { AuditRepository } from '../modules/audit/audit.repository';
+import { AuditApplicationService } from '../modules/audit/audit.service';
 import {
   AuthChallengeRepository,
   AuthMfaMethodRepository,
@@ -87,6 +89,7 @@ export interface AppContainer {
   authMfaMethods: AuthMfaMethodRepository;
   authRateLimits: AuthRateLimitRepository;
   authSecurityEvents: AuthSecurityEventWriter;
+  auditRepo: AuditRepository;
   platformMemberships: PlatformMembershipRepository;
   permissionDefinitions: PermissionDefinitionRepository;
   permissionProfiles: PermissionProfileRepository;
@@ -116,6 +119,7 @@ export interface AppContainer {
   refreshTokens: RefreshTokenService;
   mfa: MfaService;
   auth: AuthApplicationService;
+  auditService: AuditApplicationService;
   workspaces: WorkspaceApplicationService;
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
@@ -142,6 +146,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const authMfaMethods = new AuthMfaMethodRepository(database);
   const authRateLimits = new AuthRateLimitRepository(database);
   const authSecurityEvents = new AuthSecurityEventWriter(database);
+  const auditRepo = new AuditRepository(database);
   const platformMemberships = new PlatformMembershipRepository(database);
   const permissionDefinitions = new PermissionDefinitionRepository(database);
   const permissionProfiles = new PermissionProfileRepository(database);
@@ -377,6 +382,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     authMfaMethods,
     authRateLimits,
     authSecurityEvents,
+    auditRepo,
     platformMemberships,
     permissionDefinitions,
     permissionProfiles,
@@ -406,6 +412,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     refreshTokens,
     mfa: new MfaService(unitOfWork, authMfaMethods, authSecurityEvents, credentialDigests),
     auth,
+    auditService: new AuditApplicationService(auditRepo, accessControl),
     workspaces,
     permissions: new PermissionApplicationService(
       unitOfWork,

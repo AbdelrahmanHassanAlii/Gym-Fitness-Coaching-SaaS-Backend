@@ -128,9 +128,13 @@ describe('Stage 14 notification behavior', () => {
       const sourceEventId = await seedCheckInDueEvent(container);
       let existingHandlerCalls = 0;
       const processor = new OutboxProcessor(container.database, container.config, silentTestLogger);
-      processor.register('CheckInDue', async () => {
-        existingHandlerCalls += 1;
-      });
+      processor.register(
+        'CheckInDue',
+        async () => {
+          existingHandlerCalls += 1;
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
       registerNotificationOutboxHandlers(processor, container.notifications);
 
       expect(await processor.processOne()).toBe(true);
@@ -155,28 +159,40 @@ describe('Stage 14 notification behavior', () => {
       let failNotificationOnce = true;
       const original = container.notifications.handleOutboxEvent.bind(container.notifications);
       const processor = new OutboxProcessor(container.database, container.config, silentTestLogger);
-      processor.register('CheckInDue', async (event) => {
-        sideEffectCalls += 1;
-        await container.database.db.collection('outbox_side_effects').updateOne(
-          { eventId: event._id, kind: 'existing-handler' },
-          {
-            $setOnInsert: { eventId: event._id, kind: 'existing-handler', createdAt: new Date() },
-          },
-          { upsert: true },
-        );
-      });
-      processor.register('CheckInDue', async (event) => {
-        if (failNotificationOnce) {
-          failNotificationOnce = false;
-          throw new Error('Injected notification handler failure');
-        }
-        await original(event);
-      });
+      processor.register(
+        'CheckInDue',
+        async (event) => {
+          sideEffectCalls += 1;
+          await container.database.db.collection('outbox_side_effects').updateOne(
+            { eventId: event._id, kind: 'existing-handler' },
+            {
+              $setOnInsert: { eventId: event._id, kind: 'existing-handler', createdAt: new Date() },
+            },
+            { upsert: true },
+          );
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+      processor.register(
+        'CheckInDue',
+        async (event) => {
+          if (failNotificationOnce) {
+            failNotificationOnce = false;
+            throw new Error('Injected notification handler failure');
+          }
+          await original(event);
+        },
+        { handlerKey: 'test.notification-handler' },
+      );
 
       expect(await processor.processOne()).toBe(true);
       expect(
         await container.database.db.collection('outbox_events').findOne({ _id: sourceEventId }),
-      ).toMatchObject({ status: 'PENDING', attempts: 1, completedHandlers: ['CheckInDue#0'] });
+      ).toMatchObject({
+        status: 'PENDING',
+        attempts: 1,
+        completedHandlers: ['test.existing-handler'],
+      });
       await container.database.db
         .collection('outbox_events')
         .updateOne({ _id: sourceEventId }, { $set: { nextAttemptAt: new Date(0) } });
@@ -200,6 +216,226 @@ describe('Stage 14 notification behavior', () => {
       expect(
         await container.database.db.collection('outbox_events').findOne({ _id: sourceEventId }),
       ).toMatchObject({ status: 'PROCESSED', attempts: 1 });
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'stable handler keys survive restart and registration order changes',
+    async () => {
+      const container = await stage14Container(`stage14_outbox_order_change_${new ObjectId()}`);
+      await new MigrationRunner(container.database.db, migrations).migrate();
+      const sourceEventId = await seedCheckInDueEvent(container);
+      let sideEffectCalls = 0;
+      let failNotificationOnce = true;
+      const original = container.notifications.handleOutboxEvent.bind(container.notifications);
+      const firstProcessor = new OutboxProcessor(
+        container.database,
+        container.config,
+        silentTestLogger,
+      );
+      firstProcessor.register(
+        'CheckInDue',
+        async (event) => {
+          sideEffectCalls += 1;
+          await container.database.db.collection('outbox_side_effects').updateOne(
+            { eventId: event._id, kind: 'existing-handler' },
+            {
+              $setOnInsert: { eventId: event._id, kind: 'existing-handler', createdAt: new Date() },
+            },
+            { upsert: true },
+          );
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+      firstProcessor.register(
+        'CheckInDue',
+        async (event) => {
+          if (failNotificationOnce) {
+            failNotificationOnce = false;
+            throw new Error('Injected notification handler failure');
+          }
+          await original(event);
+        },
+        { handlerKey: 'test.notification-handler' },
+      );
+
+      expect(await firstProcessor.processOne()).toBe(true);
+      expect(
+        await container.database.db.collection('outbox_events').findOne({ _id: sourceEventId }),
+      ).toMatchObject({
+        status: 'PENDING',
+        attempts: 1,
+        completedHandlers: ['test.existing-handler'],
+      });
+      await container.database.db
+        .collection('outbox_events')
+        .updateOne({ _id: sourceEventId }, { $set: { nextAttemptAt: new Date(0) } });
+
+      const restartedProcessor = new OutboxProcessor(
+        container.database,
+        container.config,
+        silentTestLogger,
+      );
+      restartedProcessor.register(
+        'CheckInDue',
+        async (event) => {
+          await original(event);
+        },
+        { handlerKey: 'test.notification-handler' },
+      );
+      restartedProcessor.register(
+        'CheckInDue',
+        async () => {
+          sideEffectCalls += 1;
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+
+      expect(await restartedProcessor.processOne()).toBe(true);
+
+      expect(sideEffectCalls).toBe(1);
+      expect(
+        await container.database.db.collection('outbox_side_effects').countDocuments({
+          eventId: sourceEventId,
+        }),
+      ).toBe(1);
+      expect(
+        await container.database.db.collection('notifications').countDocuments({ sourceEventId }),
+      ).toBe(1);
+      expect(
+        await container.database.db
+          .collection('notification_deliveries')
+          .countDocuments({ sourceEventId }),
+      ).toBe(1);
+      const processed = await container.database.db
+        .collection('outbox_events')
+        .findOne({ _id: sourceEventId });
+      expect(processed).toMatchObject({ status: 'PROCESSED', attempts: 1 });
+      expect(processed?.completedHandlers).toBeUndefined();
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'stable handler keys survive restart with the same registration order',
+    async () => {
+      const container = await stage14Container(`stage14_outbox_same_order_${new ObjectId()}`);
+      await new MigrationRunner(container.database.db, migrations).migrate();
+      const sourceEventId = await seedCheckInDueEvent(container);
+      let sideEffectCalls = 0;
+      let failNotificationOnce = true;
+      const original = container.notifications.handleOutboxEvent.bind(container.notifications);
+      const firstProcessor = new OutboxProcessor(
+        container.database,
+        container.config,
+        silentTestLogger,
+      );
+      firstProcessor.register(
+        'CheckInDue',
+        async () => {
+          sideEffectCalls += 1;
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+      firstProcessor.register(
+        'CheckInDue',
+        async (event) => {
+          if (failNotificationOnce) {
+            failNotificationOnce = false;
+            throw new Error('Injected notification handler failure');
+          }
+          await original(event);
+        },
+        { handlerKey: 'test.notification-handler' },
+      );
+
+      expect(await firstProcessor.processOne()).toBe(true);
+      await container.database.db
+        .collection('outbox_events')
+        .updateOne({ _id: sourceEventId }, { $set: { nextAttemptAt: new Date(0) } });
+
+      const restartedProcessor = new OutboxProcessor(
+        container.database,
+        container.config,
+        silentTestLogger,
+      );
+      restartedProcessor.register(
+        'CheckInDue',
+        async () => {
+          sideEffectCalls += 1;
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+      restartedProcessor.register(
+        'CheckInDue',
+        async (event) => {
+          await original(event);
+        },
+        { handlerKey: 'test.notification-handler' },
+      );
+
+      expect(await restartedProcessor.processOne()).toBe(true);
+
+      expect(sideEffectCalls).toBe(1);
+      expect(
+        await container.database.db.collection('notifications').countDocuments({ sourceEventId }),
+      ).toBe(1);
+      const processed = await container.database.db
+        .collection('outbox_events')
+        .findOne({ _id: sourceEventId });
+      expect(processed).toMatchObject({ status: 'PROCESSED', attempts: 1 });
+      expect(processed?.completedHandlers).toBeUndefined();
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test('duplicate handler keys for one event fail deterministically at registration', async () => {
+    const container = await stage14Container(`stage14_duplicate_handler_key_${new ObjectId()}`);
+    const processor = new OutboxProcessor(container.database, container.config, silentTestLogger);
+    processor.register('CheckInDue', async () => undefined, { handlerKey: 'test.duplicate' });
+
+    expect(() =>
+      processor.register('CheckInDue', async () => undefined, { handlerKey: 'test.duplicate' }),
+    ).toThrow('Duplicate outbox handler key "test.duplicate" for event "CheckInDue"');
+  });
+
+  test(
+    'unknown completed handler keys do not skip registered logical handlers',
+    async () => {
+      const container = await stage14Container(`stage14_unknown_completed_key_${new ObjectId()}`);
+      await new MigrationRunner(container.database.db, migrations).migrate();
+      const sourceEventId = await seedCheckInDueEvent(container);
+      await container.database.db.collection('outbox_events').updateOne(
+        { _id: sourceEventId },
+        {
+          $set: {
+            completedHandlers: ['CheckInDue#0', 'unknown.legacy-handler'],
+          },
+        },
+      );
+      let existingHandlerCalls = 0;
+      const processor = new OutboxProcessor(container.database, container.config, silentTestLogger);
+      processor.register(
+        'CheckInDue',
+        async () => {
+          existingHandlerCalls += 1;
+        },
+        { handlerKey: 'test.existing-handler' },
+      );
+      registerNotificationOutboxHandlers(processor, container.notifications);
+
+      expect(await processor.processOne()).toBe(true);
+
+      expect(existingHandlerCalls).toBe(1);
+      expect(
+        await container.database.db.collection('notifications').countDocuments({ sourceEventId }),
+      ).toBe(1);
+      const processed = await container.database.db
+        .collection('outbox_events')
+        .findOne({ _id: sourceEventId });
+      expect(processed).toMatchObject({ status: 'PROCESSED' });
+      expect(processed?.completedHandlers).toBeUndefined();
     },
     INTEGRATION_TIMEOUT_MS,
   );

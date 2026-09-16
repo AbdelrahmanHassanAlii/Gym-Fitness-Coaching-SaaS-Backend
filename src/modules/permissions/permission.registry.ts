@@ -159,6 +159,9 @@ export const Permissions = {
   CheckInsRead: 'checkins.read',
   CheckInsSubmit: 'checkins.submit',
   CheckInsReview: 'checkins.review',
+  AuditWorkspaceRead: 'audit.workspace.read',
+  AuditPlatformRead: 'audit.platform.read',
+  AuditSensitiveRead: 'audit.sensitive.read',
 } as const;
 
 export type PermissionKey = (typeof Permissions)[keyof typeof Permissions];
@@ -333,6 +336,7 @@ export const permissionDefinitions: PermissionDefinition[] = [
   ),
   workspace(Permissions.CheckInsSubmit, 'Check-ins', 'Submit own check-ins.'),
   workspace(Permissions.CheckInsReview, 'Check-ins', 'Review submitted check-ins.'),
+  workspace(Permissions.AuditWorkspaceRead, 'Audit', 'Read workspace audit evidence.'),
   workspace(Permissions.NutritionPlansRead, 'Nutrition', 'Read nutrition plans.'),
   workspace(Permissions.NutritionPlansCreate, 'Nutrition', 'Create nutrition plans.'),
   workspace(Permissions.NutritionPlansUpdate, 'Nutrition', 'Update nutrition plans.'),
@@ -358,6 +362,17 @@ export const permissionDefinitions: PermissionDefinition[] = [
   platform(Permissions.LeadsMarkDuplicate, 'Leads', 'Mark duplicate leads.'),
   platform(Permissions.LeadsMerge, 'Leads', 'Merge duplicate leads.'),
   platform(Permissions.SupportSessionsStart, 'Support', 'Start support sessions.'),
+  platform(Permissions.AuditPlatformRead, 'Audit', 'Read platform audit evidence.'),
+  {
+    key: Permissions.AuditSensitiveRead,
+    category: 'audit',
+    module: 'audit',
+    displayName: 'Sensitive audit metadata',
+    description: 'Read sensitive audit metadata without granting source resource access.',
+    allowedScopes: workspaceScopes,
+    allowedContexts: ['PLATFORM', 'WORKSPACE'],
+    system: true,
+  },
   platform(Permissions.SystemExercisesRead, 'System exercises', 'Read system exercises.'),
   platform(Permissions.SystemExercisesCreate, 'System exercises', 'Create system exercises.'),
   platform(Permissions.SystemExercisesUpdate, 'System exercises', 'Update system exercises.'),
@@ -428,6 +443,7 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.WorkspacesRead,
       Permissions.WorkspacesManage,
       Permissions.WorkspacesUpdate,
+      Permissions.AuditWorkspaceRead,
       Permissions.BillingSubscriptionRead,
       Permissions.BillingUsageRead,
       Permissions.BillingPaymentsRead,

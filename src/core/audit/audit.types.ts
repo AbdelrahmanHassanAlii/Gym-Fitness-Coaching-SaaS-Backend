@@ -12,6 +12,7 @@ export interface AuditEventInput {
   actor: AuditActor;
   effectiveContext?: Record<string, unknown>;
   supportSessionId?: ObjectId;
+  sensitive?: boolean;
   entity: {
     type: string;
     id: ObjectId | string;

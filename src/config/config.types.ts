@@ -17,6 +17,9 @@ export interface AppConfig {
   logging: {
     level: string;
   };
+  audit?: {
+    retentionPolicy: 'INDEFINITE' | 'CONFIGURED_EXTERNALLY';
+  };
   storage?: {
     provider: 's3';
     endpoint: string;

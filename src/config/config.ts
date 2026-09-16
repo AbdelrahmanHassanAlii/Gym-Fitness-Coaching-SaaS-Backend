@@ -141,6 +141,14 @@ function trialExpiryAction(): 'FROZEN' | 'GRACE_PERIOD' {
   return value;
 }
 
+function auditRetentionPolicy(): 'INDEFINITE' | 'CONFIGURED_EXTERNALLY' {
+  const value = process.env.AUDIT_RETENTION_POLICY?.trim().toUpperCase() || 'INDEFINITE';
+  if (value !== 'INDEFINITE' && value !== 'CONFIGURED_EXTERNALLY') {
+    throw new Error(`Invalid AUDIT_RETENTION_POLICY: ${value}`);
+  }
+  return value;
+}
+
 export function loadConfig(): AppConfig {
   const env = environment();
   const maxSupportMinutes = integer('SUPPORT_SESSION_MAX_MINUTES', 60, 1);
@@ -183,6 +191,9 @@ export function loadConfig(): AppConfig {
     },
     logging: {
       level: process.env.LOG_LEVEL?.trim() || (env === 'production' ? 'info' : 'debug'),
+    },
+    audit: {
+      retentionPolicy: auditRetentionPolicy(),
     },
     storage: {
       provider: storageProvider(),

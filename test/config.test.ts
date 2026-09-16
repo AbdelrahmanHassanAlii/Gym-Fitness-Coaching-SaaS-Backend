@@ -22,6 +22,19 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow('cannot exceed');
   });
 
+  test('loads audit retention policy representation without enabling deletion', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.MONGODB_URI = 'mongodb://localhost:27017/test';
+    delete process.env.AUDIT_RETENTION_POLICY;
+    expect(loadConfig().audit?.retentionPolicy).toBe('INDEFINITE');
+
+    process.env.AUDIT_RETENTION_POLICY = 'configured_externally';
+    expect(loadConfig().audit?.retentionPolicy).toBe('CONFIGURED_EXTERNALLY');
+
+    process.env.AUDIT_RETENTION_POLICY = 'delete_after_30_days';
+    expect(() => loadConfig()).toThrow('Invalid AUDIT_RETENTION_POLICY');
+  });
+
   test('requires auth secrets in production', () => {
     process.env.NODE_ENV = 'production';
     process.env.MONGODB_URI = 'mongodb://localhost:27017/test';

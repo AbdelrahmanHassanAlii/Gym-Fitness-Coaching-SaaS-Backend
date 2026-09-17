@@ -66,6 +66,7 @@ export interface SupportSessionDocument {
   realActorUserId: ObjectId;
   realActorPlatformMembershipId: ObjectId;
   parentAuthSessionId: ObjectId;
+  targetType?: SupportTargetType;
   targetWorkspaceId?: ObjectId;
   targetUserId?: ObjectId;
   effectiveMembershipId?: ObjectId;

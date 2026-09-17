@@ -762,6 +762,16 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
     workspaceId: ObjectId,
     tx?: TransactionContext,
   ) {
+    if (ctx.supportSessionId && ctx.effectiveMembershipId) {
+      const membership = await this.memberships.findByIdInWorkspace(
+        workspaceId,
+        objectId(ctx.effectiveMembershipId, 'WORKSPACE_MEMBERSHIP_NOT_FOUND'),
+        tx,
+      );
+      if (membership?.status !== 'ACTIVE') throw forbidden();
+      ctx.workspaceMembershipId = membership._id.toHexString();
+      return membership;
+    }
     const membership = await this.memberships.findByUserInWorkspace(workspaceId, actorId(ctx), tx);
     if (membership?.status !== 'ACTIVE') throw forbidden();
     ctx.workspaceMembershipId = membership._id.toHexString();

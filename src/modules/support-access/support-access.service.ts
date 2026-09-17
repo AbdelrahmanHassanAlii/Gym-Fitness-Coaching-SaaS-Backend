@@ -199,6 +199,17 @@ export class SupportAccessApplicationService {
       patch.validFrom = date(input.validFrom, 'SUPPORT_POLICY_VALID_FROM_INVALID');
     if (input.validUntil)
       patch.validUntil = date(input.validUntil, 'SUPPORT_POLICY_VALID_UNTIL_INVALID');
+    validatePolicy(
+      {
+        allowedTargetTypes: patch.allowedTargetTypes,
+        allowedSessionTypes: patch.allowedSessionTypes,
+        maxSessionDurationMinutes: patch.maxSessionDurationMinutes,
+        allowedIpRanges: patch.allowedIpRanges,
+        validFrom: patch.validFrom,
+        validUntil: patch.validUntil,
+      } as PortalAccessPolicyDocument,
+      now,
+    );
     return await this.unitOfWork.withTransaction(async (tx) => {
       const updated = await this.support.updatePolicy(id, input.expectedVersion, patch, tx);
       await this.revokeInvalidatedSessions(ctx, updated, now, tx, 'POLICY_CHANGED');
@@ -314,6 +325,7 @@ export class SupportAccessApplicationService {
       realActorUserId,
       realActorPlatformMembershipId: actorPlatformMembershipId,
       parentAuthSessionId,
+      targetType: normalized.targetType,
       ...(normalized.targetWorkspaceId ? { targetWorkspaceId: normalized.targetWorkspaceId } : {}),
       ...(normalized.targetUserId ? { targetUserId: normalized.targetUserId } : {}),
       ...(normalized.effectiveMembershipId
@@ -529,6 +541,20 @@ export class SupportAccessApplicationService {
       await this.securityTerminate(ctx, session, 'IP_CHANGED');
       throw forbidden('SUPPORT_SESSION_IP_MISMATCH');
     }
+    if (session.contextType === 'USER_CONTEXT') {
+      if (!session.targetWorkspaceId || !session.targetUserId || !session.effectiveMembershipId) {
+        await this.securityTerminate(ctx, session, 'TARGET_USER_CONTEXT_INVALID');
+        throw forbidden('TARGET_USER_CONTEXT_INVALID');
+      }
+      const membership = await this.workspaceMemberships.findByIdInWorkspace(
+        session.targetWorkspaceId,
+        session.effectiveMembershipId,
+      );
+      if (!membership?.userId.equals(session.targetUserId) || membership.status !== 'ACTIVE') {
+        await this.securityTerminate(ctx, session, 'TARGET_USER_CONTEXT_INVALID');
+        throw forbidden('TARGET_USER_CONTEXT_INVALID');
+      }
+    }
     const params = (request.params ?? {}) as { workspaceId?: string };
     if (
       params.workspaceId &&
@@ -537,14 +563,13 @@ export class SupportAccessApplicationService {
     ) {
       throw forbidden('SUPPORT_SESSION_WORKSPACE_MISMATCH');
     }
-    const readLikeSignedDownload =
-      request.method === 'POST' &&
-      request.url.includes('/files/') &&
-      request.url.endsWith('/download-url');
-    if (!['GET', 'HEAD'].includes(request.method) && !readLikeSignedDownload) {
+    if (!supportReadOnlyOperation(request)) {
       throw forbidden(
         session.sessionType === 'READ_ONLY' ? 'SUPPORT_READ_ONLY' : 'SUPPORT_WRITE_NOT_WHITELISTED',
       );
+    }
+    if (supportSensitiveDataOperation(request) && !session.allowSensitiveData) {
+      throw forbidden('SUPPORT_SENSITIVE_DENIED');
     }
     void request.url;
   }
@@ -828,7 +853,7 @@ function policyDenial(
 
 function inputFromSession(session: SupportSessionDocument): NormalizedStartInput {
   return {
-    targetType: session.targetUserId ? 'STAFF' : 'GYM',
+    targetType: session.targetType ?? (session.targetUserId ? 'STAFF' : 'GYM'),
     ...(session.targetWorkspaceId ? { targetWorkspaceId: session.targetWorkspaceId } : {}),
     ...(session.targetUserId ? { targetUserId: session.targetUserId } : {}),
     ...(session.effectiveMembershipId
@@ -877,6 +902,21 @@ function validIpRange(range: string): boolean {
   if (family === 6) return false;
   const bits = Number(prefix);
   return Number.isInteger(bits) && bits >= 0 && bits <= 32;
+}
+
+function supportReadOnlyOperation(request: { method: string; url: string }): boolean {
+  if (['GET', 'HEAD'].includes(request.method)) return true;
+  if (request.method !== 'POST') return false;
+  return /^\/api\/v1\/workspaces\/[0-9a-f]{24}\/files\/[0-9a-f]{24}\/download-url(?:\?.*)?$/i.test(
+    request.url,
+  );
+}
+
+function supportSensitiveDataOperation(request: { method: string; url: string }): boolean {
+  if (request.method !== 'GET') return false;
+  return /^\/api\/v1\/workspaces\/[0-9a-f]{24}\/relationships\/[0-9a-f]{24}\/(?:progress-photos|health-profile|checkins(?:\/[0-9a-f]{24})?)(?:\?.*)?$/i.test(
+    request.url,
+  );
 }
 
 function ipMatches(ip: string, range: string): boolean {
@@ -952,6 +992,7 @@ function safeSession(session: SupportSessionDocument) {
     requestId: session.requestId.toHexString(),
     policyId: session.policyId.toHexString(),
     realActorPlatformMembershipId: session.realActorPlatformMembershipId.toHexString(),
+    targetType: session.targetType,
     targetWorkspaceId: session.targetWorkspaceId?.toHexString(),
     targetUserId: session.targetUserId?.toHexString(),
     effectiveMembershipId: session.effectiveMembershipId?.toHexString(),
@@ -979,6 +1020,7 @@ function safeSessionSnapshot(session: SupportSessionDocument): Record<string, un
 function effectiveContext(session: SupportSessionDocument) {
   return {
     contextType: session.contextType,
+    targetType: session.targetType,
     targetWorkspaceId: session.targetWorkspaceId?.toHexString(),
     targetUserId: session.targetUserId?.toHexString(),
     effectiveMembershipId: session.effectiveMembershipId?.toHexString(),

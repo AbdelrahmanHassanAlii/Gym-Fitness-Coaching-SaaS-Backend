@@ -388,12 +388,28 @@ describe('Stage 11 progress integration', () => {
       healthProfile: { medications: expect.any(Array), medicalNotes: expect.any(String) },
     });
     expect(
+      await db.collection('audit_events').countDocuments({
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        workspaceId: seed.workspaceObjectId,
+        'after.resourceType': 'health_profile',
+        'after.accessKind': 'read',
+      }),
+    ).toBe(1);
+    expect(
       await container.progress.getHealthProfile(
         nutritionist.ctx,
         seed.workspaceId,
         seed.relationshipId,
       ),
     ).toMatchObject({ healthProfile: { foodAllergies: expect.any(Array) } });
+    expect(
+      await db.collection('audit_events').countDocuments({
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        workspaceId: seed.workspaceObjectId,
+        'after.resourceType': 'health_profile_food_allergies',
+        'after.accessKind': 'read',
+      }),
+    ).toBe(1);
     expect(
       await container.progress.getHealthProfile(
         nutritionist.ctx,
@@ -430,6 +446,29 @@ describe('Stage 11 progress integration', () => {
         limit: 1,
       }),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  test('sensitive health-profile reads fail closed when audit evidence cannot be written', async () => {
+    const seed = await seedGym(container);
+    await container.progress.putHealthProfile(
+      seed.traineeCtx,
+      seed.workspaceId,
+      seed.relationshipId,
+      {
+        medicalNotes: 'private',
+      },
+    );
+    const originalAudit = container.audit.write.bind(container.audit);
+    container.audit.write = async () => {
+      throw new Error('audit failed');
+    };
+    try {
+      await expect(
+        container.progress.getHealthProfile(seed.trainerCtx, seed.workspaceId, seed.relationshipId),
+      ).rejects.toThrow('audit failed');
+    } finally {
+      container.audit.write = originalAudit;
+    }
   });
 
   test('CoachingNotes preserve PRIVATE author isolation, shared visibility, one-way sharing, archive, and audit rollback', async () => {
@@ -557,6 +596,14 @@ describe('Stage 11 progress integration', () => {
         expect.objectContaining({ visibility: 'TRAINER_VISIBLE' }),
       ]),
     });
+    expect(
+      await db.collection('audit_events').countDocuments({
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        workspaceId: seed.workspaceObjectId,
+        'after.resourceType': 'progress_photo_metadata',
+        'after.accessKind': 'list',
+      }),
+    ).toBe(1);
     expect(
       await container.progress.listProgressPhotos(
         seed.trainerCtx,

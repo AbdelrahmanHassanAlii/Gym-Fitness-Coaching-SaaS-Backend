@@ -388,18 +388,22 @@ export class ProgressApplicationService {
     const ids = await this.relationshipReadMaybePhoto(ctx, workspaceId, relationshipId);
     await this.entitlements.assert(ids.workspaceId, 'READ');
     const traineeSelf = isTraineeSelf(ctx, ids.relationship);
-    return pageByDate(
-      await this.progress.listProgressPhotos({
-        workspaceId: ids.workspaceId,
-        relationshipId: ids.relationship._id,
-        traineeSelf,
-        staffVisible: ids.staffVisible,
-        ...(query.limit !== undefined ? { limit: query.limit } : {}),
-        ...(query.cursor ? { cursor: decodeCapturedAtCursor(query.cursor) } : {}),
-      }),
-      safePhoto,
-      'capturedAt',
+    const photos = await this.progress.listProgressPhotos({
+      workspaceId: ids.workspaceId,
+      relationshipId: ids.relationship._id,
+      traineeSelf,
+      staffVisible: ids.staffVisible,
+      ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      ...(query.cursor ? { cursor: decodeCapturedAtCursor(query.cursor) } : {}),
+    });
+    await this.writeSensitiveReadAudit(
+      ctx,
+      ids.workspaceId,
+      'progress_photo_metadata',
+      ids.relationship._id,
+      'list',
     );
+    return pageByDate(photos, safePhoto, 'capturedAt');
   }
 
   async getHealthProfile(ctx: RequestContext, workspaceId: string, relationshipId: string) {
@@ -407,6 +411,13 @@ export class ProgressApplicationService {
     await this.entitlements.assert(ids.workspaceId, 'READ');
     const profile = await this.progress.findHealthProfile(ids.workspaceId, ids.relationship._id);
     if (!profile) return { healthProfile: null };
+    await this.writeSensitiveReadAudit(
+      ctx,
+      ids.workspaceId,
+      ids.fullHealth ? 'health_profile' : 'health_profile_food_allergies',
+      profile._id,
+      'read',
+    );
     return {
       healthProfile: ids.fullHealth ? safeHealth(profile) : safeFoodAllergies(profile),
     };
@@ -1054,6 +1065,31 @@ export class ProgressApplicationService {
       },
       tx,
     );
+  }
+
+  private async writeSensitiveReadAudit(
+    ctx: RequestContext,
+    workspaceId: ObjectId,
+    resourceType: string,
+    resourceId: ObjectId,
+    accessKind: string,
+  ) {
+    await this.audit.writeSensitiveResourceAccess({
+      workspaceId,
+      actor: {
+        userId: actorId(ctx),
+        ...(ctx.workspaceMembershipId
+          ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
+          : {}),
+      },
+      entity: { type: resourceType, id: resourceId },
+      resourceType,
+      resourceId,
+      accessKind,
+      ipAddress: ctx.ipAddress,
+      ...(ctx.userAgent ? { userAgent: ctx.userAgent } : {}),
+      correlationId: ctx.correlationId,
+    });
   }
 
   private async writeOutbox(

@@ -239,11 +239,13 @@ describe('Stage 16 policy lifecycle and IP/CIDR validation', () => {
     async () => {
       const admin = await seedPlatformActor([
         Permissions.SupportPoliciesCreate,
+        Permissions.SupportPoliciesUpdate,
         Permissions.SupportSensitiveRead,
         Permissions.SupportSensitiveFilesRead,
       ]);
       const supportActor = await seedPlatformActor([Permissions.SupportSessionsStart]);
       const token = await tokenFor(admin.userId);
+      let updateTargetPolicyId = '';
 
       for (const range of ['127.0.0.1', '127.0.0.0/24', '127.0.0.1/32', '::1']) {
         const response = await appInstance().inject({
@@ -253,6 +255,7 @@ describe('Stage 16 policy lifecycle and IP/CIDR validation', () => {
           payload: policyBody(supportActor.membershipId, { allowedIpRanges: [range] }),
         });
         expect(response.statusCode).toBe(200);
+        updateTargetPolicyId ||= response.json().data.id;
       }
 
       for (const range of ['127.0.0.1/33', 'bad-cidr', '2001:db8::/32']) {
@@ -264,6 +267,17 @@ describe('Stage 16 policy lifecycle and IP/CIDR validation', () => {
         });
         expect(response.statusCode).toBe(422);
       }
+
+      const rejectedUpdate = await appInstance().inject({
+        method: 'PATCH',
+        url: `/api/v1/platform/support/policies/${updateTargetPolicyId}`,
+        headers: bearer(token),
+        payload: {
+          ...policyBody(supportActor.membershipId, { allowedIpRanges: ['2001:db8::/32'] }),
+          expectedVersion: 0,
+        },
+      });
+      expect(rejectedUpdate.statusCode).toBe(422);
 
       await seedWorkspace(new ObjectId());
       await seedPolicy(supportActor.membershipId, { allowedIpRanges: ['203.0.113.9'] });
@@ -341,6 +355,161 @@ describe('Stage 16 access requests, runtime guard, and lifecycle', () => {
       expect(
         await collectionCount('audit_events', { eventType: 'SupportAccessRequestDenied' }),
       ).toBe(1);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'access request denial matrix distinguishes pre-decision failures from persisted policy denials',
+    async () => {
+      const preDecisionCases = [
+        {
+          name: 'missing reason',
+          permissions: [Permissions.SupportSessionsStart],
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({ ...payload, reason: ' ' }),
+          expectedStatus: 400,
+        },
+        {
+          name: 'missing support.sessions.start',
+          permissions: [],
+          expectedStatus: 403,
+        },
+        {
+          name: 'Stage 4 DENY',
+          permissions: [{ permission: Permissions.SupportSessionsStart, effect: 'DENY' as const }],
+          expectedStatus: 403,
+        },
+      ];
+
+      for (const testCase of preDecisionCases) {
+        await clearBusinessCollections();
+        const workspaceId = new ObjectId();
+        await seedWorkspace(workspaceId);
+        const actor = await seedPlatformActor(testCase.permissions);
+        await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+        const token = await tokenFor(actor.userId);
+        const payload = testCase.mutatePayload
+          ? testCase.mutatePayload(startBody(workspaceId))
+          : startBody(workspaceId);
+
+        const response = await startSupport(token, new ObjectId().toHexString(), payload);
+        expect(response.statusCode, testCase.name).toBe(testCase.expectedStatus);
+        expect(await collectionCount('support_access_requests'), testCase.name).toBe(0);
+        expect(await collectionCount('support_sessions'), testCase.name).toBe(0);
+      }
+
+      const persistedDenialCases = [
+        {
+          name: 'no policy',
+          seed: async (_actorMembershipId: ObjectId, _workspaceId: ObjectId) => {},
+          mutatePayload: (payload: ReturnType<typeof startBody>) => payload,
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'wrong IP',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, {
+              allowedWorkspaceIds: [workspaceId],
+              allowedIpRanges: ['203.0.113.10'],
+            });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => payload,
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'target workspace not allowed',
+          seed: async (actorMembershipId: ObjectId, _workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, { allowedWorkspaceIds: [new ObjectId()] });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => payload,
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'unsupported context type target',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, { allowedWorkspaceIds: [workspaceId] });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({
+            ...payload,
+            contextType: 'USER_CONTEXT' as const,
+          }),
+          expectedCode: 'TARGET_USER_CONTEXT_INVALID',
+        },
+        {
+          name: 'unsupported mode',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, { allowedWorkspaceIds: [workspaceId] });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({
+            ...payload,
+            sessionType: 'WRITE_SUPPORT' as const,
+          }),
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'duration too long',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, { allowedWorkspaceIds: [workspaceId] });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({
+            ...payload,
+            requestedDurationMinutes: 31,
+          }),
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'sensitive access beyond policy',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, { allowedWorkspaceIds: [workspaceId] });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({
+            ...payload,
+            requestedSensitiveAccess: true,
+          }),
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+        {
+          name: 'file access beyond policy',
+          seed: async (actorMembershipId: ObjectId, workspaceId: ObjectId) => {
+            await seedPolicy(actorMembershipId, {
+              allowedWorkspaceIds: [workspaceId],
+              allowSensitiveData: true,
+            });
+          },
+          mutatePayload: (payload: ReturnType<typeof startBody>) => ({
+            ...payload,
+            requestedSensitiveAccess: true,
+            requestedSensitiveFileDownload: true,
+          }),
+          expectedCode: 'POLICY_NOT_FOUND',
+        },
+      ];
+
+      for (const testCase of persistedDenialCases) {
+        await clearBusinessCollections();
+        const workspaceId = new ObjectId();
+        await seedWorkspace(workspaceId);
+        const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+        await testCase.seed(actor.membershipId, workspaceId);
+        const token = await tokenFor(actor.userId);
+
+        const response = await startSupport(
+          token,
+          new ObjectId().toHexString(),
+          testCase.mutatePayload(startBody(workspaceId)),
+        );
+        expect(response.statusCode, testCase.name).toBe(403);
+        expect(response.json().error.code, testCase.name).toBe(testCase.expectedCode);
+        expect(
+          await collectionCount('support_access_requests', { decision: 'DENIED' }),
+          testCase.name,
+        ).toBe(1);
+        expect(await collectionCount('support_sessions'), testCase.name).toBe(0);
+        expect(
+          await collectionCount('audit_events', { eventType: 'SupportAccessRequestDenied' }),
+          testCase.name,
+        ).toBe(1);
+      }
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -627,6 +796,386 @@ describe('Stage 16 access requests, runtime guard, and lifecycle', () => {
 
 describe('Stage 16 sensitive access and failure injection', () => {
   test(
+    'actual Stage 11 progress photo and health routes enforce support sensitive gates and audit real/effective context',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+
+      const photos = await sourceGet(
+        token,
+        sessionId,
+        `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/progress-photos`,
+      );
+      expect(photos.statusCode).toBe(200);
+      expect(JSON.stringify(photos.json())).not.toContain('https://');
+
+      const health = await sourceGet(
+        token,
+        sessionId,
+        `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/health-profile`,
+      );
+      expect(health.statusCode).toBe(200);
+      expect(JSON.stringify(health.json())).toContain('knee injury');
+
+      const audit = await appContainer()
+        .database.db.collection('audit_events')
+        .find({ supportSessionId: new ObjectId(sessionId) })
+        .toArray();
+      expect(audit).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            resourceType: 'progress_photo_metadata',
+            actor: expect.objectContaining({
+              userId: actor.userId,
+              platformMembershipId: actor.membershipId,
+              workspaceMembershipId: fixture.trainer.membershipId,
+            }),
+            effectiveContext: expect.objectContaining({
+              targetWorkspaceId: fixture.workspaceId.toHexString(),
+              effectiveUserId: fixture.trainer.userId.toHexString(),
+              effectiveMembershipId: fixture.trainer.membershipId.toHexString(),
+            }),
+          }),
+          expect.objectContaining({ resourceType: 'health_profile' }),
+        ]),
+      );
+
+      await setPlatformPermissions(actor.profileId, [Permissions.SupportSessionsStart]);
+      expect(
+        (
+          await sourceGet(
+            token,
+            sessionId,
+            `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/health-profile`,
+          )
+        ).statusCode,
+      ).toBe(403);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'actual Stage 11 support reads fail closed for policy allowance, revoked or expired session, wrong workspace, DENY, and audit failure',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+      const healthUrl = `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/health-profile`;
+
+      await appContainer()
+        .database.db.collection('portal_access_policies')
+        .updateOne({}, { $set: { allowSensitiveData: false } });
+      expect((await sourceGet(token, sessionId, healthUrl)).statusCode).toBe(403);
+
+      await appContainer()
+        .database.db.collection('portal_access_policies')
+        .updateOne({}, { $set: { allowSensitiveData: true } });
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne({ _id: new ObjectId(sessionId) }, { $set: { status: 'REVOKED' } });
+      expect((await sourceGet(token, sessionId, healthUrl)).statusCode).toBe(403);
+
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne(
+          { _id: new ObjectId(sessionId) },
+          { $set: { status: 'ACTIVE', expiresAt: new Date(Date.now() - 1000) } },
+        );
+      expect((await sourceGet(token, sessionId, healthUrl)).statusCode).toBe(403);
+
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne(
+          { _id: new ObjectId(sessionId) },
+          { $set: { expiresAt: new Date(Date.now() + 60_000) } },
+        );
+      expect(
+        (
+          await sourceGet(
+            token,
+            sessionId,
+            `/api/v1/workspaces/${fixture.otherWorkspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/health-profile`,
+          )
+        ).statusCode,
+      ).toBe(403);
+
+      await setWorkspacePermissions(fixture.trainer.profileId, [
+        Permissions.ProgressPhotosRead,
+        { permission: Permissions.HealthRead, effect: 'DENY' },
+      ]);
+      expect((await sourceGet(token, sessionId, healthUrl)).statusCode).toBe(403);
+
+      await setWorkspacePermissions(fixture.trainer.profileId, [
+        Permissions.ProgressPhotosRead,
+        Permissions.HealthRead,
+      ]);
+      const original = appContainer().audit.writeSensitiveResourceAccess.bind(appContainer().audit);
+      (
+        appContainer().audit as unknown as { writeSensitiveResourceAccess: unknown }
+      ).writeSensitiveResourceAccess = async () => {
+        throw new Error('sensitive audit failed');
+      };
+      try {
+        expect((await sourceGet(token, sessionId, healthUrl)).statusCode).toBe(500);
+      } finally {
+        (
+          appContainer().audit as unknown as { writeSensitiveResourceAccess: unknown }
+        ).writeSensitiveResourceAccess = original;
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'actual Stage 12 list and detail routes enforce support sensitive gates, source visibility, and audit failure withholding',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+      const listUrl = `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/checkins`;
+      const detailUrl = `${listUrl}/${fixture.checkinId.toHexString()}`;
+
+      const list = await sourceGet(token, sessionId, listUrl);
+      expect(list.statusCode).toBe(200);
+      expect(JSON.stringify(list.json())).toContain('sensitive free text');
+      const detail = await sourceGet(token, sessionId, detailUrl);
+      expect(detail.statusCode).toBe(200);
+
+      await setPlatformPermissions(actor.profileId, [Permissions.SupportSessionsStart]);
+      expect((await sourceGet(token, sessionId, listUrl)).statusCode).toBe(403);
+
+      await setPlatformPermissions(actor.profileId, [
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne({ _id: new ObjectId(sessionId) }, { $set: { allowSensitiveData: false } });
+      expect((await sourceGet(token, sessionId, detailUrl)).statusCode).toBe(403);
+
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne({ _id: new ObjectId(sessionId) }, { $set: { allowSensitiveData: true } });
+      const original = appContainer().audit.writeSensitiveResourceAccess.bind(appContainer().audit);
+      (
+        appContainer().audit as unknown as { writeSensitiveResourceAccess: unknown }
+      ).writeSensitiveResourceAccess = async () => {
+        throw new Error('sensitive audit failed');
+      };
+      try {
+        expect((await sourceGet(token, sessionId, detailUrl)).statusCode).toBe(500);
+      } finally {
+        (
+          appContainer().audit as unknown as { writeSensitiveResourceAccess: unknown }
+        ).writeSensitiveResourceAccess = original;
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'actual Stage 13 sensitive signed-download route requires every support layer and never returns URL on audit failure',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+        Permissions.SupportSensitiveFilesRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+        allowSensitiveFileDownload: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+        true,
+      );
+      const url = `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/files/${fixture.fileId.toHexString()}/download-url`;
+
+      const success = await sourcePost(token, sessionId, url);
+      expect(success.statusCode).toBe(200);
+      expect(success.json().data.url).toContain('http');
+
+      await setPlatformPermissions(actor.profileId, [
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      const missingFilePermission = await sourcePost(token, sessionId, url);
+      expect(missingFilePermission.statusCode).toBe(403);
+      expect(JSON.stringify(missingFilePermission.json())).not.toContain('X-Amz-Signature');
+
+      await setPlatformPermissions(actor.profileId, [
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+        Permissions.SupportSensitiveFilesRead,
+      ]);
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne(
+          { _id: new ObjectId(sessionId) },
+          { $set: { allowSensitiveFileDownload: false } },
+        );
+      expect((await sourcePost(token, sessionId, url)).statusCode).toBe(403);
+
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne(
+          { _id: new ObjectId(sessionId) },
+          { $set: { allowSensitiveFileDownload: true } },
+        );
+      const original = appContainer().audit.write.bind(appContainer().audit);
+      (appContainer().audit as unknown as { write: unknown }).write = async () => {
+        throw new Error('audit failed after mint');
+      };
+      try {
+        const failed = await sourcePost(token, sessionId, url);
+        expect(failed.statusCode).toBe(500);
+        expect(JSON.stringify(failed.json())).not.toContain('X-Amz-Signature');
+        expect(
+          JSON.stringify(
+            await appContainer().database.db.collection('audit_events').find({}).toArray(),
+          ),
+        ).not.toContain('X-Amz-Signature');
+        expect(
+          JSON.stringify(
+            await appContainer().database.db.collection('outbox_events').find({}).toArray(),
+          ),
+        ).not.toContain('X-Amz-Signature');
+      } finally {
+        (appContainer().audit as unknown as { write: unknown }).write = original;
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'support header on actual source routes requires platform bearer ownership, exact workspace, and READ_ONLY allowlisted operation',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+        Permissions.SupportSensitiveFilesRead,
+      ]);
+      const otherActor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+        Permissions.SupportSensitiveFilesRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+        allowSensitiveFileDownload: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+        true,
+      );
+      const downloadUrl = `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/files/${fixture.fileId.toHexString()}/download-url`;
+
+      expect((await sourcePost(token, sessionId, downloadUrl)).statusCode).toBe(200);
+      expect((await sourcePost(token, 'not-an-id', downloadUrl)).statusCode).toBe(422);
+      expect((await sourcePost('', sessionId, downloadUrl)).statusCode).toBe(401);
+      expect(
+        (await sourcePost(await tokenFor(otherActor.userId), sessionId, downloadUrl)).statusCode,
+      ).toBe(403);
+      expect(
+        (
+          await sourcePost(
+            token,
+            sessionId,
+            `/api/v1/workspaces/${fixture.otherWorkspaceId.toHexString()}/files/${fixture.fileId.toHexString()}/download-url`,
+          )
+        ).statusCode,
+      ).toBe(403);
+      expect(
+        (
+          await appInstance().inject({
+            method: 'POST',
+            url: `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/files/${fixture.fileId.toHexString()}/not-download-url`,
+            headers: { ...bearer(token), 'X-Support-Session-Id': sessionId },
+          })
+        ).statusCode,
+      ).toBe(403);
+      expect(
+        (
+          await appInstance().inject({
+            method: 'DELETE',
+            url: `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/files/${fixture.fileId.toHexString()}`,
+            headers: { ...bearer(token), 'X-Support-Session-Id': sessionId },
+            payload: { expectedVersion: 0 },
+          })
+        ).statusCode,
+      ).toBe(403);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
     'sensitive support checks require platform permission, policy allowance, and active session',
     async () => {
       const workspaceId = new ObjectId();
@@ -742,7 +1291,486 @@ describe('Stage 16 sensitive access and failure injection', () => {
     },
     INTEGRATION_TIMEOUT_MS,
   );
+
+  test(
+    'request and session insert failures do not leave partial approved support evidence',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+
+      await withPatchedMethod(
+        appContainer().supportAccessRepo,
+        'insertRequest',
+        async () => {
+          throw new Error('request insert failed');
+        },
+        async () => {
+          const failed = await startSupport(
+            token,
+            new ObjectId().toHexString(),
+            startBody(workspaceId),
+          );
+          expect(failed.statusCode).toBe(500);
+          expect(await collectionCount('support_access_requests')).toBe(0);
+          expect(await collectionCount('support_sessions')).toBe(0);
+          expect(
+            await collectionCount('audit_events', { eventType: 'SupportSessionStarted' }),
+          ).toBe(0);
+          expect(
+            await collectionCount('outbox_events', { eventType: 'SupportSessionStarted' }),
+          ).toBe(0);
+        },
+      );
+
+      await withPatchedMethod(
+        appContainer().supportAccessRepo,
+        'insertSession',
+        async () => {
+          throw new Error('session insert failed');
+        },
+        async () => {
+          const failed = await startSupport(
+            token,
+            new ObjectId().toHexString(),
+            startBody(workspaceId),
+          );
+          expect(failed.statusCode).toBe(500);
+          expect(await collectionCount('support_access_requests')).toBe(0);
+          expect(await collectionCount('support_sessions')).toBe(0);
+          expect(
+            await collectionCount('audit_events', { eventType: 'SupportSessionStarted' }),
+          ).toBe(0);
+          expect(
+            await collectionCount('outbox_events', { eventType: 'SupportSessionStarted' }),
+          ).toBe(0);
+        },
+      );
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'denied request audit failure rolls back denial evidence instead of committing misleading partial state',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      const token = await tokenFor(actor.userId);
+
+      await withPatchedMethod(
+        appContainer().audit,
+        'write',
+        async () => {
+          throw new Error('denied audit failed');
+        },
+        async () => {
+          const denied = await startSupport(
+            token,
+            new ObjectId().toHexString(),
+            startBody(workspaceId),
+          );
+          expect(denied.statusCode).toBe(500);
+          expect(await collectionCount('support_access_requests')).toBe(0);
+          expect(await collectionCount('support_sessions')).toBe(0);
+        },
+      );
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'policy disable and archive rollback when dependent-session revocation fails',
+    async () => {
+      for (const action of ['disable', 'archive'] as const) {
+        await clearBusinessCollections();
+        const workspaceId = new ObjectId();
+        await seedWorkspace(workspaceId);
+        const actor = await seedPlatformActor([
+          Permissions.SupportSessionsStart,
+          Permissions.SupportPoliciesDisable,
+          Permissions.SupportPoliciesArchive,
+        ]);
+        const policy = await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+        const token = await tokenFor(actor.userId);
+        const sessionId = await startAndSessionId(token, workspaceId);
+
+        await withPatchedMethod(
+          appContainer().supportAccessRepo,
+          'revokeActiveByPolicy',
+          async () => {
+            throw new Error(`${action} revocation failed`);
+          },
+          async () => {
+            const response = await appInstance().inject({
+              method: 'POST',
+              url: `/api/v1/platform/support/policies/${policy._id.toHexString()}/${action}`,
+              headers: bearer(token),
+              payload: { expectedVersion: 0 },
+            });
+            expect(response.statusCode).toBe(500);
+          },
+        );
+
+        const persistedPolicy = await appContainer()
+          .database.db.collection('portal_access_policies')
+          .findOne({ _id: policy._id });
+        const persistedSession = await supportSession(sessionId);
+        expect(persistedPolicy).toMatchObject({ enabled: true, revision: 0 });
+        expect(persistedPolicy?.archivedAt).toBeUndefined();
+        expect(persistedSession?.status).toBe('ACTIVE');
+        expect(
+          await collectionCount('audit_events', { eventType: 'PortalAccessPolicyChanged' }),
+        ).toBe(0);
+        expect(
+          await collectionCount('outbox_events', { eventType: 'PortalAccessPolicyChanged' }),
+        ).toBe(0);
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'policy update audit failure rolls back policy revision and mutation',
+    async () => {
+      const admin = await seedPlatformActor([
+        Permissions.SupportPoliciesUpdate,
+        Permissions.SupportSensitiveRead,
+      ]);
+      const supportActor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      const policy = await seedPolicy(supportActor.membershipId, {});
+      const token = await tokenFor(admin.userId);
+
+      await withPatchedMethod(
+        appContainer().audit,
+        'write',
+        async () => {
+          throw new Error('policy update audit failed');
+        },
+        async () => {
+          const response = await appInstance().inject({
+            method: 'PATCH',
+            url: `/api/v1/platform/support/policies/${policy._id.toHexString()}`,
+            headers: bearer(token),
+            payload: {
+              ...policyBody(supportActor.membershipId, { allowSensitiveData: true }),
+              expectedVersion: 0,
+            },
+          });
+          expect(response.statusCode).toBe(500);
+        },
+      );
+
+      const persisted = await appContainer()
+        .database.db.collection('portal_access_policies')
+        .findOne({ _id: policy._id });
+      expect(persisted).toMatchObject({ revision: 0, allowSensitiveData: false });
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'session end and revoke audit or outbox failures roll back terminal transitions',
+    async () => {
+      for (const command of ['end', 'revoke'] as const) {
+        for (const dependency of ['audit', 'outbox'] as const) {
+          await clearBusinessCollections();
+          const workspaceId = new ObjectId();
+          await seedWorkspace(workspaceId);
+          const actor = await seedPlatformActor([
+            Permissions.SupportSessionsStart,
+            Permissions.SupportSessionsEndOwn,
+            Permissions.SupportSessionsRevoke,
+          ]);
+          await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+          const token = await tokenFor(actor.userId);
+          const sessionId = await startAndSessionId(token, workspaceId);
+
+          const target = dependency === 'audit' ? appContainer().audit : appContainer().outbox;
+          await withPatchedMethod(
+            target,
+            'write',
+            async () => {
+              throw new Error(`${command} ${dependency} failed`);
+            },
+            async () => {
+              const response = await appInstance().inject({
+                method: 'POST',
+                url: `/api/v1/platform/support/sessions/${sessionId}/${command}`,
+                headers: bearer(token),
+                payload: { expectedVersion: 0 },
+              });
+              expect(response.statusCode).toBe(500);
+            },
+          );
+
+          expect((await supportSession(sessionId))?.status).toBe('ACTIVE');
+          expect(
+            await collectionCount('audit_events', {
+              eventType: command === 'end' ? 'SupportSessionEnded' : 'SupportSessionRevoked',
+            }),
+          ).toBe(0);
+          expect(
+            await collectionCount('outbox_events', {
+              eventType: command === 'end' ? 'SupportSessionEnded' : 'SupportSessionRevoked',
+            }),
+          ).toBe(0);
+        }
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'expiry job releases leases and retries safely after audit, outbox, or mid-batch failure',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+
+      const auditFailure = await startAndSessionId(token, workspaceId);
+      await expireSessionNow(auditFailure);
+      await withPatchedMethod(
+        appContainer().audit,
+        'write',
+        async () => {
+          throw new Error('expiry audit failed');
+        },
+        async () => {
+          await expect(
+            appContainer().supportAccess.expireDue(appContainer().jobLeases, 10),
+          ).rejects.toThrow('expiry audit failed');
+        },
+      );
+      expect((await supportSession(auditFailure))?.status).toBe('ACTIVE');
+      expect(await appContainer().supportAccess.expireDue(appContainer().jobLeases, 10)).toBe(1);
+      expect((await supportSession(auditFailure))?.status).toBe('EXPIRED');
+
+      const outboxFailure = await startAndSessionId(token, workspaceId);
+      await expireSessionNow(outboxFailure);
+      await withPatchedMethod(
+        appContainer().outbox,
+        'write',
+        async () => {
+          throw new Error('expiry outbox failed');
+        },
+        async () => {
+          await expect(
+            appContainer().supportAccess.expireDue(appContainer().jobLeases, 10),
+          ).rejects.toThrow('expiry outbox failed');
+        },
+      );
+      expect((await supportSession(outboxFailure))?.status).toBe('ACTIVE');
+      expect(await appContainer().supportAccess.expireDue(appContainer().jobLeases, 10)).toBe(1);
+
+      const first = await startAndSessionId(token, workspaceId);
+      const second = await startAndSessionId(token, workspaceId);
+      await expireSessionNow(first, -2_000);
+      await expireSessionNow(second, -1_000);
+      let writes = 0;
+      const originalOutboxWrite = appContainer().outbox.write.bind(appContainer().outbox);
+      await withPatchedMethod(
+        appContainer().outbox,
+        'write',
+        async (event, tx) => {
+          writes += 1;
+          if (writes === 2) throw new Error('mid batch outbox failed');
+          await originalOutboxWrite(event, tx);
+        },
+        async () => {
+          await expect(
+            appContainer().supportAccess.expireDue(appContainer().jobLeases, 10),
+          ).rejects.toThrow('mid batch outbox failed');
+        },
+      );
+      expect((await supportSession(first))?.status).toBe('EXPIRED');
+      expect((await supportSession(second))?.status).toBe('ACTIVE');
+      expect(await appContainer().supportAccess.expireDue(appContainer().jobLeases, 10)).toBe(1);
+      expect((await supportSession(second))?.status).toBe('EXPIRED');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'runtime resolver, parent auth, and platform evaluator dependency failures fail closed',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+      const sessionId = await startAndSessionId(token, workspaceId);
+
+      await withPatchedMethod(
+        appContainer().supportAccessRepo,
+        'findSessionById',
+        async () => {
+          throw new Error('session db unavailable');
+        },
+        async () => {
+          expect(await supportRead(token, sessionId, workspaceId)).toBe(500);
+        },
+      );
+
+      await withPatchedMethod(
+        appContainer().authSessions,
+        'findActive',
+        async () => {
+          throw new Error('auth db unavailable');
+        },
+        async () => {
+          expect(await supportRead(token, sessionId, workspaceId)).toBe(500);
+        },
+      );
+
+      await withPatchedMethod(
+        appContainer().accessControl,
+        'authorize',
+        async () => {
+          throw new Error('access evaluator unavailable');
+        },
+        async () => {
+          expect(await supportRead(token, sessionId, workspaceId)).toBe(500);
+        },
+      );
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'runtime USER_CONTEXT revalidates target user and effective membership freshness',
+    async () => {
+      const fixture = await seedSensitiveSourceFixture();
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportSensitiveRead,
+      ]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [fixture.workspaceId],
+        allowSensitiveData: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const url = `/api/v1/workspaces/${fixture.workspaceId.toHexString()}/relationships/${fixture.relationshipId.toHexString()}/health-profile`;
+
+      const targetSwap = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne({ _id: new ObjectId(targetSwap) }, { $set: { targetUserId: new ObjectId() } });
+      expect((await sourceGet(token, targetSwap, url)).statusCode).toBe(403);
+      expect((await supportSession(targetSwap))?.status).toBe('SECURITY_TERMINATED');
+
+      const fabricatedMembership = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+      await appContainer()
+        .database.db.collection('support_sessions')
+        .updateOne(
+          { _id: new ObjectId(fabricatedMembership) },
+          { $set: { effectiveMembershipId: new ObjectId() } },
+        );
+      expect((await sourceGet(token, fabricatedMembership, url)).statusCode).toBe(403);
+      expect((await supportSession(fabricatedMembership))?.status).toBe('SECURITY_TERMINATED');
+
+      const inactiveMembership = await startAndSessionId(
+        token,
+        fixture.workspaceId,
+        'READ_ONLY',
+        'USER_CONTEXT',
+        fixture.trainer.userId,
+        fixture.trainer.membershipId,
+        true,
+      );
+      await appContainer()
+        .database.db.collection('workspace_memberships')
+        .updateOne({ _id: fixture.trainer.membershipId }, { $set: { status: 'SUSPENDED' } });
+      expect((await sourceGet(token, inactiveMembership, url)).statusCode).toBe(403);
+      expect((await supportSession(inactiveMembership))?.status).toBe('SECURITY_TERMINATED');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'platform membership deactivation and runtime IP change deny and security-terminate active support sessions',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+
+      const deactivated = await startAndSessionId(token, workspaceId);
+      await appContainer()
+        .database.db.collection('platform_memberships')
+        .updateOne({ _id: actor.membershipId }, { $set: { status: 'SUSPENDED' } });
+      expect(await supportRead(token, deactivated, workspaceId)).toBe(403);
+
+      await appContainer()
+        .database.db.collection('platform_memberships')
+        .updateOne({ _id: actor.membershipId }, { $set: { status: 'ACTIVE' } });
+      const ipChanged = await startAndSessionId(token, workspaceId);
+      const changedIp = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspaceId.toHexString()}/audit`,
+        headers: { ...bearer(token), 'X-Support-Session-Id': ipChanged },
+        remoteAddress: '127.0.0.2',
+      });
+      expect(changedIp.statusCode).toBe(403);
+      expect((await supportSession(ipChanged))?.status).toBe('SECURITY_TERMINATED');
+      expect(await supportRead(token, ipChanged, workspaceId)).toBe(403);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
 });
+
+async function clearBusinessCollections() {
+  const collections = await appContainer().database.db.listCollections().toArray();
+  for (const collection of collections) {
+    if (collection.name === 'db_migrations') continue;
+    await appContainer().database.db.collection(collection.name).deleteMany({});
+  }
+}
+
+async function withPatchedMethod<T extends object>(
+  target: T,
+  method: keyof T,
+  replacement: T[keyof T],
+  run: () => Promise<void>,
+) {
+  const original = target[method];
+  target[method] = replacement;
+  try {
+    await run();
+  } finally {
+    target[method] = original;
+  }
+}
+
+async function expireSessionNow(sessionId: string, offsetMs = -1000) {
+  await appContainer()
+    .database.db.collection('support_sessions')
+    .updateOne(
+      { _id: new ObjectId(sessionId) },
+      { $set: { expiresAt: new Date(Date.now() + offsetMs) } },
+    );
+}
 
 const stage16Permissions = [
   Permissions.SupportPoliciesRead,
@@ -811,6 +1839,15 @@ async function setPlatformPermissions(
     .updateOne({ _id: profileId }, { $set: { permissions: normalizePermissions(permissions) } });
 }
 
+async function setWorkspacePermissions(
+  profileId: ObjectId,
+  permissions: Array<string | { permission: string; effect: 'ALLOW' | 'DENY' }>,
+) {
+  await appContainer()
+    .database.db.collection('permission_profiles')
+    .updateOne({ _id: profileId }, { $set: { permissions: normalizePermissions(permissions) } });
+}
+
 function normalizePermissions(
   permissions: Array<string | { permission: string; effect: 'ALLOW' | 'DENY' }>,
 ) {
@@ -854,6 +1891,9 @@ async function seedWorkspaceUser(
   workspaceId: ObjectId,
   role: string,
   status: 'ACTIVE' | 'SUSPENDED',
+  permissions: Array<string | { permission: string; effect: 'ALLOW' | 'DENY' }> = [
+    Permissions.AuditWorkspaceRead,
+  ],
 ) {
   const userId = new ObjectId();
   const membershipId = new ObjectId();
@@ -873,7 +1913,7 @@ async function seedWorkspaceUser(
       context: 'WORKSPACE',
       workspaceId,
       name: `Stage 16 Workspace Profile ${profileId.toHexString()}`,
-      permissions: [{ permission: Permissions.AuditWorkspaceRead, effect: 'ALLOW' }],
+      permissions: normalizePermissions(permissions),
       isSystemDefault: false,
       status: 'ACTIVE',
       version: 0,
@@ -896,6 +1936,242 @@ async function seedWorkspaceUser(
       updatedAt: new Date(),
     });
   return { userId, membershipId, profileId };
+}
+
+async function seedSensitiveSourceFixture() {
+  const workspaceId = new ObjectId();
+  const otherWorkspaceId = new ObjectId();
+  await seedWorkspace(workspaceId);
+  await seedWorkspace(otherWorkspaceId);
+  await seedActiveSubscription(workspaceId);
+  await seedActiveSubscription(otherWorkspaceId);
+  const trainee = await seedWorkspaceUser(workspaceId, 'TRAINEE', 'ACTIVE');
+  const trainer = await seedWorkspaceUser(workspaceId, 'TRAINER', 'ACTIVE', [
+    Permissions.ProgressPhotosRead,
+    Permissions.HealthRead,
+    Permissions.CheckInsRead,
+    Permissions.FilesDownload,
+    Permissions.MedicalDocumentsDownload,
+  ]);
+  const relationshipId = new ObjectId();
+  const assignmentId = new ObjectId();
+  const now = new Date();
+  await appContainer()
+    .database.db.collection('coaching_relationships')
+    .insertOne({
+      _id: relationshipId,
+      workspaceId,
+      traineeUserId: trainee.userId,
+      traineeMembershipId: trainee.membershipId,
+      status: 'ACTIVE',
+      currentPrimaryTrainerAssignmentId: assignmentId,
+      engagementPeriods: [{ startedAt: now }],
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  await appContainer().database.db.collection('trainee_staff_assignments').insertOne({
+    _id: assignmentId,
+    workspaceId,
+    relationshipId,
+    staffMembershipId: trainer.membershipId,
+    assignmentType: 'PRIMARY_TRAINER',
+    active: true,
+    startedAt: now,
+    assignedBy: trainer.userId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await appContainer()
+    .database.db.collection('progress_photo_entries')
+    .insertOne({
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      capturedAt: now,
+      visibility: 'TRAINER_VISIBLE',
+      photos: [{ type: 'FRONT', fileId: new ObjectId() }],
+      createdBy: trainee.userId,
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  await appContainer()
+    .database.db.collection('trainee_health_profiles')
+    .insertOne({
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      injuries: ['knee injury'],
+      physicalLimitations: ['no jumping'],
+      foodAllergies: ['peanuts'],
+      medications: ['medication detail'],
+      medicalNotes: 'private medical note',
+      emergencyNotes: 'private emergency note',
+      version: 0,
+      updatedBy: trainee.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  const templateId = new ObjectId();
+  const revisionId = new ObjectId();
+  const assignmentCheckinId = new ObjectId();
+  const checkinId = new ObjectId();
+  await appContainer().database.db.collection('checkin_templates').insertOne({
+    _id: templateId,
+    workspaceId,
+    ownerMembershipId: trainer.membershipId,
+    name: 'Sensitive Check-In',
+    normalizedName: 'sensitive check-in',
+    currentRevisionId: revisionId,
+    status: 'ACTIVE',
+    version: 0,
+    templateUseRevision: 0,
+    createdBy: trainer.userId,
+    updatedBy: trainer.userId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await appContainer()
+    .database.db.collection('checkin_template_revisions')
+    .insertOne({
+      _id: revisionId,
+      workspaceId,
+      templateId,
+      revision: 1,
+      fields: [{ fieldKey: 'notes', type: 'LONG_TEXT', label: 'Notes', required: true }],
+      createdBy: trainer.userId,
+      createdAt: now,
+    });
+  await appContainer()
+    .database.db.collection('checkin_assignments')
+    .insertOne({
+      _id: assignmentCheckinId,
+      workspaceId,
+      relationshipId,
+      templateId,
+      recurrence: { frequency: 'WEEKLY', dayOfWeek: 1, timezone: 'Africa/Cairo' },
+      active: true,
+      version: 0,
+      assignmentUseRevision: 0,
+      startedAt: now,
+      createdBy: trainer.userId,
+      updatedBy: trainer.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  await appContainer()
+    .database.db.collection('checkin_instances')
+    .insertOne({
+      _id: checkinId,
+      workspaceId,
+      relationshipId,
+      assignmentId: assignmentCheckinId,
+      templateId,
+      templateRevisionId: revisionId,
+      status: 'SUBMITTED',
+      submittedAt: now,
+      responses: [{ fieldKey: 'notes', value: 'sensitive free text' }],
+      periodKey: '2026-W38',
+      periodStartAt: now,
+      periodEndAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      opensAt: now,
+      dueAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+      timezone: 'Africa/Cairo',
+      dayOfWeek: 1,
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  const fileId = new ObjectId();
+  const uploadIntentId = new ObjectId();
+  await appContainer()
+    .database.db.collection('files')
+    .insertOne({
+      _id: fileId,
+      workspaceId,
+      uploadIntentId,
+      uploaderUserId: trainee.userId,
+      uploaderMembershipId: trainee.membershipId,
+      subjectType: 'COACHING_RELATIONSHIP',
+      subjectId: relationshipId,
+      storageProvider: 'fake',
+      storageKey: `workspaces/${workspaceId.toHexString()}/support-sensitive.pdf`,
+      originalName: 'support-sensitive.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 1234,
+      classification: 'SENSITIVE',
+      status: 'ACTIVE',
+      version: 0,
+      createdAt: now,
+      confirmedAt: now,
+    });
+  await appContainer().database.db.collection('documents').insertOne({
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    fileId,
+    category: 'MEDICAL_REPORT',
+    title: 'Medical report',
+    uploadedByUserId: trainee.userId,
+    uploadedByMembershipId: trainee.membershipId,
+    classification: 'SENSITIVE',
+    status: 'ACTIVE',
+    version: 0,
+    createdAt: now,
+  });
+  return {
+    workspaceId,
+    otherWorkspaceId,
+    relationshipId,
+    checkinId,
+    fileId,
+    trainee,
+    trainer,
+  };
+}
+
+async function seedActiveSubscription(workspaceId: ObjectId) {
+  const now = new Date();
+  const subscriptionId = new ObjectId();
+  const termsId = new ObjectId();
+  const planVersionId = new ObjectId();
+  await appContainer().database.db.collection('subscriptions').insertOne({
+    _id: subscriptionId,
+    workspaceId,
+    lifecycleStatus: 'ACTIVE',
+    currentTermsId: termsId,
+    startedAt: now,
+    version: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await appContainer()
+    .database.db.collection('subscription_terms')
+    .insertOne({
+      _id: termsId,
+      subscriptionId,
+      workspaceId,
+      planVersionId,
+      billingPeriod: 'MONTHLY',
+      limits: { activeTrainees: 100, activeStaff: 100, storageBytes: 1_000_000_000 },
+      enabledFeatures: ['documents', 'progress', 'checkins'],
+      effectiveFrom: now,
+      source: 'ADMIN_OVERRIDE',
+      createdBy: new ObjectId(),
+      createdAt: now,
+    });
+  await appContainer().database.db.collection('workspace_usage').insertOne({
+    _id: new ObjectId(),
+    workspaceId,
+    activeTrainees: 1,
+    activeStaff: 1,
+    storageBytes: 1234,
+    reservedStorageBytes: 0,
+    revision: 0,
+    calculatedAt: now,
+    updatedAt: now,
+  });
 }
 
 async function seedPolicy(
@@ -1021,6 +2297,22 @@ async function supportRead(token: string, supportSessionId: string, workspaceId:
     headers: { ...bearer(token), 'X-Support-Session-Id': supportSessionId },
   });
   return response.statusCode;
+}
+
+async function sourceGet(token: string, supportSessionId: string, url: string) {
+  return await appInstance().inject({
+    method: 'GET',
+    url,
+    headers: { ...(token ? bearer(token) : {}), 'X-Support-Session-Id': supportSessionId },
+  });
+}
+
+async function sourcePost(token: string, supportSessionId: string, url: string) {
+  return await appInstance().inject({
+    method: 'POST',
+    url,
+    headers: { ...(token ? bearer(token) : {}), 'X-Support-Session-Id': supportSessionId },
+  });
 }
 
 async function insertSupportEvent(

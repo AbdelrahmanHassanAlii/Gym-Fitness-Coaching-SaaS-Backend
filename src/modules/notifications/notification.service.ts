@@ -533,7 +533,7 @@ export class NotificationApplicationService {
       ].includes(event.eventType)
     ) {
       if (event.payload?.notificationRequired === false) return [];
-      return event.workspaceId ? await this.ownerManagerRecipients(event.workspaceId) : [];
+      return event.workspaceId ? await this.ownerRecipients(event.workspaceId) : [];
     }
     void entry;
     return [];
@@ -592,6 +592,16 @@ export class NotificationApplicationService {
         (membership) =>
           membership.status === 'ACTIVE' &&
           membership.roles.some((role) => role === 'GYM_OWNER' || role === 'GYM_MANAGER'),
+      )
+      .map((membership) => membership.userId);
+  }
+
+  private async ownerRecipients(workspaceId: ObjectId) {
+    const memberships = await this.memberships.listByWorkspace(workspaceId);
+    return memberships
+      .filter(
+        (membership) =>
+          membership.status === 'ACTIVE' && membership.roles.some((role) => role === 'GYM_OWNER'),
       )
       .map((membership) => membership.userId);
   }

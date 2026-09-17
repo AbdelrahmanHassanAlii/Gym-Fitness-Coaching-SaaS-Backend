@@ -91,6 +91,7 @@ export class SupportAccessApplicationService {
 
   async createPolicy(ctx: RequestContext, input: PolicyInput) {
     await this.authorizePlatform(ctx, Permissions.SupportPoliciesCreate);
+    await this.authorizePolicyAllowances(ctx, input);
     const actorPlatformMembershipId = platformMembershipId(ctx);
     const targetPlatformMembershipId = objectId(
       input.platformMembershipId,
@@ -165,6 +166,7 @@ export class SupportAccessApplicationService {
     input: PolicyInput & ExpectedVersionInput,
   ) {
     await this.authorizePlatform(ctx, Permissions.SupportPoliciesUpdate);
+    await this.authorizePolicyAllowances(ctx, input);
     const id = objectId(policyId, 'SUPPORT_POLICY_NOT_FOUND');
     const actorPlatformMembershipId = platformMembershipId(ctx);
     if (
@@ -341,6 +343,8 @@ export class SupportAccessApplicationService {
       'start',
       tx,
       {
+        supportSessionId: session._id,
+        effectiveContext: effectiveContext(session),
         after: safeSessionSnapshot(session),
         reason: normalized.reason,
       },
@@ -455,6 +459,15 @@ export class SupportAccessApplicationService {
       permission,
       scope: { type: 'WORKSPACE' },
     });
+  }
+
+  private async authorizePolicyAllowances(ctx: RequestContext, input: PolicyInput): Promise<void> {
+    if (input.allowSensitiveData) {
+      await this.authorizePlatform(ctx, Permissions.SupportSensitiveRead);
+    }
+    if (input.allowSensitiveFileDownload) {
+      await this.authorizePlatform(ctx, Permissions.SupportSensitiveFilesRead);
+    }
   }
 
   private async evaluateStart(
@@ -687,6 +700,8 @@ export class SupportAccessApplicationService {
       before?: Record<string, unknown>;
       after?: Record<string, unknown>;
       reason?: string;
+      supportSessionId?: ObjectId;
+      effectiveContext?: Record<string, unknown>;
     } = {},
   ) {
     await this.audit.write(
@@ -856,17 +871,19 @@ function duration(value: number): number {
 
 function validIpRange(range: string): boolean {
   const [ip, prefix] = range.split('/');
-  if (!ip || !isIP(ip)) return false;
+  const family = ip ? isIP(ip) : 0;
+  if (!family) return false;
   if (prefix === undefined) return true;
+  if (family === 6) return false;
   const bits = Number(prefix);
-  return Number.isInteger(bits) && bits >= 0 && bits <= (isIP(ip) === 4 ? 32 : 128);
+  return Number.isInteger(bits) && bits >= 0 && bits <= 32;
 }
 
 function ipMatches(ip: string, range: string): boolean {
   const [base, prefix] = range.split('/');
   if (!base || !isIP(ip) || !isIP(base)) return false;
   if (prefix === undefined) return ip === base;
-  if (isIP(ip) !== 4 || isIP(base) !== 4) return ip === base;
+  if (isIP(ip) !== 4 || isIP(base) !== 4) return false;
   const bits = Number(prefix);
   const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
   return (ipv4ToInt(ip) & mask) === (ipv4ToInt(base) & mask);

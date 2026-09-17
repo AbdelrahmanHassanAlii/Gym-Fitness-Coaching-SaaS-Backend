@@ -466,6 +466,31 @@ describe('Stage 13 files and documents', () => {
         );
         expect(selfDownload.url).toContain('signature=test');
 
+        await replaceWorkspaceGrants(container, seed, [
+          { permission: Permissions.MedicalDocumentsDownload, effect: 'ALLOW' },
+        ]);
+        const originalAudit = container.audit.write.bind(container.audit);
+        container.audit.write = async () => {
+          throw new Error('audit failed');
+        };
+        try {
+          await expect(
+            container.files.createDownloadUrl(
+              seed.trainerCtx,
+              seed.workspaceId,
+              medicalFile.file.id,
+            ),
+          ).rejects.toThrow('audit failed');
+        } finally {
+          container.audit.write = originalAudit;
+        }
+        expect(
+          await container.database.db.collection('audit_events').countDocuments({
+            eventType: 'SensitiveFileDownloadUrlIssued',
+            'entity.id': new ObjectId(medicalFile.file.id),
+          }),
+        ).toBe(0);
+
         const outsider = await seedWorkspaceTrainer(container, seed.workspaceObjectId);
         await expect(
           container.files.createDownloadUrl(outsider.ctx, seed.workspaceId, standardFile.file.id),

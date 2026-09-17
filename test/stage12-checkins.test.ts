@@ -1677,6 +1677,50 @@ describe('Stage 12 check-ins integration', () => {
     );
     expect(reviewedSensitive.checkin.trainerFeedback?.comment).toBe('Looks good');
 
+    await expect(
+      container.checkins.getInstance(
+        seed.trainerCtx,
+        seed.workspaceId,
+        seed.relationshipId,
+        instance._id.toHexString(),
+      ),
+    ).resolves.toMatchObject({ checkin: { responses: expect.any(Array) } });
+    expect(
+      await db.collection('audit_events').countDocuments({
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        workspaceId: seed.workspaceObjectId,
+        'after.resourceType': 'checkin_instance',
+        'after.accessKind': 'read',
+      }),
+    ).toBe(1);
+    await expect(
+      container.checkins.listInstances(seed.traineeCtx, seed.workspaceId, seed.relationshipId, {}),
+    ).resolves.toMatchObject({ data: expect.any(Array) });
+    expect(
+      await db.collection('audit_events').countDocuments({
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        workspaceId: seed.workspaceObjectId,
+        'after.resourceType': 'checkin_instance_collection',
+        'after.accessKind': 'list',
+      }),
+    ).toBe(1);
+    const originalAudit = container.audit.write.bind(container.audit);
+    container.audit.write = async () => {
+      throw new Error('audit failed');
+    };
+    try {
+      await expect(
+        container.checkins.getInstance(
+          seed.trainerCtx,
+          seed.workspaceId,
+          seed.relationshipId,
+          instance._id.toHexString(),
+        ),
+      ).rejects.toThrow('audit failed');
+    } finally {
+      container.audit.write = originalAudit;
+    }
+
     const templateOnly = await seedLimitedStaff(container, seed, [
       { permission: 'checkins.templates.read', effect: 'ALLOW' },
     ]);

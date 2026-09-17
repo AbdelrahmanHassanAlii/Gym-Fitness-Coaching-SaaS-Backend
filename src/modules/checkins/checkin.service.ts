@@ -398,16 +398,20 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
       'read',
     );
     await this.entitlements.assert(ids.workspaceId, 'READ');
-    return page(
-      await this.checkins.listInstances({
-        workspaceId: ids.workspaceId,
-        relationshipId: ids.relationship._id,
-        ...defined('limit', query.limit),
-        ...defined('cursor', query.cursor ? decodeInstanceCursor(query.cursor) : undefined),
-      }),
-      safeInstance,
-      instanceCursor,
+    const instances = await this.checkins.listInstances({
+      workspaceId: ids.workspaceId,
+      relationshipId: ids.relationship._id,
+      ...defined('limit', query.limit),
+      ...defined('cursor', query.cursor ? decodeInstanceCursor(query.cursor) : undefined),
+    });
+    await this.writeSensitiveReadAudit(
+      ctx,
+      ids.workspaceId,
+      'checkin_instance_collection',
+      ids.relationship._id,
+      'list',
     );
+    return page(instances, safeInstance, instanceCursor);
   }
 
   async getInstance(
@@ -425,6 +429,13 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
     );
     await this.entitlements.assert(ids.workspaceId, 'READ');
     const instance = await this.requireInstance(ids.workspaceId, ids.relationship._id, checkinId);
+    await this.writeSensitiveReadAudit(
+      ctx,
+      ids.workspaceId,
+      'checkin_instance',
+      instance._id,
+      'read',
+    );
     return { checkin: safeInstance(instance) };
   }
 
@@ -846,6 +857,31 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
       },
       tx,
     );
+  }
+
+  private async writeSensitiveReadAudit(
+    ctx: RequestContext,
+    workspaceId: ObjectId,
+    resourceType: string,
+    resourceId: ObjectId,
+    accessKind: string,
+  ) {
+    await this.audit.writeSensitiveResourceAccess({
+      workspaceId,
+      actor: {
+        userId: actorId(ctx),
+        ...(ctx.workspaceMembershipId
+          ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
+          : {}),
+      },
+      entity: { type: resourceType, id: resourceId },
+      resourceType,
+      resourceId,
+      accessKind,
+      ipAddress: ctx.ipAddress,
+      ...(ctx.userAgent ? { userAgent: ctx.userAgent } : {}),
+      correlationId: ctx.correlationId,
+    });
   }
 
   private async writeOutbox(

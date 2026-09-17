@@ -403,7 +403,7 @@ export class NotificationApplicationService {
       await this.notifications.markDeliveryRetry({
         delivery,
         code: providerError.code,
-        message: providerError.message,
+        message: 'Provider delivery failed.',
         retryable: providerError.retryable && !providerError.invalidDestination,
         maxAttempts: notificationConfig(this.config).deliveryMaxAttempts,
         nextAttemptAt: new Date(now.getTime() + retryDelayMs(delivery.attemptCount + 1)),

@@ -6,6 +6,12 @@ import type { AppContainer } from '../src/bootstrap/app-container';
 import { createAppContainer } from '../src/bootstrap/app-container';
 import type { AppConfig } from '../src/config/config.types';
 import type { OutboxEventDocument } from '../src/core/events/outbox.types';
+import {
+  type EmailProvider,
+  type EmailSendInput,
+  type EmailSendResult,
+  MessagingProviderError,
+} from '../src/core/messaging/email.provider';
 import { migrations } from '../src/migrations';
 import { migration021Stage16SupportAccess } from '../src/migrations/021-stage16-support-access';
 import { MigrationRunner } from '../src/migrations/migration-runner';
@@ -167,6 +173,92 @@ describe('Stage 16 notification contract', () => {
       expect(JSON.stringify(notification?.payload ?? {})).not.toContain('203.0.113.9');
       expect(JSON.stringify(notification?.payload ?? {})).not.toContain('signed');
       expect(JSON.stringify(notification?.payload ?? {})).not.toContain('127.0.0.1/32');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'committed support start remains active when required notification provider fails retryably',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspaceUser(workspaceId, 'GYM_OWNER', 'ACTIVE');
+      const actor = await seedPlatformActor([Permissions.SupportSessionsStart]);
+      await seedPolicy(actor.membershipId, {
+        allowedWorkspaceIds: [workspaceId],
+        notificationRequired: true,
+      });
+      const token = await tokenFor(actor.userId);
+      const response = await startSupport(
+        token,
+        new ObjectId().toHexString(),
+        startBody(workspaceId),
+      );
+      expect(response.statusCode).toBe(201);
+      const sessionId = response.json().data.supportSession.id as string;
+
+      const event = await appContainer()
+        .database.db.collection<OutboxEventDocument>('outbox_events')
+        .findOne({ eventType: 'SupportSessionStarted' });
+      expect(event).toBeTruthy();
+      if (!event) throw new Error('Expected SupportSessionStarted event.');
+
+      const provider = new RetryableFailureEmailProvider();
+      const originalProvider = replaceEmailProvider(provider);
+      try {
+        await appContainer().notifications.handleOutboxEvent(event);
+        expect(
+          await appContainer().database.db.collection('notifications').countDocuments({
+            sourceEventId: event._id,
+          }),
+        ).toBe(1);
+        expect(
+          await appContainer().database.db.collection('notification_deliveries').countDocuments({
+            sourceEventId: event._id,
+          }),
+        ).toBe(1);
+
+        expect(
+          await appContainer().notifications.processDueDeliveries(appContainer().jobLeases),
+        ).toBe(1);
+
+        expect(await collectionCount('support_access_requests', { decision: 'APPROVED' })).toBe(1);
+        expect(await supportSession(sessionId)).toMatchObject({ status: 'ACTIVE' });
+        const retrying = await appContainer()
+          .database.db.collection('notification_deliveries')
+          .findOne({ sourceEventId: event._id });
+        expect(retrying).toMatchObject({
+          status: 'RETRYING',
+          attemptCount: 1,
+          lastError: { code: 'EMAIL_503', retryable: true },
+        });
+        expect(JSON.stringify(retrying)).not.toContain('provider-api-key-value');
+
+        expect(retrying?._id).toBeInstanceOf(ObjectId);
+        if (!retrying?._id) throw new Error('Expected retrying delivery id.');
+        await appContainer()
+          .database.db.collection('notification_deliveries')
+          .updateOne({ _id: retrying._id }, { $set: { nextAttemptAt: new Date(0) } });
+        provider.fail = false;
+        await appContainer().notifications.handleOutboxEvent(event);
+        expect(
+          await appContainer().notifications.processDueDeliveries(appContainer().jobLeases),
+        ).toBe(1);
+
+        expect(await appContainer().database.db.collection('notifications').countDocuments()).toBe(
+          1,
+        );
+        expect(
+          await appContainer().database.db.collection('notification_deliveries').countDocuments(),
+        ).toBe(1);
+        expect(
+          await appContainer()
+            .database.db.collection('notification_deliveries')
+            .findOne({ sourceEventId: event._id }),
+        ).toMatchObject({ status: 'SENT', attemptCount: 2 });
+        expect(await supportSession(sessionId)).toMatchObject({ status: 'ACTIVE' });
+      } finally {
+        replaceEmailProvider(originalProvider);
+      }
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -576,6 +668,132 @@ describe('Stage 16 access requests, runtime guard, and lifecycle', () => {
         .database.db.collection('support_sessions')
         .updateOne({ _id: new ObjectId(sessionId) }, { $set: { expiresAt: new Date() } });
       expect(await supportRead(token, sessionId, workspaceId)).toBe(403);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'concurrent support start versus policy disable leaves no usable session under the disabled policy',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportPoliciesDisable,
+      ]);
+      const policy = await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+
+      const [start, disable] = await Promise.all([
+        startSupport(token, new ObjectId().toHexString(), startBody(workspaceId)),
+        appInstance().inject({
+          method: 'POST',
+          url: `/api/v1/platform/support/policies/${policy._id.toHexString()}/disable`,
+          headers: bearer(token),
+          payload: { expectedVersion: 0 },
+        }),
+      ]);
+
+      expect(disable.statusCode).toBe(200);
+      const finalPolicy = await appContainer()
+        .database.db.collection('portal_access_policies')
+        .findOne({ _id: policy._id });
+      expect(finalPolicy).toMatchObject({ enabled: false, revision: 1 });
+      expect(finalPolicy?.archivedAt).toBeUndefined();
+      expect(
+        await collectionCount('audit_events', { eventType: 'PortalAccessPolicyChanged' }),
+      ).toBe(1);
+      expect(
+        await collectionCount('outbox_events', { eventType: 'PortalAccessPolicyChanged' }),
+      ).toBe(1);
+
+      if (start.statusCode === 201) {
+        const sessionId = start.json().data.supportSession.id as string;
+        expect(await supportRead(token, sessionId, workspaceId)).toBe(403);
+        expect(
+          await collectionCount('support_sessions', {
+            _id: new ObjectId(sessionId),
+            status: 'ACTIVE',
+          }),
+        ).toBe(0);
+        expect(
+          await collectionCount('audit_events', {
+            eventType: { $in: ['SupportSessionRevoked', 'SupportSessionSecurityTerminated'] },
+          }),
+        ).toBeGreaterThanOrEqual(1);
+        expect(
+          await collectionCount('outbox_events', { eventType: 'SupportSessionRevoked' }),
+        ).toBeGreaterThanOrEqual(1);
+      } else {
+        expect(start.statusCode).toBe(403);
+        expect(await collectionCount('support_sessions', { policyId: policy._id })).toBe(0);
+      }
+      expect(
+        await collectionCount('support_sessions', { policyId: policy._id, status: 'ACTIVE' }),
+      ).toBe(0);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'concurrent support start versus policy archive leaves no usable session under the archived policy',
+    async () => {
+      const workspaceId = new ObjectId();
+      await seedWorkspace(workspaceId);
+      const actor = await seedPlatformActor([
+        Permissions.SupportSessionsStart,
+        Permissions.SupportPoliciesArchive,
+      ]);
+      const policy = await seedPolicy(actor.membershipId, { allowedWorkspaceIds: [workspaceId] });
+      const token = await tokenFor(actor.userId);
+
+      const [start, archive] = await Promise.all([
+        startSupport(token, new ObjectId().toHexString(), startBody(workspaceId)),
+        appInstance().inject({
+          method: 'POST',
+          url: `/api/v1/platform/support/policies/${policy._id.toHexString()}/archive`,
+          headers: bearer(token),
+          payload: { expectedVersion: 0 },
+        }),
+      ]);
+
+      expect(archive.statusCode).toBe(200);
+      const finalPolicy = await appContainer()
+        .database.db.collection('portal_access_policies')
+        .findOne({ _id: policy._id });
+      expect(finalPolicy).toMatchObject({ enabled: false, revision: 1 });
+      expect(finalPolicy?.archivedAt).toBeInstanceOf(Date);
+      expect(
+        await collectionCount('audit_events', { eventType: 'PortalAccessPolicyChanged' }),
+      ).toBe(1);
+      expect(
+        await collectionCount('outbox_events', { eventType: 'PortalAccessPolicyChanged' }),
+      ).toBe(1);
+
+      if (start.statusCode === 201) {
+        const sessionId = start.json().data.supportSession.id as string;
+        expect(await supportRead(token, sessionId, workspaceId)).toBe(403);
+        expect(
+          await collectionCount('support_sessions', {
+            _id: new ObjectId(sessionId),
+            status: 'ACTIVE',
+          }),
+        ).toBe(0);
+        expect(
+          await collectionCount('audit_events', {
+            eventType: { $in: ['SupportSessionRevoked', 'SupportSessionSecurityTerminated'] },
+          }),
+        ).toBeGreaterThanOrEqual(1);
+        expect(
+          await collectionCount('outbox_events', { eventType: 'SupportSessionRevoked' }),
+        ).toBeGreaterThanOrEqual(1);
+      } else {
+        expect(start.statusCode).toBe(403);
+        expect(await collectionCount('support_sessions', { policyId: policy._id })).toBe(0);
+      }
+      expect(
+        await collectionCount('support_sessions', { policyId: policy._id, status: 'ACTIVE' }),
+      ).toBe(0);
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -2354,6 +2572,32 @@ async function supportSession(sessionId: string) {
 
 function bearer(token: string) {
   return { authorization: `Bearer ${token}` };
+}
+
+function replaceEmailProvider(provider: EmailProvider): EmailProvider {
+  const notifications = appContainer().notifications as unknown as { emailProvider: EmailProvider };
+  const original = notifications.emailProvider;
+  notifications.emailProvider = provider;
+  return original;
+}
+
+class RetryableFailureEmailProvider implements EmailProvider {
+  readonly supportsIdempotency = true;
+  fail = true;
+
+  async sendEmail(input: EmailSendInput): Promise<EmailSendResult> {
+    if (this.fail) {
+      throw new MessagingProviderError(
+        'temporary unavailable provider-api-key-value',
+        'EMAIL_503',
+        true,
+      );
+    }
+    return {
+      providerMessageId: `stage16:${input.idempotencyKey ?? 'retry'}`,
+      supportsIdempotency: this.supportsIdempotency,
+    };
+  }
 }
 
 function userRecord(userId: ObjectId) {

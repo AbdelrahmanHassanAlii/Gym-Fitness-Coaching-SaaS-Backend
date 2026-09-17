@@ -845,10 +845,23 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
           ...(ctx.userId && ObjectId.isValid(ctx.userId)
             ? { userId: new ObjectId(ctx.userId) }
             : {}),
+          ...(ctx.platformMembershipId && ObjectId.isValid(ctx.platformMembershipId)
+            ? { platformMembershipId: new ObjectId(ctx.platformMembershipId) }
+            : {}),
           ...(ctx.workspaceMembershipId && ObjectId.isValid(ctx.workspaceMembershipId)
             ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
             : {}),
         },
+        ...(ctx.supportSessionId ? { supportSessionId: new ObjectId(ctx.supportSessionId) } : {}),
+        ...(ctx.supportSessionId
+          ? {
+              effectiveContext: {
+                targetWorkspaceId: ctx.workspaceId,
+                effectiveUserId: ctx.effectiveUserId,
+                effectiveMembershipId: ctx.effectiveMembershipId,
+              },
+            }
+          : {}),
         entity: { type: eventType, id: entityId },
         action,
         ipAddress: ctx.ipAddress,
@@ -870,10 +883,23 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
       workspaceId,
       actor: {
         userId: actorId(ctx),
+        ...(ctx.platformMembershipId
+          ? { platformMembershipId: new ObjectId(ctx.platformMembershipId) }
+          : {}),
         ...(ctx.workspaceMembershipId
           ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
           : {}),
       },
+      ...(ctx.supportSessionId ? { supportSessionId: new ObjectId(ctx.supportSessionId) } : {}),
+      ...(ctx.supportSessionId
+        ? {
+            effectiveContext: {
+              targetWorkspaceId: ctx.workspaceId,
+              effectiveUserId: ctx.effectiveUserId,
+              effectiveMembershipId: ctx.effectiveMembershipId,
+            },
+          }
+        : {}),
       entity: { type: resourceType, id: resourceId },
       resourceType,
       resourceId,

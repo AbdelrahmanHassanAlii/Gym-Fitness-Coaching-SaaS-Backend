@@ -11,6 +11,7 @@ import type { StorageProvider } from '../../core/storage/storage.provider';
 import { Permissions } from '../permissions/permission.registry';
 import type { WorkspaceUsageRepository } from '../subscriptions/subscription.repository';
 import type { EntitlementService } from '../subscriptions/subscription.service';
+import type { SupportAccessApplicationService } from '../support-access/support-access.service';
 import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type { CoachingRelationshipDocument } from '../trainees/trainee.types';
 import type { WorkspaceMembershipRepository } from '../workspaces/workspace.repository';
@@ -70,6 +71,8 @@ const mandatorySensitiveCategories = new Set<DocumentCategory>([
 ]);
 
 export class FileApplicationService {
+  private supportAccess?: SupportAccessApplicationService;
+
   constructor(
     private readonly unitOfWork: UnitOfWork,
     private readonly files: FileRepository,
@@ -83,6 +86,10 @@ export class FileApplicationService {
     private readonly outbox: OutboxWriter,
     private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  setSupportAccessPort(supportAccess: SupportAccessApplicationService): void {
+    this.supportAccess = supportAccess;
+  }
 
   async createUploadIntent(
     ctx: RequestContext,
@@ -232,6 +239,10 @@ export class FileApplicationService {
     await this.entitlements.assert(file.workspaceId, 'READ', 'documents');
     const ttl =
       effectiveClassification === 'SENSITIVE' ? sensitiveDownloadTtlMs : standardDownloadTtlMs;
+    if (ctx.supportSessionId && effectiveClassification === 'SENSITIVE') {
+      if (!this.supportAccess) throw forbidden();
+      await this.supportAccess.requireSensitive(ctx, 'FILE');
+    }
     const expiresAt = new Date(Date.now() + ttl);
     const signed = await this.storage.createDownloadUrl({
       key: file.storageKey,
@@ -879,10 +890,23 @@ function auditEvent(
     workspaceId,
     actor: {
       userId: actorId(ctx),
+      ...(ctx.platformMembershipId
+        ? { platformMembershipId: new ObjectId(ctx.platformMembershipId) }
+        : {}),
       ...(ctx.workspaceMembershipId
         ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
         : {}),
     },
+    ...(ctx.supportSessionId ? { supportSessionId: new ObjectId(ctx.supportSessionId) } : {}),
+    ...(ctx.supportSessionId
+      ? {
+          effectiveContext: {
+            targetWorkspaceId: ctx.workspaceId,
+            effectiveUserId: ctx.effectiveUserId,
+            effectiveMembershipId: ctx.effectiveMembershipId,
+          },
+        }
+      : {}),
     entity: { type: eventType, id: aggregateId },
     action,
     ...(payload ? { after: payload } : {}),

@@ -19,6 +19,10 @@ import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerProgressRoutes } from '../modules/progress/progress.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
+import {
+  registerSupportAccessContext,
+  registerSupportAccessRoutes,
+} from '../modules/support-access/support-access.routes';
 import { registerTraineeRoutes } from '../modules/trainees/trainee.routes';
 import { registerTrainingRoutes } from '../modules/training/training.routes';
 import { registerWorkoutRoutes } from '../modules/workouts/workout.routes';
@@ -90,6 +94,7 @@ export async function buildApp(container: AppContainer) {
         { name: 'Check-Ins' },
         { name: 'Files' },
         { name: 'Notifications' },
+        { name: 'Support' },
         { name: 'Audit' },
       ],
       components: {
@@ -116,6 +121,7 @@ export async function buildApp(container: AppContainer) {
 
   await registerRequestContext(app);
   await registerAuthentication(app, container);
+  await registerSupportAccessContext(app, container);
   registerErrorHandler(app);
 
   await registerHealthRoutes(app, container);
@@ -132,6 +138,7 @@ export async function buildApp(container: AppContainer) {
   await registerCheckInRoutes(app, container);
   await registerFileRoutes(app, container);
   await registerNotificationRoutes(app, container);
+  await registerSupportAccessRoutes(app, container);
   await registerAuditRoutes(app, container);
 
   return app;

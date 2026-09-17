@@ -56,6 +56,8 @@ import {
   EntitlementService,
   SubscriptionApplicationService,
 } from '../modules/subscriptions/subscription.service';
+import { SupportAccessRepository } from '../modules/support-access/support-access.repository';
+import { SupportAccessApplicationService } from '../modules/support-access/support-access.service';
 import { CoachingRelationshipRepository } from '../modules/trainees/trainee.repository';
 import { TraineeApplicationService } from '../modules/trainees/trainee.service';
 import { TrainingRepository } from '../modules/training/training.repository';
@@ -103,6 +105,7 @@ export interface AppContainer {
   subscriptionsRepo: SubscriptionRepository;
   workspaceUsage: WorkspaceUsageRepository;
   manualPayments: ManualPaymentRepository;
+  supportAccessRepo: SupportAccessRepository;
   leadsRepo: LeadRepository;
   nutritionRepo: NutritionRepository;
   progressRepo: ProgressRepository;
@@ -124,6 +127,7 @@ export interface AppContainer {
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
+  supportAccess: SupportAccessApplicationService;
   leads: LeadApplicationService;
   nutrition: NutritionApplicationService;
   progress: ProgressApplicationService;
@@ -167,6 +171,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const subscriptionsRepo = new SubscriptionRepository(database);
   const workspaceUsage = new WorkspaceUsageRepository(database);
   const manualPayments = new ManualPaymentRepository(database);
+  const supportAccessRepo = new SupportAccessRepository(database);
   const leadsRepo = new LeadRepository(database);
   const nutritionRepo = new NutritionRepository(database);
   const progressRepo = new ProgressRepository(database);
@@ -363,6 +368,18 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     nutrition,
     checkins,
   );
+  const supportAccess = new SupportAccessApplicationService(
+    unitOfWork,
+    supportAccessRepo,
+    platformMemberships,
+    authSessions,
+    workspaceRepo,
+    workspaceMemberships,
+    accessControl,
+    audit,
+    outbox,
+  );
+  files.setSupportAccessPort(supportAccess);
 
   return {
     config,
@@ -396,6 +413,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     subscriptionsRepo,
     workspaceUsage,
     manualPayments,
+    supportAccessRepo,
     leadsRepo,
     nutritionRepo,
     progressRepo,
@@ -429,6 +447,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     ),
     entitlements,
     subscriptions,
+    supportAccess,
     leads,
     nutrition,
     progress,

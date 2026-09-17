@@ -160,6 +160,9 @@ export class AccessControlService {
     now: Date,
   ): Promise<AuthorizationDecision> {
     if (!input.workspaceId) throw notFound('WORKSPACE_NOT_FOUND');
+    if (ctx.supportSessionId) {
+      return await this.authorizeWorkspaceSupport(ctx, input, now);
+    }
     const [workspace, membership] = await Promise.all([
       this.workspaces.findById(input.workspaceId),
       this.workspaceMemberships.findByUserInWorkspace(input.workspaceId, new ObjectId(ctx.userId)),
@@ -192,6 +195,75 @@ export class AccessControlService {
       workspace._id,
     );
     return this.assertAllowed(this.evaluateDecision(input, eligibleProfiles, grants, now));
+  }
+
+  private async authorizeWorkspaceSupport(
+    ctx: RequestContext,
+    input: AuthorizationRequest,
+    now: Date,
+  ): Promise<AuthorizationDecision> {
+    if (!input.workspaceId || ctx.workspaceId !== input.workspaceId.toHexString()) {
+      throw permissionDenied('SUPPORT_WORKSPACE_DENIED');
+    }
+    const workspace = await this.workspaces.findById(input.workspaceId);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+    if (ctx.effectiveMembershipId) {
+      await this.assertSupportSensitivePermission(ctx, input.permission, now);
+      const membership = await this.workspaceMemberships.findByIdInWorkspace(
+        input.workspaceId,
+        new ObjectId(ctx.effectiveMembershipId),
+      );
+      if (membership?.status !== 'ACTIVE') {
+        throw permissionDenied('SUPPORT_EFFECTIVE_MEMBERSHIP_REQUIRED');
+      }
+      ctx.workspaceMembershipId = membership._id.toHexString();
+      await this.assertStructuralScope(input, membership._id);
+      const profiles = await this.profiles.findManyByIds(membership.permissionProfileIds);
+      const eligibleProfiles = profiles.filter(
+        (profile) =>
+          profile.context === 'WORKSPACE' &&
+          profile.status === 'ACTIVE' &&
+          profile.workspaceId?.equals(workspace._id),
+      );
+      const grants = await this.grants.listCurrent(
+        'WORKSPACE_MEMBERSHIP',
+        membership._id,
+        'WORKSPACE',
+        workspace._id,
+      );
+      return this.assertAllowed(this.evaluateDecision(input, eligibleProfiles, grants, now));
+    }
+    if (!supportWorkspacePermission(input.permission)) {
+      throw permissionDenied('SUPPORT_WRITE_NOT_WHITELISTED');
+    }
+    await this.assertSupportSensitivePermission(ctx, input.permission, now);
+    return {
+      allowed: true,
+      permission: input.permission,
+      context: input.context,
+      ...(input.scope ? { scope: input.scope } : {}),
+      source: 'PROFILE',
+      effect: 'ALLOW',
+      reasons: ['support-workspace-read-only'],
+    };
+  }
+
+  private async assertSupportSensitivePermission(
+    ctx: RequestContext,
+    permission: string,
+    now: Date,
+  ): Promise<void> {
+    const required = supportSensitivePlatformPermission(permission);
+    if (!required) return;
+    await this.authorizePlatform(
+      ctx,
+      {
+        context: 'PLATFORM',
+        permission: required,
+        scope: { type: 'WORKSPACE' },
+      },
+      now,
+    );
   }
 
   private async assertStructuralScope(
@@ -351,4 +423,27 @@ function permissionDenied(reason: string): AppError {
     httpStatus: 403,
     message: 'Permission denied.',
   });
+}
+
+function supportWorkspacePermission(permission: string): boolean {
+  return (
+    permission.endsWith('.read') ||
+    permission.endsWith('.download') ||
+    permission === 'files.download' ||
+    permission === 'billing.subscription.read' ||
+    permission === 'billing.usage.read' ||
+    permission === 'billing.payments.read'
+  );
+}
+
+function supportSensitivePlatformPermission(permission: string): string | null {
+  if (permission === 'medical_documents.download') return 'support.sensitive_files.read';
+  if (
+    ['medical_documents.read', 'health.read', 'checkins.read', 'progress_photos.read'].includes(
+      permission,
+    )
+  ) {
+    return 'support.sensitive.read';
+  }
+  return null;
 }

@@ -1050,10 +1050,23 @@ export class ProgressApplicationService {
         workspaceId,
         actor: {
           userId: actorId(ctx),
+          ...(ctx.platformMembershipId
+            ? { platformMembershipId: new ObjectId(ctx.platformMembershipId) }
+            : {}),
           ...(ctx.workspaceMembershipId
             ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
             : {}),
         },
+        ...(ctx.supportSessionId ? { supportSessionId: new ObjectId(ctx.supportSessionId) } : {}),
+        ...(ctx.supportSessionId
+          ? {
+              effectiveContext: {
+                targetWorkspaceId: ctx.workspaceId,
+                effectiveUserId: ctx.effectiveUserId,
+                effectiveMembershipId: ctx.effectiveMembershipId,
+              },
+            }
+          : {}),
         entity: { type: eventType, id: entityId },
         action,
         ...(details?.before ? { before: details.before } : {}),
@@ -1078,10 +1091,23 @@ export class ProgressApplicationService {
       workspaceId,
       actor: {
         userId: actorId(ctx),
+        ...(ctx.platformMembershipId
+          ? { platformMembershipId: new ObjectId(ctx.platformMembershipId) }
+          : {}),
         ...(ctx.workspaceMembershipId
           ? { workspaceMembershipId: new ObjectId(ctx.workspaceMembershipId) }
           : {}),
       },
+      ...(ctx.supportSessionId ? { supportSessionId: new ObjectId(ctx.supportSessionId) } : {}),
+      ...(ctx.supportSessionId
+        ? {
+            effectiveContext: {
+              targetWorkspaceId: ctx.workspaceId,
+              effectiveUserId: ctx.effectiveUserId,
+              effectiveMembershipId: ctx.effectiveMembershipId,
+            },
+          }
+        : {}),
       entity: { type: resourceType, id: resourceId },
       resourceType,
       resourceId,

@@ -7,6 +7,7 @@ import { FileJobRunner } from '../modules/files/file.jobs';
 import { NotificationJobRunner } from '../modules/notifications/notification.jobs';
 import { registerNotificationOutboxHandlers } from '../modules/notifications/notification.outbox-handlers';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
+import { SupportAccessJobRunner } from '../modules/support-access/support-access.jobs';
 import { registerTraineeOutboxHandlers } from '../modules/trainees/trainee.outbox-handlers';
 
 const config = loadConfig();
@@ -19,6 +20,7 @@ const subscriptionJobs = new SubscriptionJobRunner(container);
 const checkInJobs = new CheckInJobRunner(container);
 const fileJobs = new FileJobRunner(container);
 const notificationJobs = new NotificationJobRunner(container);
+const supportAccessJobs = new SupportAccessJobRunner(container);
 
 let shuttingDown = false;
 
@@ -36,6 +38,7 @@ async function run(): Promise<void> {
       await checkInJobs.runDueJobs();
       await fileJobs.runDueJobs();
       await notificationJobs.runDueJobs();
+      await supportAccessJobs.expireSessions();
       if (!processed && !shuttingDown) {
         await sleep(config.worker.outboxPollIntervalMs);
       }

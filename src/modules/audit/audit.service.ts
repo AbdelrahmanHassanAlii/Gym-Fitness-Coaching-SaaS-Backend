@@ -89,6 +89,12 @@ function parseFilters(query: AuditQuery, allowWorkspaceFilter: boolean): AuditLi
   if (from && to && from > to) {
     throw invalid('AUDIT_DATE_RANGE_INVALID', 'from must be before or equal to to.');
   }
+  if (query.entityId && !query.entityType) {
+    throw invalid(
+      'AUDIT_ENTITY_TYPE_REQUIRED',
+      'entityType is required when entityId is supplied.',
+    );
+  }
   return {
     ...(query.eventType ? { eventType: query.eventType } : {}),
     ...(query.action ? { action: query.action } : {}),

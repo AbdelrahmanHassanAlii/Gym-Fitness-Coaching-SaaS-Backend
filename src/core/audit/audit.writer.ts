@@ -55,10 +55,10 @@ export class AuditWriter {
 }
 
 const secretKeyPattern =
-  /(password|passwordhash|authorization|access.?token|refresh.?token|otp|mfa.*secret|totp|invitation.*token|activation.*token|reset.*token|provider.*(api.?key|secret|credential)|api.?key|secret.?key|push.?token|token)$/i;
+  /^(password|passwordhash|authorization|access.?token|refresh.?token|otp|mfa.*secret|totp|invitation.*token|activation.*token|reset.*token|provider.*(api.?key|secret|credential)|api.?key|secret.?key|push.?token|token)$/i;
 
 const signedUrlPattern =
-  /(x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|signature=|expires=|presigned|signed)/i;
+  /(x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|signature=|presigned|signed|[?&](token|access_token|refresh_token|resetToken|invitationToken|activationToken)=)/i;
 
 function redactAuditValue(value: unknown, key?: string): unknown {
   if (key && secretKeyPattern.test(key)) return '[REDACTED]';

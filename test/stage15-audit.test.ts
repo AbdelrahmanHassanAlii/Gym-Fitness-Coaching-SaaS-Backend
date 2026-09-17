@@ -8,7 +8,7 @@ import type { AppConfig } from '../src/config/config.types';
 import { migrations } from '../src/migrations';
 import { migration020Stage15Audit } from '../src/migrations/020-stage15-audit';
 import { MigrationRunner } from '../src/migrations/migration-runner';
-import { Permissions } from '../src/modules/permissions/permission.registry';
+import { Permissions, permissionDefinitions } from '../src/modules/permissions/permission.registry';
 
 const INTEGRATION_TIMEOUT_MS = 30_000;
 let container: AppContainer | undefined;
@@ -415,6 +415,136 @@ describe('Stage 15 audit APIs', () => {
   );
 
   test(
+    'audit.sensitive.read works in workspace and platform contexts while DENY hides details',
+    async () => {
+      const definition = permissionDefinitions.find(
+        (item) => item.key === Permissions.AuditSensitiveRead,
+      );
+      expect(definition?.allowedContexts).toContain('WORKSPACE');
+      expect(definition?.allowedContexts).toContain('PLATFORM');
+      expect(definition?.allowedScopes).toContain('WORKSPACE');
+
+      const workspace = await seedWorkspaceActor([
+        Permissions.AuditWorkspaceRead,
+        Permissions.AuditSensitiveRead,
+      ]);
+      const platformRedacted = await seedPlatformActor([Permissions.AuditPlatformRead]);
+      const platformVisible = await seedPlatformActor([
+        Permissions.AuditPlatformRead,
+        Permissions.AuditSensitiveRead,
+      ]);
+      await insertAudit({
+        workspaceId: workspace.workspaceId,
+        eventType: 'SENSITIVE_RESOURCE_ACCESSED',
+        sensitive: true,
+        after: { resourceType: 'health_profile', resourceId: new ObjectId().toHexString() },
+      });
+
+      const workspaceVisible = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspace.workspaceId.toHexString()}/audit`,
+        headers: bearer(await tokenFor(workspace.userId)),
+      });
+      expect(workspaceVisible.statusCode).toBe(200);
+      expect(workspaceVisible.json().data[0].after.resourceType).toBe('health_profile');
+
+      await appContainer()
+        .database.db.collection('access_grants')
+        .insertOne({
+          _id: new ObjectId(),
+          context: 'WORKSPACE',
+          workspaceId: workspace.workspaceId,
+          subjectType: 'WORKSPACE_MEMBERSHIP',
+          subjectId: workspace.membershipId,
+          permission: Permissions.AuditSensitiveRead,
+          effect: 'DENY',
+          scope: { type: 'WORKSPACE' },
+          createdBy: workspace.userId,
+          createdAt: new Date(),
+        });
+      const workspaceDenied = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspace.workspaceId.toHexString()}/audit`,
+        headers: bearer(await tokenFor(workspace.userId)),
+      });
+      expect(workspaceDenied.statusCode).toBe(200);
+      expect(workspaceDenied.json().data[0].sensitiveDetailsRedacted).toBe(true);
+      expect(workspaceDenied.json().data[0].after).toBeUndefined();
+
+      const redacted = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/platform/audit?workspaceId=${workspace.workspaceId.toHexString()}`,
+        headers: bearer(await tokenFor(platformRedacted.userId)),
+      });
+      expect(redacted.statusCode).toBe(200);
+      expect(redacted.json().data[0].sensitiveDetailsRedacted).toBe(true);
+
+      const visible = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/platform/audit?workspaceId=${workspace.workspaceId.toHexString()}`,
+        headers: bearer(await tokenFor(platformVisible.userId)),
+      });
+      expect(visible.statusCode).toBe(200);
+      expect(visible.json().data[0].after.resourceType).toBe('health_profile');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'cursor continuation reapplies current filters and entityId requires entityType',
+    async () => {
+      const { workspaceId, userId } = await seedWorkspaceActor([Permissions.AuditWorkspaceRead]);
+      const token = await tokenFor(userId);
+      const entityId = new ObjectId();
+      await insertAudit({
+        workspaceId,
+        eventType: 'CursorFilterA',
+        entity: { type: 'Program', id: entityId },
+        occurredAt: new Date('2026-09-16T12:00:00.000Z'),
+      });
+      await insertAudit({
+        workspaceId,
+        eventType: 'CursorFilterB',
+        entity: { type: 'Program', id: new ObjectId() },
+        occurredAt: new Date('2026-09-16T11:00:00.000Z'),
+      });
+      await insertAudit({
+        workspaceId,
+        eventType: 'CursorFilterA',
+        entity: { type: 'Program', id: new ObjectId() },
+        occurredAt: new Date('2026-09-16T10:00:00.000Z'),
+      });
+      const first = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspaceId.toHexString()}/audit?limit=1&eventType=CursorFilterA`,
+        headers: bearer(token),
+      });
+      expect(first.statusCode).toBe(200);
+      expect(first.json().data).toHaveLength(1);
+      expect(first.json().meta.nextCursor).toBeTruthy();
+
+      const changedFilter = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspaceId.toHexString()}/audit?limit=1&eventType=CursorFilterB&cursor=${first.json().meta.nextCursor ?? ''}`,
+        headers: bearer(token),
+      });
+      expect(changedFilter.statusCode).toBe(200);
+      expect(changedFilter.json().data.map((row: { eventType: string }) => row.eventType)).toEqual([
+        'CursorFilterB',
+      ]);
+
+      const ambiguousEntity = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${workspaceId.toHexString()}/audit?entityId=${entityId.toHexString()}`,
+        headers: bearer(token),
+      });
+      expect(ambiguousEntity.statusCode).toBe(422);
+      expect(ambiguousEntity.json().error.code).toBe('AUDIT_ENTITY_TYPE_REQUIRED');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
     'audit routes expose no mutation API',
     async () => {
       const { workspaceId, userId } = await seedWorkspaceActor([Permissions.AuditWorkspaceRead]);
@@ -447,8 +577,20 @@ describe('Stage 15 audit writer and sensitive-read convention', () => {
         before: { name: 'safe', nested: { passwordHash: 'secret-hash' } },
         after: {
           safe: 'value',
+          tokenCount: 3,
+          authorizationStatus: 'APPROVED',
+          monkeyName: 'George',
+          keyPerformanceIndicator: 'retention',
+          accessTokenCount: 2,
+          nestedSafe: [{ authorizationStatus: 'PENDING', tokenCount: 1 }],
+          harmlessUrl: 'https://example.test/profile?page=2',
+          invitationUrl: 'https://example.test/invitations/accept?token=secret-token',
+          resetUrl: 'https://example.test/password-reset?resetToken=reset-secret',
           tokens: [{ refreshToken: 'refresh-secret' }],
           signedUrl: 'https://s3.example.test/object?X-Amz-Signature=secret-signature',
+          happenedAt: new Date('2026-09-16T10:00:00.000Z'),
+          compatibleId: actorUserId,
+          nothing: null,
         },
         correlationId: 'redaction-corr',
       };
@@ -468,9 +610,23 @@ describe('Stage 15 audit writer and sensitive-read convention', () => {
       expect(stored?.before.name).toBe('safe');
       expect(stored?.before.nested.passwordHash).toBe('[REDACTED]');
       expect(stored?.after.safe).toBe('value');
+      expect(stored?.after.tokenCount).toBe(3);
+      expect(stored?.after.authorizationStatus).toBe('APPROVED');
+      expect(stored?.after.monkeyName).toBe('George');
+      expect(stored?.after.keyPerformanceIndicator).toBe('retention');
+      expect(stored?.after.accessTokenCount).toBe(2);
+      expect(stored?.after.nestedSafe[0].authorizationStatus).toBe('PENDING');
+      expect(stored?.after.harmlessUrl).toBe('https://example.test/profile?page=2');
+      expect(stored?.after.invitationUrl).toBe('[REDACTED]');
+      expect(stored?.after.resetUrl).toBe('[REDACTED]');
       expect(stored?.after.tokens[0].refreshToken).toBe('[REDACTED]');
       expect(stored?.after.signedUrl).toBe('[REDACTED]');
+      expect(stored?.after.happenedAt).toEqual(new Date('2026-09-16T10:00:00.000Z'));
+      expect(stored?.after.compatibleId).toEqual(actorUserId);
+      expect(stored?.after.nothing).toBeNull();
       expect(JSON.stringify(stored)).not.toContain('secret-signature');
+      expect(JSON.stringify(stored)).not.toContain('secret-token');
+      expect(JSON.stringify(stored)).not.toContain('reset-secret');
 
       const response = await appInstance().inject({
         method: 'GET',
@@ -482,6 +638,56 @@ describe('Stage 15 audit writer and sensitive-read convention', () => {
       expect(serialized).toContain('[REDACTED]');
       expect(serialized).not.toContain('refresh-secret');
       expect(serialized).not.toContain('secret-signature');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'representative locked-stage audit event fields stay compatible while only secrets redact',
+    async () => {
+      const workspaceId = new ObjectId();
+      const actorId = new ObjectId();
+      const events = [
+        'PermissionProfileUpdated',
+        'ManualPaymentApproved',
+        'WorkoutCorrected',
+        'NutritionPlanActivated',
+        'SensitiveFileDownloadUrlIssued',
+        'NotificationPreferencesUpdated',
+      ].map((eventType) => ({
+        eventType,
+        workspaceId,
+        actor: { userId: actorId },
+        entity: { type: eventType, id: new ObjectId() },
+        action: 'update',
+        before: { safeField: `${eventType}-before`, tokenCount: 1 },
+        after: { safeField: `${eventType}-after`, accessToken: 'secret-access-token' },
+        diff: { changed: true },
+        correlationId: `${eventType}-corr`,
+      }));
+      for (const event of events) {
+        await appContainer().audit.write(event);
+      }
+
+      const stored = await appContainer()
+        .database.db.collection('audit_events')
+        .find({ eventType: { $in: events.map((event) => event.eventType) } })
+        .toArray();
+      expect(stored).toHaveLength(events.length);
+      for (const event of events) {
+        const row = stored.find((item) => item.eventType === event.eventType);
+        expect(row).toMatchObject({
+          eventType: event.eventType,
+          workspaceId,
+          actor: { userId: actorId },
+          entity: event.entity,
+          action: 'update',
+          correlationId: event.correlationId,
+          before: { safeField: `${event.eventType}-before`, tokenCount: 1 },
+          after: { safeField: `${event.eventType}-after`, accessToken: '[REDACTED]' },
+          diff: { changed: true },
+        });
+      }
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -646,7 +852,7 @@ async function seedPlatformActor(permissions: string[]) {
     .insertOne({
       _id: profileId,
       context: 'PLATFORM',
-      name: 'Stage 15 Test Platform Profile',
+      name: `Stage 15 Test Platform Profile ${profileId.toHexString()}`,
       permissions: permissions.map((permission) => ({ permission, effect: 'ALLOW' })),
       isSystemDefault: false,
       status: 'ACTIVE',

@@ -139,6 +139,42 @@ const templates: Record<string, TemplateDefinition> = {
         ? { title: 'تحديث الاشتراك', body: 'حدث تغيير مهم في اشتراك مساحة العمل.' }
         : { title: 'Subscription update', body: 'An important workspace subscription changed.' },
   },
+  SUPPORT_SESSION_STARTED: {
+    key: 'support-session-started',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'بدأ وصول الدعم', body: 'بدأت جلسة دعم لمنطقة العمل.' }
+        : { title: 'Support access started', body: 'A support access session started.' },
+  },
+  SUPPORT_SESSION_ENDED: {
+    key: 'support-session-ended',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'انتهى وصول الدعم', body: 'انتهت جلسة دعم لمنطقة العمل.' }
+        : { title: 'Support access ended', body: 'A support access session ended.' },
+  },
+  SUPPORT_SESSION_REVOKED: {
+    key: 'support-session-revoked',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'تم إلغاء وصول الدعم', body: 'تم إلغاء جلسة دعم لمنطقة العمل.' }
+        : { title: 'Support access revoked', body: 'A support access session was revoked.' },
+  },
+  SUPPORT_SESSION_EXPIRED: {
+    key: 'support-session-expired',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'انتهت صلاحية وصول الدعم', body: 'انتهت صلاحية جلسة دعم لمنطقة العمل.' }
+        : { title: 'Support access expired', body: 'A support access session expired.' },
+  },
 };
 
 export function templateFor(type: string): TemplateDefinition {

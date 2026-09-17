@@ -823,6 +823,26 @@ describe('Stage 14 notification behavior', () => {
           aggregateType: 'subscription',
           aggregateId: new ObjectId(),
         },
+        {
+          eventType: 'SupportSessionStarted',
+          aggregateType: 'support_session',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'SupportSessionEnded',
+          aggregateType: 'support_session',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'SupportSessionRevoked',
+          aggregateType: 'support_session',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'SupportSessionExpired',
+          aggregateType: 'support_session',
+          aggregateId: new ObjectId(),
+        },
       ];
       expect(cases.map((item) => item.eventType).sort()).toEqual(
         notificationRegistry.map((entry) => entry.eventType).sort(),

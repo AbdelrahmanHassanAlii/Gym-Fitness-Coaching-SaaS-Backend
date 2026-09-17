@@ -122,6 +122,38 @@ export const notificationRegistry: NotificationRegistryEntry[] = [
     mandatory: true,
     stalePolicy: 'FACT',
   },
+  {
+    eventType: 'SupportSessionStarted',
+    notificationType: 'SUPPORT_SESSION_STARTED',
+    category: 'SECURITY',
+    channels: ['IN_APP', 'EMAIL'],
+    mandatory: true,
+    stalePolicy: 'FACT',
+  },
+  {
+    eventType: 'SupportSessionEnded',
+    notificationType: 'SUPPORT_SESSION_ENDED',
+    category: 'SECURITY',
+    channels: ['IN_APP'],
+    mandatory: true,
+    stalePolicy: 'FACT',
+  },
+  {
+    eventType: 'SupportSessionRevoked',
+    notificationType: 'SUPPORT_SESSION_REVOKED',
+    category: 'SECURITY',
+    channels: ['IN_APP', 'EMAIL'],
+    mandatory: true,
+    stalePolicy: 'FACT',
+  },
+  {
+    eventType: 'SupportSessionExpired',
+    notificationType: 'SUPPORT_SESSION_EXPIRED',
+    category: 'SECURITY',
+    channels: ['IN_APP'],
+    mandatory: true,
+    stalePolicy: 'FACT',
+  },
 ];
 
 export function registeredEventTypes(): string[] {

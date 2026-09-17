@@ -524,6 +524,17 @@ export class NotificationApplicationService {
     if (event.eventType === 'SubscriptionFrozen') {
       return event.workspaceId ? await this.ownerManagerRecipients(event.workspaceId) : [];
     }
+    if (
+      [
+        'SupportSessionStarted',
+        'SupportSessionEnded',
+        'SupportSessionRevoked',
+        'SupportSessionExpired',
+      ].includes(event.eventType)
+    ) {
+      if (event.payload?.notificationRequired === false) return [];
+      return event.workspaceId ? await this.ownerManagerRecipients(event.workspaceId) : [];
+    }
     void entry;
     return [];
   }

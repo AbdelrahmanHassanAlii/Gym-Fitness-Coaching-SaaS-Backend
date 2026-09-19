@@ -12,12 +12,14 @@ import { registerAuditRoutes } from '../modules/audit/audit.routes';
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
 import { registerCheckInRoutes } from '../modules/checkins/checkin.routes';
+import { registerExportRoutes } from '../modules/exports/export.routes';
 import { registerFileRoutes } from '../modules/files/file.routes';
 import { registerLeadRoutes } from '../modules/leads/lead.routes';
 import { registerNotificationRoutes } from '../modules/notifications/notification.routes';
 import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerProgressRoutes } from '../modules/progress/progress.routes';
+import { registerRetentionRoutes } from '../modules/retention/retention.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
 import {
   registerSupportAccessContext,
@@ -93,6 +95,8 @@ export async function buildApp(container: AppContainer) {
         { name: 'Progress' },
         { name: 'Check-Ins' },
         { name: 'Files' },
+        { name: 'Exports' },
+        { name: 'Retention' },
         { name: 'Notifications' },
         { name: 'Support' },
         { name: 'Audit' },
@@ -137,6 +141,8 @@ export async function buildApp(container: AppContainer) {
   await registerProgressRoutes(app, container);
   await registerCheckInRoutes(app, container);
   await registerFileRoutes(app, container);
+  await registerExportRoutes(app, container);
+  await registerRetentionRoutes(app, container);
   await registerNotificationRoutes(app, container);
   await registerSupportAccessRoutes(app, container);
   await registerAuditRoutes(app, container);

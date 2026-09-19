@@ -526,6 +526,31 @@ export class NotificationApplicationService {
     }
     if (
       [
+        'RetentionWarningDue',
+        'WorkspaceDeletionRequested',
+        'WorkspaceDeletionPostponed',
+        'WorkspaceDeletionCancelled',
+        'WorkspaceDeletionApproved',
+      ].includes(event.eventType)
+    ) {
+      return event.workspaceId ? await this.ownerRecipients(event.workspaceId) : [];
+    }
+    if (
+      ['WorkspaceExportReady', 'WorkspaceExportFailed', 'WorkspaceExportExpired'].includes(
+        event.eventType,
+      )
+    ) {
+      const requestedByUserId = payloadObjectId(event, 'requestedByUserId');
+      if (requestedByUserId) return [requestedByUserId];
+      const aggregateId = aggregateObjectId(event);
+      if (!aggregateId) return [];
+      const exportRequest = await this.database.db
+        .collection<{ requestedByUserId?: ObjectId }>('workspace_export_requests')
+        .findOne({ _id: aggregateId });
+      return exportRequest?.requestedByUserId ? [exportRequest.requestedByUserId] : [];
+    }
+    if (
+      [
         'SupportSessionStarted',
         'SupportSessionEnded',
         'SupportSessionRevoked',

@@ -28,6 +28,8 @@ import { MfaService } from '../modules/auth/mfa.service';
 import { RefreshTokenService } from '../modules/auth/refresh-token.service';
 import { CheckInRepository } from '../modules/checkins/checkin.repository';
 import { CheckInApplicationService } from '../modules/checkins/checkin.service';
+import { WorkspaceExportRepository } from '../modules/exports/export.repository';
+import { WorkspaceExportApplicationService } from '../modules/exports/export.service';
 import { FileRepository } from '../modules/files/file.repository';
 import { FileApplicationService } from '../modules/files/file.service';
 import { IdentityRepository } from '../modules/identity/identity.repository';
@@ -46,6 +48,8 @@ import { PermissionApplicationService } from '../modules/permissions/permission.
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
 import { ProgressRepository } from '../modules/progress/progress.repository';
 import { ProgressApplicationService } from '../modules/progress/progress.service';
+import { RetentionRepository } from '../modules/retention/retention.repository';
+import { RetentionApplicationService } from '../modules/retention/retention.service';
 import {
   ManualPaymentRepository,
   SubscriptionPlanRepository,
@@ -111,6 +115,8 @@ export interface AppContainer {
   progressRepo: ProgressRepository;
   checkInRepo: CheckInRepository;
   filesRepo: FileRepository;
+  exportsRepo: WorkspaceExportRepository;
+  retentionRepo: RetentionRepository;
   notificationsRepo: NotificationRepository;
   coachingRelationships: CoachingRelationshipRepository;
   trainingRepo: TrainingRepository;
@@ -133,6 +139,8 @@ export interface AppContainer {
   progress: ProgressApplicationService;
   checkins: CheckInApplicationService;
   files: FileApplicationService;
+  exports: WorkspaceExportApplicationService;
+  retention: RetentionApplicationService;
   notifications: NotificationApplicationService;
   trainees: TraineeApplicationService;
   training: TrainingApplicationService;
@@ -177,6 +185,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const progressRepo = new ProgressRepository(database);
   const checkInRepo = new CheckInRepository(database);
   const filesRepo = new FileRepository(database);
+  const exportsRepo = new WorkspaceExportRepository(database);
+  const retentionRepo = new RetentionRepository(database);
   const notificationsRepo = new NotificationRepository(database);
   const coachingRelationships = new CoachingRelationshipRepository(database);
   const trainingRepo = new TrainingRepository(database);
@@ -334,6 +344,32 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
   );
+  const exports = new WorkspaceExportApplicationService(
+    config,
+    database,
+    unitOfWork,
+    exportsRepo,
+    filesRepo,
+    workspaceRepo,
+    workspaceMemberships,
+    subscriptionsRepo,
+    accessControl,
+    storage,
+    audit,
+    outbox,
+  );
+  const retention = new RetentionApplicationService(
+    config,
+    unitOfWork,
+    retentionRepo,
+    exportsRepo,
+    filesRepo,
+    workspaceRepo,
+    subscriptionsRepo,
+    accessControl,
+    audit,
+    outbox,
+  );
   const notifications = new NotificationApplicationService(
     config,
     database,
@@ -419,6 +455,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     progressRepo,
     checkInRepo,
     filesRepo,
+    exportsRepo,
+    retentionRepo,
     notificationsRepo,
     coachingRelationships,
     trainingRepo,
@@ -453,6 +491,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     progress,
     checkins,
     files,
+    exports,
+    retention,
     notifications,
     trainees,
     training,

@@ -172,6 +172,13 @@ export const Permissions = {
   AuditWorkspaceRead: 'audit.workspace.read',
   AuditPlatformRead: 'audit.platform.read',
   AuditSensitiveRead: 'audit.sensitive.read',
+  ExportsWorkspaceCreate: 'exports.workspace.create',
+  ExportsWorkspaceRead: 'exports.workspace.read',
+  ExportsWorkspaceDownload: 'exports.workspace.download',
+  DeletionRead: 'deletion.read',
+  DeletionApprove: 'deletion.approve',
+  DeletionPostpone: 'deletion.postpone',
+  DeletionCancel: 'deletion.cancel',
 } as const;
 
 export type PermissionKey = (typeof Permissions)[keyof typeof Permissions];
@@ -347,6 +354,9 @@ export const permissionDefinitions: PermissionDefinition[] = [
   workspace(Permissions.CheckInsSubmit, 'Check-ins', 'Submit own check-ins.'),
   workspace(Permissions.CheckInsReview, 'Check-ins', 'Review submitted check-ins.'),
   workspace(Permissions.AuditWorkspaceRead, 'Audit', 'Read workspace audit evidence.'),
+  workspace(Permissions.ExportsWorkspaceCreate, 'Exports', 'Request workspace data exports.'),
+  workspace(Permissions.ExportsWorkspaceRead, 'Exports', 'Read workspace export requests.'),
+  workspace(Permissions.ExportsWorkspaceDownload, 'Exports', 'Download ready workspace exports.'),
   workspace(Permissions.NutritionPlansRead, 'Nutrition', 'Read nutrition plans.'),
   workspace(Permissions.NutritionPlansCreate, 'Nutrition', 'Create nutrition plans.'),
   workspace(Permissions.NutritionPlansUpdate, 'Nutrition', 'Update nutrition plans.'),
@@ -417,6 +427,10 @@ export const permissionDefinitions: PermissionDefinition[] = [
   platform(Permissions.SystemFoodsCreate, 'System foods', 'Create system foods.'),
   platform(Permissions.SystemFoodsUpdate, 'System foods', 'Update system foods.'),
   platform(Permissions.SystemFoodsArchive, 'System foods', 'Archive system foods.'),
+  platform(Permissions.DeletionRead, 'Workspace deletion', 'Read workspace deletion requests.'),
+  platform(Permissions.DeletionApprove, 'Workspace deletion', 'Approve workspace deletion.'),
+  platform(Permissions.DeletionPostpone, 'Workspace deletion', 'Postpone workspace deletion.'),
+  platform(Permissions.DeletionCancel, 'Workspace deletion', 'Cancel workspace deletion.'),
 ];
 
 export const permissionKeys = new Set(permissionDefinitions.map((definition) => definition.key));
@@ -562,6 +576,9 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.FilesDownload,
       Permissions.FilesDelete,
       Permissions.FilesRestore,
+      Permissions.ExportsWorkspaceCreate,
+      Permissions.ExportsWorkspaceRead,
+      Permissions.ExportsWorkspaceDownload,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {

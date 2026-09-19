@@ -3,9 +3,11 @@ import { loadConfig } from '../config/config';
 import { OutboxProcessor } from '../core/events/outbox.processor';
 import { createLogger } from '../core/logging/logger';
 import { CheckInJobRunner } from '../modules/checkins/checkin.jobs';
+import { ExportJobRunner } from '../modules/exports/export.jobs';
 import { FileJobRunner } from '../modules/files/file.jobs';
 import { NotificationJobRunner } from '../modules/notifications/notification.jobs';
 import { registerNotificationOutboxHandlers } from '../modules/notifications/notification.outbox-handlers';
+import { RetentionJobRunner } from '../modules/retention/retention.jobs';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
 import { SupportAccessJobRunner } from '../modules/support-access/support-access.jobs';
 import { registerTraineeOutboxHandlers } from '../modules/trainees/trainee.outbox-handlers';
@@ -19,7 +21,9 @@ registerNotificationOutboxHandlers(outbox, container.notifications);
 const subscriptionJobs = new SubscriptionJobRunner(container);
 const checkInJobs = new CheckInJobRunner(container);
 const fileJobs = new FileJobRunner(container);
+const exportJobs = new ExportJobRunner(container);
 const notificationJobs = new NotificationJobRunner(container);
+const retentionJobs = new RetentionJobRunner(container);
 const supportAccessJobs = new SupportAccessJobRunner(container);
 
 let shuttingDown = false;
@@ -37,7 +41,9 @@ async function run(): Promise<void> {
       await subscriptionJobs.runDueJobs();
       await checkInJobs.runDueJobs();
       await fileJobs.runDueJobs();
+      await exportJobs.runDueJobs();
       await notificationJobs.runDueJobs();
+      await retentionJobs.runDueJobs();
       await supportAccessJobs.expireSessions();
       if (!processed && !shuttingDown) {
         await sleep(config.worker.outboxPollIntervalMs);

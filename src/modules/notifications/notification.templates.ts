@@ -175,6 +175,84 @@ const templates: Record<string, TemplateDefinition> = {
         ? { title: 'انتهت صلاحية وصول الدعم', body: 'انتهت صلاحية جلسة دعم لمنطقة العمل.' }
         : { title: 'Support access expired', body: 'A support access session expired.' },
   },
+  RETENTION_WARNING_DUE: {
+    key: 'retention-warning-due',
+    version: 1,
+    category: 'SUBSCRIPTION',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'تنبيه الاحتفاظ بالبيانات', body: 'اقترب موعد مراجعة حذف بيانات مساحة العمل.' }
+        : {
+            title: 'Data retention warning',
+            body: 'Workspace data deletion review is approaching.',
+          },
+  },
+  WORKSPACE_DELETION_REQUESTED: {
+    key: 'workspace-deletion-requested',
+    version: 1,
+    category: 'SUBSCRIPTION',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'مراجعة حذف مساحة العمل', body: 'أصبحت مساحة العمل مؤهلة لمراجعة الحذف.' }
+        : {
+            title: 'Workspace deletion review',
+            body: 'The workspace is eligible for deletion review.',
+          },
+  },
+  WORKSPACE_DELETION_POSTPONED: {
+    key: 'workspace-deletion-postponed',
+    version: 1,
+    category: 'SUBSCRIPTION',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'تم تأجيل الحذف', body: 'تم تأجيل مراجعة حذف مساحة العمل.' }
+        : { title: 'Deletion postponed', body: 'Workspace deletion review was postponed.' },
+  },
+  WORKSPACE_DELETION_CANCELLED: {
+    key: 'workspace-deletion-cancelled',
+    version: 1,
+    category: 'SUBSCRIPTION',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'تم إلغاء الحذف', body: 'تم إلغاء مراجعة حذف مساحة العمل.' }
+        : { title: 'Deletion cancelled', body: 'Workspace deletion review was cancelled.' },
+  },
+  WORKSPACE_DELETION_APPROVED: {
+    key: 'workspace-deletion-approved',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'تم اعتماد حذف مساحة العمل', body: 'بدأت عملية حذف بيانات مساحة العمل.' }
+        : { title: 'Workspace deletion approved', body: 'Workspace data deletion has started.' },
+  },
+  WORKSPACE_EXPORT_READY: {
+    key: 'workspace-export-ready',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'التصدير جاهز', body: 'أصبح تصدير مساحة العمل جاهزا للتنزيل.' }
+        : { title: 'Export ready', body: 'Your workspace export is ready to download.' },
+  },
+  WORKSPACE_EXPORT_FAILED: {
+    key: 'workspace-export-failed',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'فشل التصدير', body: 'تعذر إنشاء تصدير مساحة العمل.' }
+        : { title: 'Export failed', body: 'The workspace export could not be generated.' },
+  },
+  WORKSPACE_EXPORT_EXPIRED: {
+    key: 'workspace-export-expired',
+    version: 1,
+    category: 'SECURITY',
+    render: (locale) =>
+      locale === 'ar'
+        ? { title: 'انتهت صلاحية التصدير', body: 'انتهت صلاحية رابط تصدير مساحة العمل.' }
+        : { title: 'Export expired', body: 'The workspace export has expired.' },
+  },
 };
 
 export function templateFor(type: string): TemplateDefinition {

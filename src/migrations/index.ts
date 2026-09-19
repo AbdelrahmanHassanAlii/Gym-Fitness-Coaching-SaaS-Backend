@@ -19,6 +19,7 @@ import { migration018Stage13FilesDocuments } from './018-stage13-files-documents
 import { migration019Stage14Notifications } from './019-stage14-notifications';
 import { migration020Stage15Audit } from './020-stage15-audit';
 import { migration021Stage16SupportAccess } from './021-stage16-support-access';
+import { migration022Stage17RetentionExportDeletion } from './022-stage17-retention-export-deletion';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -43,4 +44,5 @@ export const migrations: Migration[] = [
   migration019Stage14Notifications,
   migration020Stage15Audit,
   migration021Stage16SupportAccess,
+  migration022Stage17RetentionExportDeletion,
 ];

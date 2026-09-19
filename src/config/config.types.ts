@@ -73,4 +73,14 @@ export interface AppConfig {
     defaultSessionMinutes: number;
     maxSessionMinutes: number;
   };
+  exports?: {
+    readyTtlMs: number;
+    processingClaimTtlMs: number;
+    batchSize: number;
+  };
+  retention?: {
+    warningOffsetsDays: number[];
+    deletionEligibilityDays: number;
+    batchSize: number;
+  };
 }

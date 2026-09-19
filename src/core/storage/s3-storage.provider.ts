@@ -60,6 +60,33 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     };
   }
 
+  async putObject(input: {
+    key: string;
+    body: Uint8Array;
+    contentType: string;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata> {
+    const response = await fetch(this.objectUrl(input.key), {
+      method: 'PUT',
+      headers: this.signedHeaders('PUT', input.key, {
+        'content-length': String(input.body.byteLength),
+        'content-type': input.contentType,
+        'if-none-match': '*',
+        ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
+      }),
+      body: input.body,
+    });
+    if (!response.ok) throw new Error(`Object storage PUT failed with status ${response.status}`);
+    const eTag = response.headers.get('etag');
+    return {
+      key: input.key,
+      sizeBytes: input.body.byteLength,
+      contentType: input.contentType,
+      ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+      ...(eTag ? { eTag } : {}),
+    };
+  }
+
   async createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl> {
     return {
       url: this.presign(
@@ -136,7 +163,11 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     return `${this.config.endpoint.replace(/\/$/, '')}${path}?${canonicalQuery}&X-Amz-Signature=${signature}`;
   }
 
-  private signedHeaders(method: 'DELETE' | 'HEAD', key: string): Record<string, string> {
+  private signedHeaders(
+    method: 'DELETE' | 'HEAD' | 'PUT',
+    key: string,
+    extraHeaders: Record<string, string> = {},
+  ): Record<string, string> {
     const now = new Date();
     const amzDate = amzTimestamp(now);
     const dateStamp = amzDate.slice(0, 8);
@@ -147,6 +178,7 @@ export class S3CompatibleStorageProvider implements StorageProvider {
       host,
       'x-amz-content-sha256': emptyPayloadHash,
       'x-amz-date': amzDate,
+      ...extraHeaders,
     });
     const signedHeaders = Object.keys(headers).sort().join(';');
     const canonicalRequest = [

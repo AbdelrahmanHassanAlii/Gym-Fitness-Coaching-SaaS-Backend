@@ -191,6 +191,7 @@ export class FileApplicationService {
     const file: FileDocument = {
       _id: new ObjectId(),
       workspaceId: intent.workspaceId,
+      origin: 'USER_UPLOAD',
       uploadIntentId: intent._id,
       uploaderUserId: intent.uploaderUserId,
       ...(intent.uploaderMembershipId ? { uploaderMembershipId: intent.uploaderMembershipId } : {}),
@@ -369,6 +370,7 @@ export class FileApplicationService {
       tx,
     );
     if (file?.status !== 'ACTIVE') throw notFound('FILE_NOT_FOUND');
+    if (file.origin === 'SYSTEM_GENERATED') throw notFound('FILE_NOT_FOUND');
     if (!file.subjectId?.equals(ids.relationship._id)) throw forbidden();
     const classification = classificationForDocument(
       input.category,
@@ -541,7 +543,9 @@ export class FileApplicationService {
       await this.unitOfWork.withTransaction(async (tx) => {
         const purged = await this.files.markPurged(pending._id, now, tx);
         if (!purged) return;
-        await this.usage.releaseCommittedStorage(purged.workspaceId, purged.sizeBytes, tx);
+        if (purged.origin !== 'SYSTEM_GENERATED') {
+          await this.usage.releaseCommittedStorage(purged.workspaceId, purged.sizeBytes, tx);
+        }
         await this.audit.write(
           {
             eventType: 'FilePurged',
@@ -583,6 +587,7 @@ export class FileApplicationService {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     const file = await this.files.findFile(id, objectId(fileId, 'FILE_NOT_FOUND'));
     if (!file) throw notFound('FILE_NOT_FOUND');
+    if (file.origin === 'SYSTEM_GENERATED') throw notFound('FILE_NOT_FOUND');
     if (options.requireActive && file.status !== 'ACTIVE') throw conflict('FILE_NOT_AVAILABLE');
     await this.authorizeFileContext(ctx, file, options.permission);
     if (file.classification === 'SENSITIVE') await this.requireSensitive(ctx, id, 'download');
@@ -597,6 +602,7 @@ export class FileApplicationService {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     const file = await this.files.findFile(id, objectId(fileId, 'FILE_NOT_FOUND'));
     if (!file) throw notFound('FILE_NOT_FOUND');
+    if (file.origin === 'SYSTEM_GENERATED') throw notFound('FILE_NOT_FOUND');
     if (file.status !== 'ACTIVE') throw conflict('FILE_NOT_AVAILABLE');
     const linkedDocument = await this.files.findDocumentForFile(id, file._id);
     if (linkedDocument?.status === 'ACTIVE') {

@@ -29,6 +29,21 @@ export type UploadPurpose = (typeof UploadPurposes)[number];
 export const SubjectTypes = ['COACHING_RELATIONSHIP', 'WORKSPACE'] as const;
 export type SubjectType = (typeof SubjectTypes)[number];
 
+export const FileOrigins = ['USER_UPLOAD', 'SYSTEM_GENERATED'] as const;
+export type FileOrigin = (typeof FileOrigins)[number];
+
+export const GeneratedFilePurposes = ['WORKSPACE_EXPORT'] as const;
+export type GeneratedFilePurpose = (typeof GeneratedFilePurposes)[number];
+
+export const GeneratedFileIntentStatuses = [
+  'PENDING',
+  'OBJECT_WRITTEN',
+  'FILE_CREATED',
+  'CLEANED',
+  'FAILED',
+] as const;
+export type GeneratedFileIntentStatus = (typeof GeneratedFileIntentStatuses)[number];
+
 export interface UploadIntentDocument {
   _id: ObjectId;
   workspaceId: ObjectId;
@@ -59,9 +74,12 @@ export interface UploadIntentDocument {
 export interface FileDocument {
   _id: ObjectId;
   workspaceId: ObjectId;
-  uploadIntentId: ObjectId;
-  uploaderUserId: ObjectId;
+  origin?: FileOrigin;
+  uploadIntentId?: ObjectId;
+  uploaderUserId?: ObjectId;
   uploaderMembershipId?: ObjectId;
+  generatedPurpose?: GeneratedFilePurpose;
+  generatedForExportId?: ObjectId;
   subjectType: SubjectType;
   subjectId?: ObjectId;
   storageProvider: string;
@@ -82,6 +100,28 @@ export interface FileDocument {
   restoredBy?: ObjectId;
   purgePendingAt?: Date;
   physicallyDeletedAt?: Date;
+  expiresAt?: Date;
+}
+
+export interface GeneratedFileIntentDocument {
+  _id: ObjectId;
+  workspaceId: ObjectId;
+  purpose: GeneratedFilePurpose;
+  exportId: ObjectId;
+  storageProvider: string;
+  storageKey: string;
+  status: GeneratedFileIntentStatus;
+  fileId?: ObjectId;
+  sizeBytes?: number;
+  checksumSha256?: string;
+  cleanupAttempts?: number;
+  lastCleanupError?: string;
+  createdAt: Date;
+  objectWrittenAt?: Date;
+  fileCreatedAt?: Date;
+  cleanedAt?: Date;
+  failedAt?: Date;
+  updatedAt: Date;
 }
 
 export interface BusinessDocument {

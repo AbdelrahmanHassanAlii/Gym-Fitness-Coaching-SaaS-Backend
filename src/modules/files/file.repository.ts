@@ -7,16 +7,20 @@ import type {
   DocumentStatus,
   FileDocument,
   FileStatus,
+  GeneratedFileIntentDocument,
   UploadIntentDocument,
 } from './file.types';
 
 export class FileRepository {
   private readonly uploadIntents: Collection<UploadIntentDocument>;
+  private readonly generatedFileIntents: Collection<GeneratedFileIntentDocument>;
   private readonly files: Collection<FileDocument>;
   private readonly documents: Collection<BusinessDocument>;
 
   constructor(database: Database) {
     this.uploadIntents = database.db.collection<UploadIntentDocument>('upload_intents');
+    this.generatedFileIntents =
+      database.db.collection<GeneratedFileIntentDocument>('generated_file_intents');
     this.files = database.db.collection<FileDocument>('files');
     this.documents = database.db.collection<BusinessDocument>('documents');
   }
@@ -137,6 +141,151 @@ export class FileRepository {
       { _id: fileId, workspaceId },
       tx ? { session: tx.session } : undefined,
     );
+  }
+
+  async createGeneratedFileIntent(
+    intent: GeneratedFileIntentDocument,
+    tx?: TransactionContext,
+  ): Promise<GeneratedFileIntentDocument> {
+    await this.generatedFileIntents.insertOne(intent, tx ? { session: tx.session } : undefined);
+    return intent;
+  }
+
+  async markGeneratedObjectWritten(input: {
+    intentId: ObjectId;
+    sizeBytes: number;
+    checksumSha256: string;
+    now: Date;
+  }): Promise<void> {
+    await this.generatedFileIntents.updateOne(
+      { _id: input.intentId, status: 'PENDING' },
+      {
+        $set: {
+          status: 'OBJECT_WRITTEN',
+          sizeBytes: input.sizeBytes,
+          checksumSha256: input.checksumSha256,
+          objectWrittenAt: input.now,
+          updatedAt: input.now,
+        },
+      },
+    );
+  }
+
+  async createGeneratedFile(input: {
+    intentId: ObjectId;
+    file: FileDocument;
+    now: Date;
+    tx: TransactionContext;
+  }): Promise<FileDocument> {
+    try {
+      await this.files.insertOne(input.file, { session: input.tx.session });
+    } catch (error) {
+      if (error instanceof MongoServerError && error.code === 11000) {
+        throw conflict('GENERATED_FILE_ALREADY_EXISTS');
+      }
+      throw error;
+    }
+    await this.generatedFileIntents.updateOne(
+      { _id: input.intentId },
+      {
+        $set: {
+          status: 'FILE_CREATED',
+          fileId: input.file._id,
+          fileCreatedAt: input.now,
+          updatedAt: input.now,
+        },
+      },
+      { session: input.tx.session },
+    );
+    return input.file;
+  }
+
+  async findGeneratedFileForExport(
+    workspaceId: ObjectId,
+    exportId: ObjectId,
+    tx?: TransactionContext,
+  ): Promise<FileDocument | null> {
+    return await this.files.findOne(
+      {
+        workspaceId,
+        origin: 'SYSTEM_GENERATED',
+        generatedPurpose: 'WORKSPACE_EXPORT',
+        generatedForExportId: exportId,
+        status: 'ACTIVE',
+      },
+      tx ? { session: tx.session } : undefined,
+    );
+  }
+
+  async markGeneratedExportFilePurgeEligible(input: {
+    workspaceId: ObjectId;
+    exportId: ObjectId;
+    now: Date;
+    tx?: TransactionContext;
+  }): Promise<void> {
+    await this.files.updateMany(
+      {
+        workspaceId: input.workspaceId,
+        origin: 'SYSTEM_GENERATED',
+        generatedPurpose: 'WORKSPACE_EXPORT',
+        generatedForExportId: input.exportId,
+        status: 'ACTIVE',
+      },
+      {
+        $set: {
+          status: 'PURGE_PENDING',
+          deletedAt: input.now,
+          purgeEligibleAt: input.now,
+          purgePendingAt: input.now,
+        },
+        $inc: { version: 1 },
+      },
+      input.tx ? { session: input.tx.session } : undefined,
+    );
+  }
+
+  async markWorkspaceFilesPurgeEligible(input: {
+    workspaceId: ObjectId;
+    retainFileIds: ObjectId[];
+    now: Date;
+    tx: TransactionContext;
+  }): Promise<number> {
+    const result = await this.files.updateMany(
+      {
+        workspaceId: input.workspaceId,
+        status: 'ACTIVE',
+        ...(input.retainFileIds.length > 0 ? { _id: { $nin: input.retainFileIds } } : {}),
+      },
+      {
+        $set: {
+          status: 'PURGE_PENDING',
+          deletedAt: input.now,
+          purgeEligibleAt: input.now,
+          purgePendingAt: input.now,
+        },
+        $inc: { version: 1 },
+      },
+      { session: input.tx.session },
+    );
+    return result.modifiedCount;
+  }
+
+  async deleteWorkspaceDocuments(input: {
+    workspaceId: ObjectId;
+    retainFileIds: ObjectId[];
+    now: Date;
+    tx: TransactionContext;
+  }): Promise<number> {
+    const result = await this.documents.updateMany(
+      {
+        workspaceId: input.workspaceId,
+        status: 'ACTIVE',
+        ...(input.retainFileIds.length > 0 ? { fileId: { $nin: input.retainFileIds } } : {}),
+      },
+      { $set: { status: 'DELETED', deletedAt: input.now } },
+      { session: input.tx.session },
+    );
+    return result.modifiedCount;
   }
 
   async findDocumentForFile(

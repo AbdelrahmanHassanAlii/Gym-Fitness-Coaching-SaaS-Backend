@@ -256,6 +256,24 @@ export function loadConfig(): AppConfig {
       defaultSessionMinutes: defaultSupportMinutes,
       maxSessionMinutes: maxSupportMinutes,
     },
+    exports: {
+      readyTtlMs: integer('EXPORT_READY_TTL_SECONDS', 7 * 24 * 60 * 60, 1) * 1000,
+      processingClaimTtlMs: integer('EXPORT_PROCESSING_CLAIM_SECONDS', 10 * 60, 30) * 1000,
+      batchSize: integer('EXPORT_JOB_BATCH_SIZE', 10, 1),
+    },
+    retention: {
+      warningOffsetsDays: csv('RETENTION_WARNING_OFFSETS_DAYS').length
+        ? csv('RETENTION_WARNING_OFFSETS_DAYS').map((value) => {
+            const parsed = Number.parseInt(value, 10);
+            if (!Number.isInteger(parsed) || parsed < 1) {
+              throw new Error(`Invalid RETENTION_WARNING_OFFSETS_DAYS entry: ${value}`);
+            }
+            return parsed;
+          })
+        : [30, 7, 1],
+      deletionEligibilityDays: integer('RETENTION_DELETION_ELIGIBILITY_DAYS', 180, 1),
+      batchSize: integer('RETENTION_JOB_BATCH_SIZE', 25, 1),
+    },
   };
 }
 

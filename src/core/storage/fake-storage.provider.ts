@@ -39,6 +39,33 @@ export class FakeStorageProvider implements StorageProvider {
     return this.objects.get(key) ?? null;
   }
 
+  putObject(input: ObjectMetadata, options?: { overwrite?: boolean }): void;
+  putObject(input: {
+    key: string;
+    body: Uint8Array;
+    contentType: string;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata>;
+  putObject(
+    input:
+      | ObjectMetadata
+      | { key: string; body: Uint8Array; contentType: string; checksumSha256?: string },
+    options: { overwrite?: boolean } = {},
+  ): undefined | Promise<ObjectMetadata> {
+    if ('body' in input) {
+      const metadata: ObjectMetadata = {
+        key: input.key,
+        sizeBytes: input.body.byteLength,
+        contentType: input.contentType,
+        ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+      };
+      this.putObjectMetadata(metadata);
+      return Promise.resolve(metadata);
+    }
+    this.putObjectMetadata(input, options);
+    return undefined;
+  }
+
   async createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl> {
     if (this.failNextDownloadUrl) {
       this.failNextDownloadUrl = false;
@@ -58,7 +85,7 @@ export class FakeStorageProvider implements StorageProvider {
     this.objects.delete(key);
   }
 
-  putObject(input: ObjectMetadata, options: { overwrite?: boolean } = {}): void {
+  putObjectMetadata(input: ObjectMetadata, options: { overwrite?: boolean } = {}): void {
     if (!options.overwrite && this.objects.has(input.key)) {
       throw new Error('Object already exists');
     }

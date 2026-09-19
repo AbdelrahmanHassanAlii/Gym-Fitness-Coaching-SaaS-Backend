@@ -30,6 +30,12 @@ export interface CreateDownloadUrlInput {
 export interface StorageProvider {
   readonly provider: string;
   createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUrl>;
+  putObject(input: {
+    key: string;
+    body: Uint8Array;
+    contentType: string;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata>;
   statObject(key: string): Promise<ObjectMetadata | null>;
   createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl>;
   deleteObject(key: string): Promise<void>;

@@ -231,6 +231,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
     coachingRelationships,
+    retentionRepo,
   );
   const workspaces = new WorkspaceApplicationService(
     unitOfWork,
@@ -326,6 +327,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     unitOfWork,
     checkInRepo,
     coachingRelationships,
+    workspaceRepo,
     workspaceMemberships,
     accessControl,
     entitlements,

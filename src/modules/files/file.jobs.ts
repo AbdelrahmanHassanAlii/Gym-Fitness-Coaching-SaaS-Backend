@@ -10,6 +10,9 @@ export class FileJobRunner {
     await this.withLease('purge-files', async () => {
       await this.container.files.purgeFiles();
     });
+    await this.withLease('cleanup-generated-file-intents', async () => {
+      await this.container.files.cleanupGeneratedFileIntents();
+    });
   }
 
   private async withLease(key: string, operation: () => Promise<void>): Promise<void> {

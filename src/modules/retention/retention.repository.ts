@@ -122,13 +122,16 @@ export class RetentionRepository {
     warning: RetentionWarningMarkerDocument,
     tx?: TransactionContext,
   ): Promise<boolean> {
-    try {
-      await this.warnings.insertOne(warning, tx ? { session: tx.session } : undefined);
-      return true;
-    } catch (error) {
-      if (error instanceof MongoServerError && error.code === 11000) return false;
-      throw error;
-    }
+    const result = await this.warnings.updateOne(
+      {
+        subscriptionId: warning.subscriptionId,
+        warningOffsetDays: warning.warningOffsetDays,
+        eligibilityAt: warning.eligibilityAt,
+      },
+      { $setOnInsert: warning },
+      { upsert: true, ...(tx ? { session: tx.session } : {}) },
+    );
+    return result.upsertedCount === 1;
   }
 
   async findExpiredSubscriptions(limit: number): Promise<SubscriptionDocument[]> {
@@ -321,11 +324,24 @@ export class RetentionRepository {
     reason: string;
     now: Date;
     tx?: TransactionContext;
-  }): Promise<number> {
+  }): Promise<ObjectId[]> {
+    const candidates = await this.deletions
+      .find(
+        {
+          workspaceId: input.workspaceId,
+          status: { $in: ['PENDING_APPROVAL', 'POSTPONED'] },
+        },
+        input.tx
+          ? { session: input.tx.session, projection: { _id: 1 } }
+          : { projection: { _id: 1 } },
+      )
+      .toArray();
+    if (candidates.length === 0) return [];
     const result = await this.deletions.updateMany(
       {
         workspaceId: input.workspaceId,
         status: { $in: ['PENDING_APPROVAL', 'POSTPONED'] },
+        _id: { $in: candidates.map((candidate) => candidate._id) },
       },
       {
         $set: {
@@ -339,7 +355,7 @@ export class RetentionRepository {
       },
       input.tx ? { session: input.tx.session } : undefined,
     );
-    return result.modifiedCount;
+    return result.modifiedCount > 0 ? candidates.map((candidate) => candidate._id) : [];
   }
 
   async returnPostponedForReview(now: Date): Promise<number> {
@@ -466,7 +482,13 @@ export class RetentionRepository {
     const payments = await this.manualPayments
       .find({ workspaceId, proofFileId: { $exists: true } }, { projection: { proofFileId: 1 } })
       .toArray();
-    return payments.flatMap((payment) => (payment.proofFileId ? [payment.proofFileId] : []));
+    return [
+      ...new Map(
+        payments.flatMap((payment) =>
+          payment.proofFileId ? [[payment.proofFileId.toHexString(), payment.proofFileId]] : [],
+        ),
+      ).values(),
+    ];
   }
 
   async deleteBatch(input: {
@@ -518,6 +540,29 @@ export class RetentionRepository {
       status: 'ACTIVE',
       _id: { $nin: retainFileIds },
     });
+  }
+
+  async countActiveDocuments(workspaceId: ObjectId, retainFileIds: ObjectId[]): Promise<number> {
+    return await this.database.db.collection('documents').countDocuments({
+      workspaceId,
+      status: 'ACTIVE',
+      ...(retainFileIds.length > 0 ? { fileId: { $nin: retainFileIds } } : {}),
+    });
+  }
+
+  async countExistingFiles(fileIds: ObjectId[]): Promise<number> {
+    if (fileIds.length === 0) return 0;
+    return await this.files.countDocuments({ _id: { $in: fileIds } });
+  }
+
+  async workspaceIsDeletionLocked(workspaceId: ObjectId): Promise<boolean> {
+    const workspace = await this.workspaces.findOne(
+      { _id: workspaceId },
+      { projection: { status: 1, deletionLockRequestId: 1 } },
+    );
+    return Boolean(
+      workspace && workspace.status === 'RESTRICTED' && workspace.deletionLockRequestId,
+    );
   }
 }
 

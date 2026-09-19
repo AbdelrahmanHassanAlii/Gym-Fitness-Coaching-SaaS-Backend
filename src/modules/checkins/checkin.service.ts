@@ -9,7 +9,10 @@ import { Permissions } from '../permissions/permission.registry';
 import type { EntitlementService } from '../subscriptions/subscription.service';
 import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type { CoachingRelationshipDocument } from '../trainees/trainee.types';
-import type { WorkspaceMembershipRepository } from '../workspaces/workspace.repository';
+import type {
+  WorkspaceMembershipRepository,
+  WorkspaceRepository,
+} from '../workspaces/workspace.repository';
 import type { CheckInRepository } from './checkin.repository';
 import type {
   CheckInAssignmentDocument,
@@ -65,6 +68,7 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
     private readonly unitOfWork: UnitOfWork,
     private readonly checkins: CheckInRepository,
     private readonly relationships: CoachingRelationshipRepository,
+    private readonly workspaces: WorkspaceRepository,
     private readonly memberships: WorkspaceMembershipRepository,
     private readonly accessControl: AccessControlService,
     private readonly entitlements: EntitlementService,
@@ -562,6 +566,7 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
           candidate.workspaceId,
           tx,
         );
+        if (!(await this.workspaceCanProduceTenantData(candidate.workspaceId, tx))) return;
         if (relationship.status === 'ENDED') return;
         const updated = await this.checkins.markOverdue(candidate, now, tx);
         if (!updated) return;
@@ -626,6 +631,7 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
       const created = await this.unitOfWork.withTransaction(async (tx) => {
         const assignment = await this.checkins.guardAssignmentForGeneration(assignmentId, tx);
         if (!assignment) return false;
+        if (!(await this.workspaceCanProduceTenantData(assignment.workspaceId, tx))) return false;
         const relationship = await this.relationships.guardCheckInLifecycleOpen(
           assignment.relationshipId,
           assignment.workspaceId,
@@ -701,6 +707,7 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
           candidate.workspaceId,
           tx,
         );
+        if (!(await this.workspaceCanProduceTenantData(candidate.workspaceId, tx))) return;
         const updated = await this.checkins.promoteDue(candidate, now, tx);
         if (!updated) return;
         await this.writeAudit(
@@ -755,6 +762,14 @@ export class CheckInApplicationService implements CheckInRelationshipLifecyclePo
     if (membership.roles.includes('GYM_OWNER') || membership.roles.includes('GYM_MANAGER'))
       return { workspaceId: id, relationship };
     throw forbidden();
+  }
+
+  private async workspaceCanProduceTenantData(
+    workspaceId: ObjectId,
+    tx: TransactionContext,
+  ): Promise<boolean> {
+    const workspace = await this.workspaces.findById(workspaceId, tx);
+    return Boolean(workspace && workspace.status === 'ACTIVE' && !workspace.deletionLockRequestId);
   }
 
   private async actorMembership(

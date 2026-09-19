@@ -200,6 +200,41 @@ export class FileRepository {
     return input.file;
   }
 
+  async listGeneratedIntentCleanupDue(limit: number): Promise<GeneratedFileIntentDocument[]> {
+    return await this.generatedFileIntents
+      .find({
+        status: { $in: ['OBJECT_WRITTEN', 'FAILED'] },
+        fileId: { $exists: false },
+      })
+      .sort({ updatedAt: 1, _id: 1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  async markGeneratedIntentCleaned(intentId: ObjectId, now: Date): Promise<void> {
+    await this.generatedFileIntents.updateOne(
+      { _id: intentId, status: { $in: ['OBJECT_WRITTEN', 'FAILED'] }, fileId: { $exists: false } },
+      {
+        $set: { status: 'CLEANED', cleanedAt: now, updatedAt: now },
+        $unset: { lastCleanupError: '' },
+      },
+    );
+  }
+
+  async markGeneratedIntentCleanupFailed(
+    intentId: ObjectId,
+    error: string,
+    now: Date,
+  ): Promise<void> {
+    await this.generatedFileIntents.updateOne(
+      { _id: intentId, status: { $in: ['OBJECT_WRITTEN', 'FAILED'] }, fileId: { $exists: false } },
+      {
+        $set: { status: 'FAILED', lastCleanupError: error, failedAt: now, updatedAt: now },
+        $inc: { cleanupAttempts: 1 },
+      },
+    );
+  }
+
   async findGeneratedFileForExport(
     workspaceId: ObjectId,
     exportId: ObjectId,
@@ -242,6 +277,32 @@ export class FileRepository {
       },
       input.tx ? { session: input.tx.session } : undefined,
     );
+  }
+
+  async markWorkspaceGeneratedExportFilesPurgeEligible(input: {
+    workspaceId: ObjectId;
+    now: Date;
+    tx?: TransactionContext;
+  }): Promise<number> {
+    const result = await this.files.updateMany(
+      {
+        workspaceId: input.workspaceId,
+        origin: 'SYSTEM_GENERATED',
+        generatedPurpose: 'WORKSPACE_EXPORT',
+        status: 'ACTIVE',
+      },
+      {
+        $set: {
+          status: 'PURGE_PENDING',
+          deletedAt: input.now,
+          purgeEligibleAt: input.now,
+          purgePendingAt: input.now,
+        },
+        $inc: { version: 1 },
+      },
+      input.tx ? { session: input.tx.session } : undefined,
+    );
+    return result.modifiedCount;
   }
 
   async markWorkspaceFilesPurgeEligible(input: {

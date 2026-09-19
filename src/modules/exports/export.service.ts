@@ -366,15 +366,10 @@ export class WorkspaceExportApplicationService {
   private async buildArchive(exportRequest: WorkspaceExportRequestDocument): Promise<Uint8Array> {
     const datasets: Record<string, unknown[]> = {};
     for (const collection of exportCollections) {
-      datasets[`${collection}.json`] = await this.database.db
-        .collection(collection)
-        .find(
-          { workspaceId: exportRequest.workspaceId },
-          { projection: exportProjection(collection) },
-        )
-        .sort({ _id: 1 })
-        .limit(10_000)
-        .toArray();
+      datasets[`${collection}.json`] = await this.readExportDataset(
+        collection,
+        exportRequest.workspaceId,
+      );
     }
     datasets['manifest.json'] = [
       {
@@ -396,6 +391,29 @@ export class WorkspaceExportApplicationService {
           .map(([name, value]) => [name, Buffer.from(JSON.stringify(value, jsonReplacer, 2))]),
       ),
     );
+  }
+
+  private async readExportDataset(collection: string, workspaceId: ObjectId): Promise<unknown[]> {
+    const batchSize = Math.min(this.config.exports?.batchSize ?? 100, 500);
+    const rows: unknown[] = [];
+    let afterId: ObjectId | undefined;
+    while (true) {
+      const batch = await this.database.db
+        .collection(collection)
+        .find(exportDatasetPredicate(collection, workspaceId, afterId), {
+          projection: exportProjection(collection),
+        })
+        .sort({ _id: 1 })
+        .limit(batchSize)
+        .toArray();
+      if (batch.length === 0) break;
+      rows.push(...batch);
+      const lastId = batch.at(-1)?._id;
+      if (!(lastId instanceof ObjectId)) break;
+      afterId = lastId;
+      if (batch.length < batchSize) break;
+    }
+    return rows;
   }
 }
 
@@ -438,6 +456,16 @@ function exportProjection(collection: string): Record<string, 0> {
   if (collection === 'files') return { storageKey: 0 };
   if (collection === 'workspace_memberships') return {};
   return {};
+}
+
+function exportDatasetPredicate(collection: string, workspaceId: ObjectId, afterId?: ObjectId) {
+  if (collection === 'workspaces') {
+    return { _id: workspaceId, ...(afterId ? { _id: { $gt: afterId } } : {}) };
+  }
+  return {
+    workspaceId,
+    ...(afterId ? { _id: { $gt: afterId } } : {}),
+  };
 }
 
 function exportAllowed(status: string, expiredAt?: Date): boolean {

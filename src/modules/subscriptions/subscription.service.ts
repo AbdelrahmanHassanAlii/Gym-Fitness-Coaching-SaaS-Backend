@@ -134,6 +134,15 @@ export class EntitlementService {
   }
 }
 
+export interface SubscriptionRetentionPort {
+  cancelActiveBeforeApproval(input: {
+    workspaceId: ObjectId;
+    reason: string;
+    now: Date;
+    tx: TransactionContext;
+  }): Promise<ObjectId[]>;
+}
+
 export class SubscriptionApplicationService {
   constructor(
     private readonly config: AppConfig,
@@ -147,6 +156,7 @@ export class SubscriptionApplicationService {
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
     private readonly coachingRelationships?: CoachingRelationshipRepository,
+    private readonly retention?: SubscriptionRetentionPort,
   ) {}
 
   async getWorkspaceSubscription(_ctx: RequestContext, workspaceId: string) {
@@ -748,11 +758,8 @@ export class SubscriptionApplicationService {
     allowedSources: SubscriptionLifecycleStatus[],
     tx: TransactionContext,
   ) {
-    const subscription = await this.subscriptions.ensurePendingActivation(
-      workspaceId,
-      new Date(),
-      tx,
-    );
+    const now = new Date();
+    const subscription = await this.subscriptions.ensurePendingActivation(workspaceId, now, tx);
     await this.assertWorkspaceNotDeletionLocked(workspaceId, tx);
     const effectiveFrom = new Date(input.effectiveFrom);
     const effectiveTo = input.effectiveTo ? new Date(input.effectiveTo) : undefined;
@@ -771,6 +778,7 @@ export class SubscriptionApplicationService {
         ...(effectiveTo ? { effectiveTo } : {}),
         source,
         createdBy: actorObjectId(ctx),
+        now,
       },
       'ACTIVE',
       {
@@ -780,6 +788,38 @@ export class SubscriptionApplicationService {
       effectiveTo ? activeLifecycleMarkers : [...activeLifecycleMarkers, 'expiresAt'],
       tx,
     );
+    const cancelledDeletionIds =
+      (await this.retention?.cancelActiveBeforeApproval({
+        workspaceId,
+        reason: 'SUBSCRIPTION_REACTIVATED_BEFORE_APPROVAL',
+        now,
+        tx,
+      })) ?? [];
+    for (const deletionId of cancelledDeletionIds) {
+      await this.audit.write(
+        {
+          eventType: 'WorkspaceDeletionCancelled',
+          workspaceId,
+          actor: {},
+          entity: { type: 'workspace_deletion', id: deletionId },
+          action: 'system_cancel',
+          after: { reason: 'SUBSCRIPTION_REACTIVATED_BEFORE_APPROVAL' },
+          correlationId: ctx.correlationId,
+        },
+        tx,
+      );
+      await this.outbox.write(
+        {
+          eventType: 'WorkspaceDeletionCancelled',
+          aggregateType: 'workspace_deletion',
+          aggregateId: deletionId,
+          workspaceId,
+          payload: { reason: 'SUBSCRIPTION_REACTIVATED_BEFORE_APPROVAL' },
+          correlationId: ctx.correlationId,
+        },
+        tx,
+      );
+    }
     await this.writeAudit(ctx, workspaceId, eventType, result.subscription._id, 'change_terms', tx);
     await this.writeOutbox(
       ctx,

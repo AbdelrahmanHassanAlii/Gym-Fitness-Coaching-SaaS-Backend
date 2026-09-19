@@ -533,6 +533,25 @@ export class FileApplicationService {
     return count;
   }
 
+  async cleanupGeneratedFileIntents(limit = 50): Promise<number> {
+    let cleaned = 0;
+    const now = this.clock();
+    for (const intent of await this.files.listGeneratedIntentCleanupDue(limit)) {
+      try {
+        await this.storage.deleteObject(intent.storageKey);
+        await this.files.markGeneratedIntentCleaned(intent._id, now);
+        cleaned++;
+      } catch (error) {
+        await this.files.markGeneratedIntentCleanupFailed(
+          intent._id,
+          error instanceof Error ? error.message : 'Unknown generated cleanup failure',
+          now,
+        );
+      }
+    }
+    return cleaned;
+  }
+
   async purgeFiles(limit = 50): Promise<number> {
     let count = 0;
     const now = new Date();

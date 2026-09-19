@@ -96,6 +96,11 @@ export class RetentionApplicationService {
         tx: transaction,
       });
       await this.exportsRepo.terminateActiveForWorkspace(deletion.workspaceId, now, transaction);
+      await this.filesRepo.markWorkspaceGeneratedExportFilesPurgeEligible({
+        workspaceId: deletion.workspaceId,
+        now,
+        tx: transaction,
+      });
       await this.writeAudit(
         ctx,
         deletion.workspaceId,
@@ -341,7 +346,15 @@ export class RetentionApplicationService {
   private async runDeletion(deletionId: ObjectId, workerId: string) {
     const deletion = await this.requireDeletionDocument(deletionId);
     const retainFileIds = await this.step(deletion, 'TERMINATE_ACTIVE_EXPORTS', async () => {
-      await this.exportsRepo.terminateActiveForWorkspace(deletion.workspaceId, this.clock());
+      const now = this.clock();
+      await this.unitOfWork.withTransaction(async (tx) => {
+        await this.exportsRepo.terminateActiveForWorkspace(deletion.workspaceId, now, tx);
+        await this.filesRepo.markWorkspaceGeneratedExportFilesPurgeEligible({
+          workspaceId: deletion.workspaceId,
+          now,
+          tx,
+        });
+      });
       return deletion.retainedPaymentProofFileIds;
     });
     const proofIds = await this.step(deletion, 'DETERMINE_RETAINED_EVIDENCE', async () => {
@@ -488,6 +501,15 @@ export class RetentionApplicationService {
     }
     if ((await this.repository.countDownloadableFiles(workspaceId, retainFileIds)) > 0) {
       throw conflict('WORKSPACE_DELETION_FILES_REMAIN');
+    }
+    if ((await this.repository.countActiveDocuments(workspaceId, retainFileIds)) > 0) {
+      throw conflict('WORKSPACE_DELETION_DOCUMENTS_REMAIN');
+    }
+    if ((await this.repository.countExistingFiles(retainFileIds)) !== retainFileIds.length) {
+      throw conflict('WORKSPACE_DELETION_RETAINED_EVIDENCE_MISSING');
+    }
+    if (!(await this.repository.workspaceIsDeletionLocked(workspaceId))) {
+      throw conflict('WORKSPACE_DELETION_LOCK_MISSING');
     }
   }
 

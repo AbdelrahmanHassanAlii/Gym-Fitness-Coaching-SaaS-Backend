@@ -86,7 +86,7 @@ describe('Stage 13 migration 018', () => {
       const container = await createStage13Container(`stage13_upgrade_${new ObjectId()}`);
       try {
         const through17 = migrations.filter(
-          (migration) => migration.id !== '018-stage13-files-documents',
+          (migration) => migration.id < '018-stage13-files-documents',
         );
         await new MigrationRunner(container.database.db, through17).migrate();
         await container.database.db

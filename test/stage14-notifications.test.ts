@@ -843,6 +843,49 @@ describe('Stage 14 notification behavior', () => {
           aggregateType: 'support_session',
           aggregateId: new ObjectId(),
         },
+        {
+          eventType: 'RetentionWarningDue',
+          aggregateType: 'subscription',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'WorkspaceDeletionRequested',
+          aggregateType: 'workspace_deletion',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'WorkspaceDeletionPostponed',
+          aggregateType: 'workspace_deletion',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'WorkspaceDeletionCancelled',
+          aggregateType: 'workspace_deletion',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'WorkspaceDeletionApproved',
+          aggregateType: 'workspace_deletion',
+          aggregateId: new ObjectId(),
+        },
+        {
+          eventType: 'WorkspaceExportReady',
+          aggregateType: 'workspace_export',
+          aggregateId: new ObjectId(),
+          payload: { requestedByUserId: seed.staffUserId.toHexString() },
+        },
+        {
+          eventType: 'WorkspaceExportFailed',
+          aggregateType: 'workspace_export',
+          aggregateId: new ObjectId(),
+          payload: { requestedByUserId: seed.staffUserId.toHexString() },
+        },
+        {
+          eventType: 'WorkspaceExportExpired',
+          aggregateType: 'workspace_export',
+          aggregateId: new ObjectId(),
+          payload: { requestedByUserId: seed.staffUserId.toHexString() },
+        },
       ];
       expect(cases.map((item) => item.eventType).sort()).toEqual(
         notificationRegistry.map((entry) => entry.eventType).sort(),

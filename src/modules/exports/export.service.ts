@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { FileHandle } from 'node:fs/promises';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ObjectId } from 'mongodb';
 import type { AppConfig } from '../../config/config.types';
 import type { AccessControlService } from '../../core/access-control/access-control.service';
@@ -319,84 +323,110 @@ export class WorkspaceExportApplicationService {
       updatedAt: now,
     };
     await this.files.createGeneratedFileIntent(intent);
-    const archive = await this.buildArchive(exportRequest);
-    const checksum = createHash('sha256').update(archive).digest('hex');
-    const object = await this.storage.putObject({
-      key,
-      body: archive,
-      contentType: exportContentType,
-      checksumSha256: checksum,
-    });
-    await this.files.markGeneratedObjectWritten({
-      intentId: intent._id,
-      sizeBytes: object.sizeBytes,
-      checksumSha256: checksum,
-      now: this.clock(),
-    });
-    return await this.unitOfWork.withTransaction(async (tx) => {
-      const file: FileDocument = {
-        _id: new ObjectId(),
-        workspaceId: exportRequest.workspaceId,
-        origin: 'SYSTEM_GENERATED',
-        generatedPurpose: 'WORKSPACE_EXPORT',
-        generatedForExportId: exportRequest._id,
-        subjectType: 'WORKSPACE',
-        subjectId: exportRequest.workspaceId,
-        storageProvider: this.storage.provider,
-        storageKey: key,
-        originalName: `workspace-export-${exportRequest._id.toHexString()}.zip`,
-        mimeType: exportContentType,
-        sizeBytes: object.sizeBytes,
-        verifiedChecksumSha256: checksum,
-        classification: 'SENSITIVE',
-        status: 'ACTIVE',
-        version: 0,
-        createdAt: this.clock(),
-        confirmedAt: this.clock(),
-      };
-      return await this.files.createGeneratedFile({
-        intentId: intent._id,
-        file,
-        now: this.clock(),
-        tx,
+    const tempDir = await mkdtemp(join(tmpdir(), 'stage17-export-'));
+    const tempPath = join(tempDir, `${exportRequest._id.toHexString()}.zip`);
+    try {
+      const artifact = await this.writeArchiveToFile(exportRequest, tempPath);
+      const object = await this.storage.putObjectFromFile({
+        key,
+        path: tempPath,
+        contentType: exportContentType,
+        sizeBytes: artifact.sizeBytes,
+        checksumSha256: artifact.sha256,
       });
-    });
-  }
-
-  private async buildArchive(exportRequest: WorkspaceExportRequestDocument): Promise<Uint8Array> {
-    const datasets: Record<string, unknown[]> = {};
-    for (const collection of exportCollections) {
-      datasets[`${collection}.json`] = await this.readExportDataset(
-        collection,
-        exportRequest.workspaceId,
-      );
+      await this.files.markGeneratedObjectWritten({
+        intentId: intent._id,
+        sizeBytes: object.sizeBytes,
+        checksumSha256: artifact.sha256,
+        now: this.clock(),
+      });
+      return await this.unitOfWork.withTransaction(async (tx) => {
+        const file: FileDocument = {
+          _id: new ObjectId(),
+          workspaceId: exportRequest.workspaceId,
+          origin: 'SYSTEM_GENERATED',
+          generatedPurpose: 'WORKSPACE_EXPORT',
+          generatedForExportId: exportRequest._id,
+          subjectType: 'WORKSPACE',
+          subjectId: exportRequest.workspaceId,
+          storageProvider: this.storage.provider,
+          storageKey: key,
+          originalName: `workspace-export-${exportRequest._id.toHexString()}.zip`,
+          mimeType: exportContentType,
+          sizeBytes: object.sizeBytes,
+          verifiedChecksumSha256: artifact.sha256,
+          classification: 'SENSITIVE',
+          status: 'ACTIVE',
+          version: 0,
+          createdAt: this.clock(),
+          confirmedAt: this.clock(),
+        };
+        return await this.files.createGeneratedFile({
+          intentId: intent._id,
+          file,
+          now: this.clock(),
+          tx,
+        });
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
     }
-    datasets['manifest.json'] = [
-      {
-        format: 'ZIP_JSON_V1',
-        manifestVersion,
-        generatedAt: this.clock().toISOString(),
-        workspaceId: exportRequest.workspaceId.toHexString(),
-        uploadedBinariesIncluded: false,
-        binaryPolicy: 'Uploaded Stage 13 binary objects are excluded from Stage 17 V1 exports.',
-        datasets: Object.keys(datasets)
-          .filter((name) => name !== 'manifest.json')
-          .sort(),
-      },
-    ];
-    return zipStore(
-      Object.fromEntries(
-        Object.entries(datasets)
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([name, value]) => [name, Buffer.from(JSON.stringify(value, jsonReplacer, 2))]),
-      ),
-    );
   }
 
-  private async readExportDataset(collection: string, workspaceId: ObjectId): Promise<unknown[]> {
+  private async writeArchiveToFile(
+    exportRequest: WorkspaceExportRequestDocument,
+    path: string,
+  ): Promise<{ sizeBytes: number; sha256: string }> {
+    const handle = await open(path, 'w');
+    const writer = new StreamingZipWriter(handle);
+    try {
+      const datasets: ExportDatasetSummary[] = [];
+      for (const collection of exportCollections) {
+        const summary = await this.writeDatasetEntry(writer, collection, exportRequest.workspaceId);
+        datasets.push(summary);
+      }
+      await writer.writeEntry(
+        'manifest.json',
+        Buffer.from(
+          JSON.stringify(
+            [
+              {
+                format: 'ZIP_JSON_V1',
+                manifestVersion,
+                generatedAt: this.clock().toISOString(),
+                workspaceId: exportRequest.workspaceId.toHexString(),
+                uploadedBinariesIncluded: false,
+                binaryPolicy:
+                  'Uploaded Stage 13 binary objects are excluded from Stage 17 V1 exports.',
+                datasets: datasets.map((dataset) => dataset.fileName).sort(),
+                datasetCounts: Object.fromEntries(
+                  datasets.map((dataset) => [dataset.collection, dataset.rowCount]),
+                ),
+              },
+            ],
+            jsonReplacer,
+            2,
+          ),
+        ),
+      );
+      return await writer.close();
+    } catch (error) {
+      await writer.abort();
+      throw error;
+    }
+  }
+
+  private async writeDatasetEntry(
+    writer: StreamingZipWriter,
+    collection: string,
+    workspaceId: ObjectId,
+  ): Promise<ExportDatasetSummary> {
     const batchSize = Math.min(this.config.exports?.batchSize ?? 100, 500);
-    const rows: unknown[] = [];
+    const fileName = `${collection}.json`;
+    const entry = await writer.startEntry(fileName);
+    let rowCount = 0;
     let afterId: ObjectId | undefined;
+    await entry.write(Buffer.from('['));
     while (true) {
       const batch = await this.database.db
         .collection(collection)
@@ -407,13 +437,20 @@ export class WorkspaceExportApplicationService {
         .limit(batchSize)
         .toArray();
       if (batch.length === 0) break;
-      rows.push(...batch);
+      for (const row of batch) {
+        await entry.write(
+          Buffer.from(`${rowCount > 0 ? ',' : ''}\n${JSON.stringify(row, jsonReplacer, 2)}`),
+        );
+        rowCount += 1;
+      }
       const lastId = batch.at(-1)?._id;
       if (!(lastId instanceof ObjectId)) break;
       afterId = lastId;
       if (batch.length < batchSize) break;
     }
-    return rows;
+    await entry.write(Buffer.from(rowCount > 0 ? '\n]' : ']'));
+    await entry.close();
+    return { collection, fileName, rowCount };
   }
 }
 
@@ -451,6 +488,12 @@ const exportCollections = [
   'files',
   'documents',
 ] as const;
+
+interface ExportDatasetSummary {
+  collection: string;
+  fileName: string;
+  rowCount: number;
+}
 
 function exportProjection(collection: string): Record<string, 0> {
   if (collection === 'files') return { storageKey: 0 };
@@ -567,57 +610,143 @@ function jsonReplacer(_key: string, value: unknown) {
   return value;
 }
 
-function zipStore(files: Record<string, Uint8Array>): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let offset = 0;
-  for (const [name, content] of Object.entries(files)) {
+interface ZipCentralEntry {
+  nameBytes: Buffer;
+  crc: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+}
+
+class StreamingZipWriter {
+  private readonly hash = createHash('sha256');
+  private readonly centralEntries: ZipCentralEntry[] = [];
+  private offset = 0;
+  private closed = false;
+  private aborted = false;
+
+  constructor(private readonly handle: FileHandle) {}
+
+  async startEntry(name: string): Promise<StreamingZipEntry> {
+    if (this.closed || this.aborted) throw new Error('ZIP writer is closed');
     const nameBytes = Buffer.from(name);
-    const crc = crc32(content);
+    const localHeaderOffset = this.offset;
     const local = Buffer.alloc(30 + nameBytes.length);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0x08, 6);
     local.writeUInt16LE(0, 8);
     local.writeUInt32LE(0, 10);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(content.byteLength, 18);
-    local.writeUInt32LE(content.byteLength, 22);
+    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(0, 18);
+    local.writeUInt32LE(0, 22);
     local.writeUInt16LE(nameBytes.length, 26);
     nameBytes.copy(local, 30);
-    chunks.push(local, content);
-    const centralHeader = Buffer.alloc(46 + nameBytes.length);
-    centralHeader.writeUInt32LE(0x02014b50, 0);
-    centralHeader.writeUInt16LE(20, 4);
-    centralHeader.writeUInt16LE(20, 6);
-    centralHeader.writeUInt32LE(0, 8);
-    centralHeader.writeUInt32LE(crc, 16);
-    centralHeader.writeUInt32LE(content.byteLength, 20);
-    centralHeader.writeUInt32LE(content.byteLength, 24);
-    centralHeader.writeUInt16LE(nameBytes.length, 28);
-    centralHeader.writeUInt32LE(offset, 42);
-    nameBytes.copy(centralHeader, 46);
-    central.push(centralHeader);
-    offset += local.byteLength + content.byteLength;
+    await this.write(local);
+    return new StreamingZipEntry(this, nameBytes, localHeaderOffset);
   }
-  const centralOffset = offset;
-  const centralSize = central.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(central.length, 8);
-  end.writeUInt16LE(central.length, 10);
-  end.writeUInt32LE(centralSize, 12);
-  end.writeUInt32LE(centralOffset, 16);
-  return Buffer.concat([...chunks, ...central, end]);
+
+  async writeEntry(name: string, content: Uint8Array): Promise<void> {
+    const entry = await this.startEntry(name);
+    await entry.write(content);
+    await entry.close();
+  }
+
+  async close(): Promise<{ sizeBytes: number; sha256: string }> {
+    if (this.closed) throw new Error('ZIP writer already closed');
+    this.closed = true;
+    const centralOffset = this.offset;
+    let centralSize = 0;
+    for (const entry of this.centralEntries) {
+      const central = Buffer.alloc(46 + entry.nameBytes.length);
+      central.writeUInt32LE(0x02014b50, 0);
+      central.writeUInt16LE(20, 4);
+      central.writeUInt16LE(20, 6);
+      central.writeUInt16LE(0x08, 8);
+      central.writeUInt16LE(0, 10);
+      central.writeUInt32LE(0, 12);
+      central.writeUInt32LE(entry.crc, 16);
+      central.writeUInt32LE(entry.compressedSize, 20);
+      central.writeUInt32LE(entry.uncompressedSize, 24);
+      central.writeUInt16LE(entry.nameBytes.length, 28);
+      central.writeUInt32LE(entry.localHeaderOffset, 42);
+      entry.nameBytes.copy(central, 46);
+      await this.write(central);
+      centralSize += central.byteLength;
+    }
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(this.centralEntries.length, 8);
+    end.writeUInt16LE(this.centralEntries.length, 10);
+    end.writeUInt32LE(centralSize, 12);
+    end.writeUInt32LE(centralOffset, 16);
+    await this.write(end);
+    await this.handle.close();
+    return { sizeBytes: this.offset, sha256: this.hash.digest('hex') };
+  }
+
+  async abort(): Promise<void> {
+    if (this.closed || this.aborted) return;
+    this.aborted = true;
+    await this.handle.close().catch(() => undefined);
+  }
+
+  async write(chunk: Uint8Array): Promise<void> {
+    await this.handle.write(chunk);
+    this.hash.update(chunk);
+    this.offset += chunk.byteLength;
+  }
+
+  async finishEntry(entry: ZipCentralEntry): Promise<void> {
+    const descriptor = Buffer.alloc(16);
+    descriptor.writeUInt32LE(0x08074b50, 0);
+    descriptor.writeUInt32LE(entry.crc, 4);
+    descriptor.writeUInt32LE(entry.compressedSize, 8);
+    descriptor.writeUInt32LE(entry.uncompressedSize, 12);
+    await this.write(descriptor);
+    this.centralEntries.push(entry);
+  }
 }
 
-function crc32(input: Uint8Array): number {
-  let crc = 0xffffffff;
+class StreamingZipEntry {
+  private crc = 0xffffffff;
+  private size = 0;
+  private closed = false;
+
+  constructor(
+    private readonly writer: StreamingZipWriter,
+    private readonly nameBytes: Buffer,
+    private readonly localHeaderOffset: number,
+  ) {}
+
+  async write(chunk: Uint8Array): Promise<void> {
+    if (this.closed) throw new Error('ZIP entry is closed');
+    this.crc = crc32Update(this.crc, chunk);
+    this.size += chunk.byteLength;
+    await this.writer.write(chunk);
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const crc = (this.crc ^ 0xffffffff) >>> 0;
+    await this.writer.finishEntry({
+      nameBytes: this.nameBytes,
+      crc,
+      compressedSize: this.size,
+      uncompressedSize: this.size,
+      localHeaderOffset: this.localHeaderOffset,
+    });
+  }
+}
+
+function crc32Update(current: number, input: Uint8Array): number {
+  let crc = current;
   for (const byte of input) {
     crc ^= byte;
     for (let i = 0; i < 8; i += 1) {
       crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
     }
   }
-  return (crc ^ 0xffffffff) >>> 0;
+  return crc;
 }

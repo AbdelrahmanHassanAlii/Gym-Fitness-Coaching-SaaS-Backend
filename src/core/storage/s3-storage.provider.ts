@@ -1,4 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import type {
   CreateDownloadUrlInput,
   CreateUploadUrlInput,
@@ -81,6 +83,34 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     return {
       key: input.key,
       sizeBytes: input.body.byteLength,
+      contentType: input.contentType,
+      ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+      ...(eTag ? { eTag } : {}),
+    };
+  }
+
+  async putObjectFromFile(input: {
+    key: string;
+    path: string;
+    contentType: string;
+    sizeBytes: number;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata> {
+    const response = await fetch(this.objectUrl(input.key), {
+      method: 'PUT',
+      headers: this.signedHeaders('PUT', input.key, {
+        'content-length': String(input.sizeBytes),
+        'content-type': input.contentType,
+        'if-none-match': '*',
+        ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
+      }),
+      body: Readable.toWeb(createReadStream(input.path)) as never,
+    });
+    if (!response.ok) throw new Error(`Object storage PUT failed with status ${response.status}`);
+    const eTag = response.headers.get('etag');
+    return {
+      key: input.key,
+      sizeBytes: input.sizeBytes,
       contentType: input.contentType,
       ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
       ...(eTag ? { eTag } : {}),

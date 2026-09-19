@@ -9,6 +9,7 @@ import type {
 export class FakeStorageProvider implements StorageProvider {
   readonly provider = 'fake';
   readonly objects = new Map<string, ObjectMetadata>();
+  readonly bodies = new Map<string, Uint8Array>();
   failNextUploadUrl = false;
   failNextDownloadUrl = false;
   failNextStat = false;
@@ -90,5 +91,27 @@ export class FakeStorageProvider implements StorageProvider {
       throw new Error('Object already exists');
     }
     this.objects.set(input.key, input);
+  }
+
+  async putObjectFromFile(input: {
+    key: string;
+    path: string;
+    contentType: string;
+    sizeBytes: number;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata> {
+    const body = new Uint8Array(await Bun.file(input.path).arrayBuffer());
+    if (body.byteLength !== input.sizeBytes) {
+      throw new Error('Generated artifact size mismatch');
+    }
+    this.bodies.set(input.key, body);
+    const metadata: ObjectMetadata = {
+      key: input.key,
+      sizeBytes: input.sizeBytes,
+      contentType: input.contentType,
+      ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+    };
+    this.putObjectMetadata(metadata);
+    return metadata;
   }
 }

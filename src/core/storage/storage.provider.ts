@@ -36,6 +36,13 @@ export interface StorageProvider {
     contentType: string;
     checksumSha256?: string;
   }): Promise<ObjectMetadata>;
+  putObjectFromFile(input: {
+    key: string;
+    path: string;
+    contentType: string;
+    sizeBytes: number;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata>;
   statObject(key: string): Promise<ObjectMetadata | null>;
   createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl>;
   deleteObject(key: string): Promise<void>;

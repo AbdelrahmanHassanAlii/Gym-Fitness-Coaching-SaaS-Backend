@@ -278,6 +278,36 @@ describe('Stage 17 exports', () => {
           ),
           'FILE_NOT_FOUND',
         );
+        await expectErrorCode(
+          container.unitOfWork.withTransaction((tx) =>
+            container.files.deleteFile(
+              seed.ownerCtx,
+              seed.workspaceId.toHexString(),
+              file._id.toHexString(),
+              { expectedVersion: 0 },
+              tx,
+            ),
+          ),
+          'FILE_NOT_FOUND',
+        );
+        await container.database.db
+          .collection('files')
+          .updateOne({ _id: file._id }, { $set: { status: 'SOFT_DELETED' } });
+        await expectErrorCode(
+          container.unitOfWork.withTransaction((tx) =>
+            container.files.restoreFile(
+              seed.ownerCtx,
+              seed.workspaceId.toHexString(),
+              file._id.toHexString(),
+              { expectedVersion: 0 },
+              tx,
+            ),
+          ),
+          'FILE_NOT_FOUND',
+        );
+        await container.database.db
+          .collection('files')
+          .updateOne({ _id: file._id }, { $set: { status: 'ACTIVE' } });
 
         const intentId = new ObjectId();
         const key = 'workspaces/generated/orphan.zip';
@@ -373,6 +403,56 @@ describe('Stage 17 exports', () => {
           .collection('files')
           .findOne({ _id: ready?.artifactFileId });
         expect(purged?.status).toBe('PURGE_PENDING');
+      } finally {
+        await dispose(container);
+      }
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    'export archive is generated through bounded batches and uploaded from a file artifact',
+    async () => {
+      const container = await stage17Container('stage17_export_streaming');
+      const storage = installFakeStage17Storage(container);
+      try {
+        const seed = await seedWorkspace(container);
+        const branchIds = Array.from({ length: 5 }, () => new ObjectId());
+        await container.database.db.collection('branches').insertMany(
+          branchIds.map((branchId, index) => ({
+            _id: branchId,
+            workspaceId: seed.workspaceId,
+            name: `Streaming Branch ${index}`,
+            status: 'ACTIVE',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })),
+        );
+        const created = await container.unitOfWork.withTransaction((tx) =>
+          container.exports.create(seed.ownerCtx, seed.workspaceId.toHexString(), tx),
+        );
+
+        expect(await container.exports.generateDue()).toBe(1);
+
+        const ready = await container.database.db.collection('workspace_export_requests').findOne({
+          _id: new ObjectId(created.export.id),
+        });
+        const artifact = await container.database.db
+          .collection('files')
+          .findOne({ _id: ready?.artifactFileId });
+        expect(storage.putObjectFromFileCalls).toBe(1);
+        const entries = extractStoredZipEntries(storage.bodyFor(String(artifact?.storageKey)));
+        const branches = JSON.parse(
+          Buffer.from(entries.get('branches.json') ?? new Uint8Array()).toString('utf8'),
+        ) as Array<{ _id: string; name: string }>;
+        expect(branches.map((branch) => branch._id).sort()).toEqual(
+          branchIds.map((branchId) => branchId.toHexString()).sort(),
+        );
+        const manifest = JSON.parse(
+          Buffer.from(entries.get('manifest.json') ?? new Uint8Array()).toString('utf8'),
+        ) as Array<{ datasetCounts: Record<string, number>; binaryPolicy: string }>;
+        expect(manifest[0]?.datasetCounts.branches).toBe(5);
+        expect(manifest[0]?.binaryPolicy).toContain('excluded');
       } finally {
         await dispose(container);
       }
@@ -577,6 +657,152 @@ describe('Stage 17 retention and deletion', () => {
   );
 
   test(
+    'deletion approval deterministically wins the reactivation race through the subscription write',
+    async () => {
+      const container = await stage17Container('stage17_approval_wins');
+      try {
+        const seed = await seedWorkspace(container, {
+          subscriptionStatus: 'EXPIRED',
+          expiredAt: new Date('2025-01-01T00:00:00.000Z'),
+        });
+        const planVersionId = await seedPlanVersion(container.database.db, seed.ownerId);
+        await seedExpiredDeletion(container, seed);
+        const deletion = await container.database.db
+          .collection('workspace_deletion_requests')
+          .findOne({
+            workspaceId: seed.workspaceId,
+          });
+        if (!deletion?._id) throw new Error('missing deletion request');
+        const approvalClaimed = deferred<void>();
+        const releaseApproval = deferred<void>();
+        container.retention.testHooks.afterSubscriptionApprovalClaim = async () => {
+          approvalClaimed.resolve();
+          await releaseApproval.promise;
+        };
+
+        const approval = settle(
+          container.retention.approve(seed.platformCtx, deletion._id.toHexString(), {
+            expectedVersion: 0,
+            reason: 'Approval wins deterministic race',
+          }),
+        );
+        await approvalClaimed.promise;
+        const reactivation = settle(
+          container.subscriptions.reactivate(seed.ownerCtx, seed.workspaceId.toHexString(), {
+            expectedVersion: 0,
+            planVersionId: planVersionId.toHexString(),
+            billingPeriod: 'MONTHLY',
+            effectiveFrom: '2026-01-01T00:00:00.000Z',
+          }),
+        );
+        releaseApproval.resolve();
+
+        expect((await approval).status).toBe('fulfilled');
+        const reactivationResult = await reactivation;
+        if (reactivationResult.status === 'fulfilled') {
+          throw new Error('Expected reactivation to lose the deletion approval race');
+        }
+        expect(reactivationResult.error).toMatchObject({
+          code: expect.stringMatching(/SUBSCRIPTION_VERSION_CONFLICT|WORKSPACE_DELETION_LOCKED/),
+        });
+        const subscription = await container.database.db.collection('subscriptions').findOne({
+          _id: seed.subscriptionId,
+        });
+        const workspace = await container.database.db.collection('workspaces').findOne({
+          _id: seed.workspaceId,
+        });
+        const approved = await container.database.db
+          .collection('workspace_deletion_requests')
+          .findOne({
+            _id: deletion._id,
+          });
+        expect(approved?.status).toBe('APPROVED');
+        expect(workspace?.status).toBe('RESTRICTED');
+        expect(subscription?.deletionLockRequestId?.equals(deletion._id as ObjectId)).toBe(true);
+      } finally {
+        container.retention.testHooks = {};
+        await dispose(container);
+      }
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    'subscription reactivation deterministically wins the deletion approval race through the subscription write',
+    async () => {
+      const container = await stage17Container('stage17_reactivation_wins');
+      try {
+        const seed = await seedWorkspace(container, {
+          subscriptionStatus: 'EXPIRED',
+          expiredAt: new Date('2025-01-01T00:00:00.000Z'),
+        });
+        const planVersionId = await seedPlanVersion(container.database.db, seed.ownerId);
+        await seedExpiredDeletion(container, seed);
+        const deletion = await container.database.db
+          .collection('workspace_deletion_requests')
+          .findOne({
+            workspaceId: seed.workspaceId,
+          });
+        if (!deletion?._id) throw new Error('missing deletion request');
+        const termsAttached = deferred<void>();
+        const releaseReactivation = deferred<void>();
+        container.subscriptions.testHooks.afterTermsAttached = async () => {
+          termsAttached.resolve();
+          await releaseReactivation.promise;
+        };
+
+        const reactivation = settle(
+          container.subscriptions.reactivate(seed.ownerCtx, seed.workspaceId.toHexString(), {
+            expectedVersion: 0,
+            planVersionId: planVersionId.toHexString(),
+            billingPeriod: 'MONTHLY',
+            effectiveFrom: '2026-01-01T00:00:00.000Z',
+          }),
+        );
+        await termsAttached.promise;
+        const approval = settle(
+          container.retention.approve(seed.platformCtx, deletion._id.toHexString(), {
+            expectedVersion: 0,
+            reason: 'Reactivation wins deterministic race',
+          }),
+        );
+        releaseReactivation.resolve();
+
+        expect((await reactivation).status).toBe('fulfilled');
+        const approvalResult = await approval;
+        if (approvalResult.status === 'fulfilled') {
+          throw new Error('Expected deletion approval to lose the reactivation race');
+        }
+        expect((approvalResult.error as { code?: string }).code).toMatch(
+          /WORKSPACE_DELETION_ELIGIBILITY_CHANGED|WORKSPACE_DELETION_NOT_ELIGIBLE|WORKSPACE_DELETION_VERSION_CONFLICT|WORKSPACE_DELETION_INVALID_TRANSITION/,
+        );
+        const subscription = await container.database.db.collection('subscriptions').findOne({
+          _id: seed.subscriptionId,
+        });
+        const workspace = await container.database.db.collection('workspaces').findOne({
+          _id: seed.workspaceId,
+        });
+        const cancelled = await container.database.db
+          .collection('workspace_deletion_requests')
+          .findOne({
+            _id: deletion._id,
+          });
+        expect(subscription?.lifecycleStatus).toBe('ACTIVE');
+        expect(workspace?.status).toBe('ACTIVE');
+        expect(cancelled?.status).toBe('CANCELLED');
+        expect(cancelled?.cancelledBy).toMatchObject({
+          type: 'SYSTEM',
+          reason: 'SUBSCRIPTION_REACTIVATED_BEFORE_APPROVAL',
+        });
+      } finally {
+        container.subscriptions.testHooks = {};
+        await dispose(container);
+      }
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
+
+  test(
     'final verification blocks completion while live data remains',
     async () => {
       const container = await stage17Container('stage17_verify_blocker');
@@ -631,10 +857,114 @@ describe('Stage 17 retention and deletion', () => {
     },
     INTEGRATION_TEST_TIMEOUT_MS,
   );
+
+  test(
+    'final verification blocks completion when a real delete-manifest record remains and retry completes after cleanup',
+    async () => {
+      const container = await stage17Container('stage17_real_leftover_record');
+      try {
+        const target = await seedWorkspace(container);
+        const other = await seedWorkspace(container);
+        const requestId = new ObjectId();
+        await insertDeletion(container.database.db, {
+          workspaceId: target.workspaceId,
+          status: 'APPROVED',
+          subscriptionId: target.subscriptionId,
+        });
+        const actualRequestId = await deletionId(container.database.db, target.workspaceId);
+        await container.database.db.collection('workspaces').updateOne(
+          { _id: target.workspaceId },
+          {
+            $set: {
+              status: 'RESTRICTED',
+              deletionLockRequestId: actualRequestId,
+            },
+          },
+        );
+        await container.database.db
+          .collection('subscriptions')
+          .updateOne(
+            { _id: target.subscriptionId },
+            { $set: { deletionLockRequestId: actualRequestId } },
+          );
+        await container.database.db.collection('branches').insertOne({
+          _id: requestId,
+          workspaceId: other.workspaceId,
+          name: 'Other Workspace Branch',
+          status: 'ACTIVE',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        let insertedLeftover = false;
+        container.retention.testHooks.afterTenantDataDeleted = async () => {
+          if (insertedLeftover) return;
+          insertedLeftover = true;
+          await container.database.db.collection('branches').insertOne({
+            _id: new ObjectId(),
+            workspaceId: target.workspaceId,
+            name: 'Leftover Branch',
+            status: 'ACTIVE',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        };
+
+        expect(await container.retention.processDeletions('worker-a')).toBe(0);
+        expect(
+          (
+            await container.database.db
+              .collection('workspace_deletion_requests')
+              .findOne({ _id: actualRequestId })
+          )?.status,
+        ).toBe('FAILED');
+        expect(
+          (
+            await container.database.db
+              .collection('workspaces')
+              .findOne({ _id: target.workspaceId })
+          )?.status,
+        ).toBe('RESTRICTED');
+        expect(
+          await container.database.db.collection('branches').countDocuments({
+            workspaceId: target.workspaceId,
+          }),
+        ).toBe(1);
+        expect(
+          await container.database.db.collection('branches').countDocuments({
+            workspaceId: other.workspaceId,
+          }),
+        ).toBe(1);
+
+        container.retention.testHooks = {};
+        expect(await container.retention.processDeletions('worker-b')).toBe(1);
+        expect(
+          await container.database.db.collection('branches').countDocuments({
+            workspaceId: target.workspaceId,
+          }),
+        ).toBe(0);
+        expect(
+          await container.database.db.collection('branches').countDocuments({
+            workspaceId: other.workspaceId,
+          }),
+        ).toBe(1);
+        expect(
+          (
+            await container.database.db
+              .collection('workspace_deletion_requests')
+              .findOne({ _id: actualRequestId })
+          )?.status,
+        ).toBe('COMPLETED');
+      } finally {
+        container.retention.testHooks = {};
+        await dispose(container);
+      }
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 });
 
 class CapturingStorageProvider extends FakeStorageProvider {
-  readonly bodies = new Map<string, Uint8Array>();
+  putObjectFromFileCalls = 0;
 
   override putObject(input: ObjectMetadata, options?: { overwrite?: boolean }): void;
   override putObject(input: {
@@ -653,6 +983,17 @@ class CapturingStorageProvider extends FakeStorageProvider {
       this.bodies.set(input.key, input.body);
     }
     return super.putObject(input as never, options) as undefined | Promise<ObjectMetadata>;
+  }
+
+  override async putObjectFromFile(input: {
+    key: string;
+    path: string;
+    contentType: string;
+    sizeBytes: number;
+    checksumSha256?: string;
+  }): Promise<ObjectMetadata> {
+    this.putObjectFromFileCalls += 1;
+    return await super.putObjectFromFile(input);
   }
 
   bodyFor(key: string): Uint8Array {
@@ -1170,6 +1511,60 @@ function platformCtx(userId: ObjectId, platformMembershipId: ObjectId) {
     locale: 'en',
     timezone: 'Africa/Cairo',
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function settle<T>(
+  promise: Promise<T>,
+): Promise<{ status: 'fulfilled'; value: T } | { status: 'rejected'; error: unknown }> {
+  try {
+    return { status: 'fulfilled', value: await promise };
+  } catch (error) {
+    return { status: 'rejected', error };
+  }
+}
+
+function extractStoredZipEntries(archive: Uint8Array): Map<string, Uint8Array> {
+  const buffer = Buffer.from(archive);
+  const entries = new Map<string, Uint8Array>();
+  let offset = 0;
+  while (offset < buffer.byteLength && buffer.readUInt32LE(offset) === 0x04034b50) {
+    const flags = buffer.readUInt16LE(offset + 6);
+    const nameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+    const name = buffer.subarray(offset + 30, offset + 30 + nameLength).toString('utf8');
+    const contentStart = offset + 30 + nameLength + extraLength;
+    let contentEnd: number;
+    let nextOffset: number;
+    if ((flags & 0x08) === 0) {
+      const size = buffer.readUInt32LE(offset + 18);
+      contentEnd = contentStart + size;
+      nextOffset = contentEnd;
+    } else {
+      const descriptorOffset = findDataDescriptor(buffer, contentStart);
+      contentEnd = descriptorOffset;
+      nextOffset = descriptorOffset + 16;
+    }
+    entries.set(name, buffer.subarray(contentStart, contentEnd));
+    offset = nextOffset;
+  }
+  return entries;
+}
+
+function findDataDescriptor(buffer: Buffer, start: number): number {
+  for (let index = start; index <= buffer.byteLength - 16; index += 1) {
+    if (buffer.readUInt32LE(index) === 0x08074b50) return index;
+  }
+  throw new Error('missing ZIP data descriptor');
 }
 
 function integrationConfig(dbName: string): AppConfig {

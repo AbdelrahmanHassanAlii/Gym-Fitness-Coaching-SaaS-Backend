@@ -143,7 +143,13 @@ export interface SubscriptionRetentionPort {
   }): Promise<ObjectId[]>;
 }
 
+export interface SubscriptionTestHooks {
+  afterTermsAttached?: () => Promise<void>;
+}
+
 export class SubscriptionApplicationService {
+  testHooks: SubscriptionTestHooks = {};
+
   constructor(
     private readonly config: AppConfig,
     private readonly unitOfWork: UnitOfWork,
@@ -788,6 +794,7 @@ export class SubscriptionApplicationService {
       effectiveTo ? activeLifecycleMarkers : [...activeLifecycleMarkers, 'expiresAt'],
       tx,
     );
+    await this.testHooks.afterTermsAttached?.();
     const cancelledDeletionIds =
       (await this.retention?.cancelActiveBeforeApproval({
         workspaceId,

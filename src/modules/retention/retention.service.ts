@@ -23,6 +23,11 @@ import type {
 const msPerDay = 24 * 60 * 60 * 1000;
 
 export class RetentionApplicationService {
+  testHooks: {
+    afterSubscriptionApprovalClaim?: () => Promise<void>;
+    afterTenantDataDeleted?: () => Promise<void>;
+  } = {};
+
   constructor(
     private readonly config: AppConfig,
     private readonly unitOfWork: UnitOfWork,
@@ -81,6 +86,7 @@ export class RetentionApplicationService {
         now,
         tx: transaction,
       });
+      await this.testHooks.afterSubscriptionApprovalClaim?.();
       await this.repository.restrictWorkspace({
         workspaceId: deletion.workspaceId,
         deletionRequestId: deletion._id,
@@ -398,6 +404,7 @@ export class RetentionApplicationService {
       }
       return proofIds;
     });
+    await this.testHooks.afterTenantDataDeleted?.();
     await this.step(deletion, 'VERIFY_NO_LIVE_WORKSPACE_DATA', async () => {
       await this.verifyNoLiveWorkspaceData(deletion.workspaceId, proofIds);
       return proofIds;

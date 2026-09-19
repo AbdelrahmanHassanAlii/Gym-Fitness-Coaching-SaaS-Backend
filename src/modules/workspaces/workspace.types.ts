@@ -62,6 +62,11 @@ export interface WorkspaceDocument {
   city?: string;
   governorate?: string;
   createdFromLeadId?: ObjectId;
+  deletionLockRequestId?: ObjectId;
+  deletionLockedAt?: Date;
+  liveDataDeletedAt?: Date;
+  deletionCompletedAt?: Date;
+  backupExpiryAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }

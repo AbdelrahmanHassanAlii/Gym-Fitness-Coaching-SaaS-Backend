@@ -753,6 +753,7 @@ export class SubscriptionApplicationService {
       new Date(),
       tx,
     );
+    await this.assertWorkspaceNotDeletionLocked(workspaceId, tx);
     const effectiveFrom = new Date(input.effectiveFrom);
     const effectiveTo = input.effectiveTo ? new Date(input.effectiveTo) : undefined;
     const result = await this.subscriptions.attachTerms(
@@ -923,6 +924,7 @@ export class SubscriptionApplicationService {
     tx?: TransactionContext,
   ) {
     return await this.withTransaction(tx, async (tx) => {
+      if (to === 'ACTIVE') await this.assertWorkspaceNotDeletionLocked(workspaceId, tx);
       const subscription = await this.subscriptions.transition(
         workspaceId,
         expectedVersion,
@@ -1011,6 +1013,14 @@ export class SubscriptionApplicationService {
   private async assertWorkspaceExists(workspaceId: ObjectId, tx?: TransactionContext) {
     const workspace = await this.workspaces.findById(workspaceId, tx);
     if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+  }
+
+  private async assertWorkspaceNotDeletionLocked(workspaceId: ObjectId, tx?: TransactionContext) {
+    const workspace = await this.workspaces.findById(workspaceId, tx);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+    if (workspace.status === 'RESTRICTED' || workspace.deletionLockRequestId) {
+      throw conflict('WORKSPACE_DELETION_LOCKED');
+    }
   }
 
   private async withTransaction<T>(

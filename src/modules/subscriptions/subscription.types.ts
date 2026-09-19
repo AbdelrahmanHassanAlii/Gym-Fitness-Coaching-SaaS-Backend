@@ -79,6 +79,8 @@ export interface SubscriptionDocument {
   frozenAt?: Date;
   expiredAt?: Date;
   cancelledAt?: Date;
+  deletionLockRequestId?: ObjectId;
+  deletionLockClaimedAt?: Date;
   version: number;
   createdAt: Date;
   updatedAt: Date;

@@ -14,6 +14,8 @@ import { type EmailProvider, LoggingEmailProvider } from '../core/messaging/emai
 import { LoggingPushProvider, type PushProvider } from '../core/messaging/push.provider';
 import { S3CompatibleStorageProvider } from '../core/storage/s3-storage.provider';
 import type { StorageProvider } from '../core/storage/storage.provider';
+import { AnalyticsRepository } from '../modules/analytics/analytics.repository';
+import { AnalyticsApplicationService } from '../modules/analytics/analytics.service';
 import { AuditRepository } from '../modules/audit/audit.repository';
 import { AuditApplicationService } from '../modules/audit/audit.service';
 import {
@@ -96,6 +98,7 @@ export interface AppContainer {
   authRateLimits: AuthRateLimitRepository;
   authSecurityEvents: AuthSecurityEventWriter;
   auditRepo: AuditRepository;
+  analyticsRepo: AnalyticsRepository;
   platformMemberships: PlatformMembershipRepository;
   permissionDefinitions: PermissionDefinitionRepository;
   permissionProfiles: PermissionProfileRepository;
@@ -129,6 +132,7 @@ export interface AppContainer {
   mfa: MfaService;
   auth: AuthApplicationService;
   auditService: AuditApplicationService;
+  analytics: AnalyticsApplicationService;
   workspaces: WorkspaceApplicationService;
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
@@ -159,6 +163,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const authRateLimits = new AuthRateLimitRepository(database);
   const authSecurityEvents = new AuthSecurityEventWriter(database);
   const auditRepo = new AuditRepository(database);
+  const analyticsRepo = new AnalyticsRepository(database);
   const platformMemberships = new PlatformMembershipRepository(database);
   const permissionDefinitions = new PermissionDefinitionRepository(database);
   const permissionProfiles = new PermissionProfileRepository(database);
@@ -199,6 +204,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     membershipBranchAssignments,
     permissionProfiles,
     accessGrants,
+    coachingRelationships,
   );
   const storageConfig = config.storage ?? {
     provider: 's3' as const,
@@ -438,6 +444,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     authRateLimits,
     authSecurityEvents,
     auditRepo,
+    analyticsRepo,
     platformMemberships,
     permissionDefinitions,
     permissionProfiles,
@@ -471,6 +478,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     mfa: new MfaService(unitOfWork, authMfaMethods, authSecurityEvents, credentialDigests),
     auth,
     auditService: new AuditApplicationService(auditRepo, accessControl),
+    analytics: new AnalyticsApplicationService(analyticsRepo, accessControl, audit),
     workspaces,
     permissions: new PermissionApplicationService(
       unitOfWork,

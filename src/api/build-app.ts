@@ -8,6 +8,7 @@ import type { AppContainer } from '../bootstrap/app-container';
 import { registerErrorHandler } from '../core/errors/error-handler';
 import { createLoggerOptions } from '../core/logging/logger';
 import { registerRequestContext } from '../core/request-context/request-context.plugin';
+import { registerAnalyticsRoutes } from '../modules/analytics/analytics.routes';
 import { registerAuditRoutes } from '../modules/audit/audit.routes';
 import { registerAuthentication } from '../modules/auth/auth.middleware';
 import { registerAuthRoutes } from '../modules/auth/auth.routes';
@@ -100,6 +101,7 @@ export async function buildApp(container: AppContainer) {
         { name: 'Notifications' },
         { name: 'Support' },
         { name: 'Audit' },
+        { name: 'Analytics' },
       ],
       components: {
         securitySchemes: {
@@ -146,6 +148,7 @@ export async function buildApp(container: AppContainer) {
   await registerNotificationRoutes(app, container);
   await registerSupportAccessRoutes(app, container);
   await registerAuditRoutes(app, container);
+  await registerAnalyticsRoutes(app, container);
 
   return app;
 }

@@ -141,15 +141,10 @@ export class AccessControlService {
     ctx.workspaceMembershipId = membership._id.toHexString();
 
     if (input.branchId) {
-      await this.assertStructuralScope(
-        {
-          context: 'WORKSPACE',
-          workspaceId: input.workspaceId,
-          permission: input.permission,
-          scope: { type: 'BRANCH', resourceIds: [input.branchId] },
-        },
-        membership._id,
-      );
+      const branches = await this.branches.listByIdsInWorkspace(input.workspaceId, [
+        input.branchId,
+      ]);
+      if (branches[0]?.status !== 'ACTIVE') throw permissionDenied('SCOPE_DENIED');
     }
     if (input.relationshipId && this.relationships) {
       const relationship = await this.relationships.findByIdInWorkspace(
@@ -199,6 +194,27 @@ export class AccessControlService {
         throw permissionDenied('SCOPE_RESOURCE_REQUIRED');
       }
     }
+    if (branchResourceIds.length > 0) {
+      const uniqueBranchIds = uniqueObjectIds(branchResourceIds);
+      const branches = await this.branches.listByIdsInWorkspace(workspace._id, uniqueBranchIds);
+      const activeIds = new Set(
+        branches
+          .filter((branch) => branch.status === 'ACTIVE')
+          .map((branch) => branch._id.toHexString()),
+      );
+      if (!uniqueBranchIds.every((branchId) => activeIds.has(branchId.toHexString()))) {
+        throw permissionDenied('SCOPE_DENIED');
+      }
+    }
+    if (specificResourceIds.length > 0 && this.relationships) {
+      for (const relationshipId of uniqueObjectIds(specificResourceIds)) {
+        const relationship = await this.relationships.findByIdInWorkspace(
+          workspace._id,
+          relationshipId,
+        );
+        if (!relationship) throw permissionDenied('SCOPE_DENIED');
+      }
+    }
 
     const profileEntries = eligibleProfiles.flatMap((profile) =>
       profile.permissions.filter((entry) => entry.permission === input.permission),
@@ -219,7 +235,7 @@ export class AccessControlService {
     const workspaceDecision = decisions.workspace;
     const workspaceAllowed =
       workspaceDecision === 'ALLOW' || (workspaceDecision !== 'DENY' && baseline === 'ALLOW');
-    const includeBranchIds = decisions.branch.allow;
+    let includeBranchIds = decisions.branch.allow;
     const excludeBranchIds = decisions.branch.deny;
     const includeRelationshipIds = decisions.relationship.allow;
     const excludeRelationshipIds = decisions.relationship.deny;
@@ -253,8 +269,37 @@ export class AccessControlService {
       throw permissionDenied('PERMISSION_DENIED');
     }
 
+    let effectiveWorkspaceAllowed = workspaceAllowed;
+    if (
+      membership.roles.includes('GYM_MANAGER' as never) &&
+      !membership.roles.includes('GYM_OWNER' as never)
+    ) {
+      const activeBranchAssignments = await this.branchAssignments.listActive(
+        workspace._id,
+        membership._id,
+      );
+      const assignedBranchIds = activeBranchAssignments.map((assignment) => assignment.branchId);
+      if (workspaceAllowed && includeBranchIds.length === 0) {
+        includeBranchIds = assignedBranchIds;
+        effectiveWorkspaceAllowed = false;
+      } else if (includeBranchIds.length > 0) {
+        includeBranchIds = includeBranchIds.filter((branchId) =>
+          assignedBranchIds.some((assignedBranchId) => assignedBranchId.equals(branchId)),
+        );
+      }
+    }
+    if (
+      ['TRAINER', 'ASSISTANT_TRAINER', 'NUTRITIONIST'].some((role) =>
+        membership.roles.includes(role as never),
+      ) &&
+      !membership.roles.includes('GYM_OWNER' as never) &&
+      !membership.roles.includes('GYM_MANAGER' as never)
+    ) {
+      effectiveWorkspaceAllowed = false;
+    }
+
     const allowed =
-      workspaceAllowed ||
+      effectiveWorkspaceAllowed ||
       assignedTrainees ||
       self ||
       includeBranchIds.length > 0 ||
@@ -268,7 +313,7 @@ export class AccessControlService {
       membershipId: membership._id,
       userId: membership.userId,
       roles: membership.roles,
-      workspaceAllowed,
+      workspaceAllowed: effectiveWorkspaceAllowed,
       assignedTrainees,
       self,
       includeBranchIds,
@@ -278,7 +323,7 @@ export class AccessControlService {
       ...(input.branchId ? { requestedBranchId: input.branchId } : {}),
       ...(input.relationshipId ? { requestedRelationshipId: input.relationshipId } : {}),
       pureWorkspaceWide:
-        workspaceAllowed &&
+        effectiveWorkspaceAllowed &&
         includeBranchIds.length === 0 &&
         excludeBranchIds.length === 0 &&
         includeRelationshipIds.length === 0 &&
@@ -619,10 +664,7 @@ function atomDecisions(grants: AccessGrantDocument[]): {
 } {
   const byId = new Map<string, { id: ObjectId; specificity: number; effect: PermissionEffect }>();
   for (const grant of grants) {
-    const specificity =
-      grant.scope.type === 'MULTIPLE_BRANCHES'
-        ? scopeSpecificity.BRANCH
-        : scopeSpecificity[grant.scope.type];
+    const specificity = scopeSpecificity[grant.scope.type];
     for (const id of grant.scope.resourceIds ?? []) {
       const key = id.toHexString();
       const current = byId.get(key);
@@ -644,6 +686,18 @@ function atomDecisions(grants: AccessGrantDocument[]): {
 function required(value: string | undefined): string {
   if (!value) throw permissionDenied('SUPPORT_EFFECTIVE_MEMBERSHIP_REQUIRED');
   return value;
+}
+
+function uniqueObjectIds(ids: ObjectId[]): ObjectId[] {
+  const seen = new Set<string>();
+  const result: ObjectId[] = [];
+  for (const id of ids) {
+    const key = id.toHexString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(id);
+  }
+  return result;
 }
 
 function scopeApplies(

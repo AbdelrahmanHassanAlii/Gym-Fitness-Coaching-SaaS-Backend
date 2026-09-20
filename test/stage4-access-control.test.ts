@@ -327,6 +327,199 @@ describe('Stage 4 route authorization metadata', () => {
   });
 });
 
+describe('Stage 4 workspace query access resolver', () => {
+  test('profile ALLOW grants query access and profile DENY denies it', async () => {
+    const ids = testIds();
+    await expect(
+      serviceWith({
+        ids,
+        roles: ['GYM_OWNER'],
+        profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'ALLOW' }])],
+      }).resolveWorkspaceQueryAccess(ctx(ids), {
+        workspaceId: ids.workspaceId,
+        permission: Permissions.DashboardGymRead,
+      }),
+    ).resolves.toMatchObject({ allowed: true, workspaceAllowed: true });
+
+    await expect(
+      serviceWith({
+        ids,
+        roles: ['GYM_OWNER'],
+        profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'DENY' }])],
+      }).resolveWorkspaceQueryAccess(ctx(ids), {
+        workspaceId: ids.workspaceId,
+        permission: Permissions.DashboardGymRead,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  test('narrow explicit branch and relationship ALLOW work without profile ALLOW', async () => {
+    const ids = testIds();
+    const branchAccess = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      grants: [
+        grant(ids, Permissions.DashboardGymRead, 'ALLOW', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branchId] },
+        }),
+      ],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(branchAccess.workspaceAllowed).toBe(false);
+    expect(branchAccess.includeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+
+    const relationshipAccess = await serviceWith({
+      ids,
+      roles: ['TRAINER'],
+      grants: [
+        grant(ids, Permissions.DashboardRelationshipRead, 'ALLOW', {
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [ids.relationshipId] },
+        }),
+      ],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      relationshipId: ids.relationshipId,
+      permission: Permissions.DashboardRelationshipRead,
+    });
+    expect(relationshipAccess.includeRelationshipIds.map(hex)).toEqual([hex(ids.relationshipId)]);
+  });
+
+  test('explicit DENY narrows or blocks aggregate query access', async () => {
+    const ids = testIds();
+    await expect(
+      serviceWith({
+        ids,
+        roles: ['GYM_OWNER'],
+        profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'ALLOW' }])],
+        grants: [grant(ids, Permissions.DashboardGymRead, 'DENY')],
+      }).resolveWorkspaceQueryAccess(ctx(ids), {
+        workspaceId: ids.workspaceId,
+        permission: Permissions.DashboardGymRead,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const branchDeny = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'ALLOW' }])],
+      grants: [
+        grant(ids, Permissions.DashboardGymRead, 'DENY', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branchId] },
+        }),
+      ],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(branchDeny.excludeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+
+    const relationshipDeny = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      profiles: [
+        profile(ids, [{ permission: Permissions.DashboardRelationshipRead, effect: 'ALLOW' }]),
+      ],
+      grants: [
+        grant(ids, Permissions.DashboardRelationshipRead, 'DENY', {
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [ids.relationshipId] },
+        }),
+      ],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardRelationshipRead,
+    });
+    expect(relationshipDeny.excludeRelationshipIds.map(hex)).toEqual([hex(ids.relationshipId)]);
+  });
+
+  test('branch atom normalization makes equal-specificity DENY win', async () => {
+    const ids = testIds();
+    const allowThenDeny = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      grants: [
+        grant(ids, Permissions.DashboardGymRead, 'ALLOW', {
+          scope: { type: 'MULTIPLE_BRANCHES', resourceIds: [ids.branchId, ids.branch2Id] },
+        }),
+        grant(ids, Permissions.DashboardGymRead, 'DENY', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branch2Id] },
+        }),
+      ],
+      branches: [branch(ids, 'ACTIVE', ids.branchId), branch(ids, 'ACTIVE', ids.branch2Id)],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(allowThenDeny.includeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+    expect(allowThenDeny.excludeBranchIds.map(hex)).toEqual([hex(ids.branch2Id)]);
+
+    const denyThenAllow = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      grants: [
+        grant(ids, Permissions.DashboardGymRead, 'DENY', {
+          scope: { type: 'MULTIPLE_BRANCHES', resourceIds: [ids.branchId, ids.branch2Id] },
+        }),
+        grant(ids, Permissions.DashboardGymRead, 'ALLOW', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branchId] },
+        }),
+      ],
+      branches: [branch(ids, 'ACTIVE', ids.branchId), branch(ids, 'ACTIVE', ids.branch2Id)],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(denyThenAllow.includeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+    expect(denyThenAllow.excludeBranchIds.map(hex)).toEqual([hex(ids.branch2Id)]);
+
+    const sameBranch = await serviceWith({
+      ids,
+      roles: ['GYM_OWNER'],
+      profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'ALLOW' }])],
+      grants: [
+        grant(ids, Permissions.DashboardGymRead, 'ALLOW', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branchId] },
+        }),
+        grant(ids, Permissions.DashboardGymRead, 'DENY', {
+          scope: { type: 'BRANCH', resourceIds: [ids.branchId] },
+        }),
+      ],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(sameBranch.includeBranchIds).toEqual([]);
+    expect(sameBranch.excludeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+  });
+
+  test('manager and trainer query access become domain-scoped modes', async () => {
+    const ids = testIds();
+    const manager = await serviceWith({
+      ids,
+      roles: ['GYM_MANAGER'],
+      profiles: [profile(ids, [{ permission: Permissions.DashboardGymRead, effect: 'ALLOW' }])],
+      branchAssignments: [assignment(ids)],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardGymRead,
+    });
+    expect(manager.workspaceAllowed).toBe(false);
+    expect(manager.includeBranchIds.map(hex)).toEqual([hex(ids.branchId)]);
+
+    const trainer = await serviceWith({
+      ids,
+      roles: ['TRAINER'],
+      profiles: [profile(ids, [{ permission: Permissions.DashboardTrainerRead, effect: 'ALLOW' }])],
+    }).resolveWorkspaceQueryAccess(ctx(ids), {
+      workspaceId: ids.workspaceId,
+      permission: Permissions.DashboardTrainerRead,
+    });
+    expect(trainer.workspaceAllowed).toBe(false);
+    expect(trainer.assignedTrainees).toBe(true);
+  });
+});
+
 function serviceWith(input: {
   ids: ReturnType<typeof testIds>;
   profiles?: Array<Record<string, unknown>>;
@@ -334,6 +527,7 @@ function serviceWith(input: {
   grants?: Array<Record<string, unknown>>;
   branches?: Array<Record<string, unknown>>;
   branchAssignments?: Array<Record<string, unknown>>;
+  roles?: string[];
   workspaceMembershipStatus?: 'ACTIVE' | 'SUSPENDED' | 'ENDED';
   platformMembership?: Record<string, unknown> | null;
 }) {
@@ -350,6 +544,7 @@ function serviceWith(input: {
         workspaceId: input.ids.workspaceId,
         userId: input.ids.userId,
         status: input.workspaceMembershipStatus ?? 'ACTIVE',
+        roles: input.roles ?? ['GYM_OWNER'],
         permissionProfileIds: profiles.map((item) => item._id as ObjectId),
         accessVersion: 0,
       }),
@@ -358,6 +553,7 @@ function serviceWith(input: {
         workspaceId: input.ids.workspaceId,
         userId: input.ids.userId,
         status: input.workspaceMembershipStatus ?? 'ACTIVE',
+        roles: input.roles ?? ['GYM_OWNER'],
         permissionProfileIds: profiles.map((item) => item._id as ObjectId),
         accessVersion: 0,
       }),
@@ -365,6 +561,18 @@ function serviceWith(input: {
     { listActive: async () => input.branchAssignments ?? [] } as never,
     { findManyByIds: async () => profiles } as never,
     { listCurrent: async () => input.grants ?? [] } as never,
+    {
+      findByIdInWorkspace: async (_workspaceId: ObjectId, relationshipId: ObjectId) =>
+        relationshipId.equals(input.ids.relationshipId)
+          ? {
+              _id: input.ids.relationshipId,
+              workspaceId: input.ids.workspaceId,
+              traineeUserId: input.ids.traineeUserId,
+              homeBranchId: input.ids.branchId,
+              status: 'ACTIVE',
+            }
+          : null,
+    },
   ) as AccessControlService;
 }
 
@@ -376,6 +584,9 @@ function testIds() {
     profileId: new ObjectId(),
     grantId: new ObjectId(),
     branchId: new ObjectId(),
+    branch2Id: new ObjectId(),
+    relationshipId: new ObjectId(),
+    traineeUserId: new ObjectId(),
     sessionId: new ObjectId(),
     platformMembershipId: new ObjectId(),
   };
@@ -438,7 +649,7 @@ function grant(
   permission: string,
   effect: 'ALLOW' | 'DENY',
   options: {
-    scope?: { type: 'WORKSPACE' | 'BRANCH'; resourceIds?: ObjectId[] };
+    scope?: PermissionScope;
     expiresAt?: Date;
   } = {},
 ) {
@@ -457,15 +668,23 @@ function grant(
   };
 }
 
-function branch(ids: ReturnType<typeof testIds>, status: 'ACTIVE' | 'ARCHIVED') {
+function branch(
+  ids: ReturnType<typeof testIds>,
+  status: 'ACTIVE' | 'ARCHIVED',
+  branchId = ids.branchId,
+) {
   return {
-    _id: ids.branchId,
+    _id: branchId,
     workspaceId: ids.workspaceId,
     name: 'Main',
     status,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+}
+
+function hex(id: ObjectId) {
+  return id.toHexString();
 }
 
 function assignment(ids: ReturnType<typeof testIds>) {

@@ -20,6 +20,7 @@ import { migration019Stage14Notifications } from './019-stage14-notifications';
 import { migration020Stage15Audit } from './020-stage15-audit';
 import { migration021Stage16SupportAccess } from './021-stage16-support-access';
 import { migration022Stage17RetentionExportDeletion } from './022-stage17-retention-export-deletion';
+import { migration023Stage18DashboardsAnalytics } from './023-stage18-dashboards-analytics';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -45,4 +46,5 @@ export const migrations: Migration[] = [
   migration020Stage15Audit,
   migration021Stage16SupportAccess,
   migration022Stage17RetentionExportDeletion,
+  migration023Stage18DashboardsAnalytics,
 ];

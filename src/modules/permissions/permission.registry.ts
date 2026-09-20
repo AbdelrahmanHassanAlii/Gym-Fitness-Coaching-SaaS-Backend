@@ -179,6 +179,13 @@ export const Permissions = {
   DeletionApprove: 'deletion.approve',
   DeletionPostpone: 'deletion.postpone',
   DeletionCancel: 'deletion.cancel',
+  DashboardTrainerRead: 'dashboard.trainer.read',
+  DashboardGymRead: 'dashboard.gym.read',
+  DashboardRelationshipRead: 'dashboard.relationship.read',
+  AnalyticsTrainingRead: 'analytics.training.read',
+  AnalyticsProgressRead: 'analytics.progress.read',
+  AnalyticsNutritionRead: 'analytics.nutrition.read',
+  AnalyticsAdherenceRead: 'analytics.adherence.read',
 } as const;
 
 export type PermissionKey = (typeof Permissions)[keyof typeof Permissions];
@@ -431,6 +438,47 @@ export const permissionDefinitions: PermissionDefinition[] = [
   platform(Permissions.DeletionApprove, 'Workspace deletion', 'Approve workspace deletion.'),
   platform(Permissions.DeletionPostpone, 'Workspace deletion', 'Postpone workspace deletion.'),
   platform(Permissions.DeletionCancel, 'Workspace deletion', 'Cancel workspace deletion.'),
+  analytics(
+    Permissions.DashboardTrainerRead,
+    'Trainer dashboard',
+    'Read the trainer operational dashboard.',
+    ['WORKSPACE', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
+  analytics(Permissions.DashboardGymRead, 'Gym dashboard', 'Read the gym operational dashboard.', [
+    'WORKSPACE',
+    'BRANCH',
+    'MULTIPLE_BRANCHES',
+  ]),
+  analytics(
+    Permissions.DashboardRelationshipRead,
+    'Relationship dashboard',
+    'Read a trainee relationship dashboard.',
+    ['WORKSPACE', 'SELF', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
+  analytics(
+    Permissions.AnalyticsTrainingRead,
+    'Training analytics',
+    'Read relationship training analytics.',
+    ['WORKSPACE', 'SELF', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
+  analytics(
+    Permissions.AnalyticsProgressRead,
+    'Progress analytics',
+    'Read relationship progress analytics.',
+    ['WORKSPACE', 'SELF', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
+  analytics(
+    Permissions.AnalyticsNutritionRead,
+    'Nutrition analytics',
+    'Read relationship nutrition analytics.',
+    ['WORKSPACE', 'SELF', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
+  analytics(
+    Permissions.AnalyticsAdherenceRead,
+    'Adherence analytics',
+    'Read relationship adherence analytics.',
+    ['WORKSPACE', 'SELF', 'ASSIGNED_TRAINEES', 'SPECIFIC_TRAINEES', 'BRANCH'],
+  ),
 ];
 
 export const permissionKeys = new Set(permissionDefinitions.map((definition) => definition.key));
@@ -579,6 +627,13 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.ExportsWorkspaceCreate,
       Permissions.ExportsWorkspaceRead,
       Permissions.ExportsWorkspaceDownload,
+      Permissions.DashboardTrainerRead,
+      Permissions.DashboardGymRead,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsTrainingRead,
+      Permissions.AnalyticsProgressRead,
+      Permissions.AnalyticsNutritionRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
@@ -617,6 +672,12 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.FilesDownload,
       Permissions.FilesDelete,
       Permissions.FilesRestore,
+      Permissions.DashboardGymRead,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsTrainingRead,
+      Permissions.AnalyticsProgressRead,
+      Permissions.AnalyticsNutritionRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
@@ -689,6 +750,12 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.FilesDownload,
       Permissions.FilesDelete,
       Permissions.FilesRestore,
+      Permissions.DashboardTrainerRead,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsTrainingRead,
+      Permissions.AnalyticsProgressRead,
+      Permissions.AnalyticsNutritionRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
@@ -725,6 +792,11 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.FilesDownload,
       Permissions.FilesDelete,
       Permissions.FilesRestore,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsTrainingRead,
+      Permissions.AnalyticsProgressRead,
+      Permissions.AnalyticsNutritionRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
@@ -744,6 +816,10 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.DocumentsRead,
       Permissions.DocumentsUpload,
       Permissions.FilesDownload,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsTrainingRead,
+      Permissions.AnalyticsProgressRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
   {
@@ -764,6 +840,9 @@ export const systemPermissionProfiles: SystemPermissionProfileSeed[] = [
       Permissions.NutritionPlansArchive,
       Permissions.HealthFoodAllergiesRead,
       Permissions.AdherenceRead,
+      Permissions.DashboardRelationshipRead,
+      Permissions.AnalyticsNutritionRead,
+      Permissions.AnalyticsAdherenceRead,
     ].map((permission) => ({ permission, effect: 'ALLOW' })),
   },
 ];
@@ -797,6 +876,24 @@ function workspace(
     displayName,
     description,
     allowedScopes: workspaceScopes,
+    allowedContexts: ['WORKSPACE'],
+    system: true,
+  };
+}
+
+function analytics(
+  key: PermissionKey,
+  displayName: string,
+  description: string,
+  allowedScopes: PermissionScopeType[],
+): PermissionDefinition {
+  return {
+    key,
+    category: key.split('.')[0] ?? key,
+    module: 'analytics',
+    displayName,
+    description,
+    allowedScopes,
     allowedContexts: ['WORKSPACE'],
     system: true,
   };

@@ -782,9 +782,18 @@ function supportWorkspacePermission(permission: string): boolean {
 function supportSensitivePlatformPermission(permission: string): string | null {
   if (permission === 'medical_documents.download') return 'support.sensitive_files.read';
   if (
-    ['medical_documents.read', 'health.read', 'checkins.read', 'progress_photos.read'].includes(
-      permission,
-    )
+    [
+      'medical_documents.read',
+      'health.read',
+      'checkins.read',
+      'progress_photos.read',
+      'dashboard.trainer.read',
+      'dashboard.gym.read',
+      'dashboard.relationship.read',
+      'analytics.progress.read',
+      'analytics.nutrition.read',
+      'analytics.adherence.read',
+    ].includes(permission)
   ) {
     return 'support.sensitive.read';
   }

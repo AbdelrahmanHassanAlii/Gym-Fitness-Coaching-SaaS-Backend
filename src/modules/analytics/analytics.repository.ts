@@ -18,7 +18,12 @@ import type {
 } from '../trainees/trainee.types';
 import type { ProgramDocument, ProgramProgressEventDocument } from '../training/training.types';
 import type { WorkoutSessionDocument } from '../workouts/workout.types';
-import type { BranchDocument, WorkspaceMembershipDocument } from '../workspaces/workspace.types';
+import type {
+  BranchDocument,
+  WorkspaceDocument,
+  WorkspaceMembershipDocument,
+} from '../workspaces/workspace.types';
+import type { DateIdCursor } from './analytics.types';
 
 export class AnalyticsRepository {
   readonly relationships: Collection<CoachingRelationshipDocument>;
@@ -38,6 +43,7 @@ export class AnalyticsRepository {
   readonly dailyTracking: Collection<DailyTrackingEntryDocument>;
   readonly checkins: Collection<CheckInInstanceDocument>;
   readonly documents: Collection<Record<string, unknown>>;
+  readonly workspaces: Collection<WorkspaceDocument>;
 
   constructor(database: Database) {
     this.relationships = database.db.collection('coaching_relationships');
@@ -57,6 +63,15 @@ export class AnalyticsRepository {
     this.dailyTracking = database.db.collection('daily_tracking_entries');
     this.checkins = database.db.collection('checkin_instances');
     this.documents = database.db.collection('documents');
+    this.workspaces = database.db.collection('workspaces');
+  }
+
+  async workspaceTimezone(workspaceId: ObjectId) {
+    const workspace = await this.workspaces.findOne(
+      { _id: workspaceId },
+      { projection: { timezone: 1 } },
+    );
+    return workspace?.timezone ?? null;
   }
 
   async findRelationship(workspaceId: ObjectId, relationshipId: ObjectId) {
@@ -68,18 +83,6 @@ export class AnalyticsRepository {
       .find({ workspaceId, relationshipId, active: true })
       .sort({ assignmentType: 1 })
       .toArray();
-  }
-
-  async relationshipAllowedByAssignment(access: WorkspaceQueryAccess, relationshipId: ObjectId) {
-    if (!access.assignedTrainees) return false;
-    return Boolean(
-      await this.assignments.findOne({
-        workspaceId: access.workspaceId,
-        relationshipId,
-        staffMembershipId: access.membershipId,
-        active: true,
-      }),
-    );
   }
 
   async activeAssignmentForRelationship(
@@ -110,6 +113,7 @@ export class AnalyticsRepository {
   async countRelationships(
     access: WorkspaceQueryAccess,
     statuses: CoachingRelationshipStatus[] = ['ACTIVE', 'NEEDS_REASSIGNMENT'],
+    assignmentTypes?: string[],
   ) {
     if (
       access.assignedTrainees &&
@@ -123,6 +127,7 @@ export class AnalyticsRepository {
               workspaceId: access.workspaceId,
               staffMembershipId: access.membershipId,
               active: true,
+              ...(assignmentTypes ? { assignmentType: { $in: assignmentTypes } } : {}),
             },
           },
           { $group: { _id: '$relationshipId' } },
@@ -151,39 +156,6 @@ export class AnalyticsRepository {
       status: { $in: statuses },
       ...this.relationshipAccessMatch(access),
     });
-  }
-
-  async trainerAssignmentRelationshipIds(access: WorkspaceQueryAccess, from: Date) {
-    const rows = await this.assignments
-      .aggregate<{ _id: ObjectId; firstStartedAt: Date }>([
-        {
-          $match: {
-            workspaceId: access.workspaceId,
-            staffMembershipId: access.membershipId,
-            assignmentType: { $in: ['PRIMARY_TRAINER', 'ASSISTANT_TRAINER'] },
-            active: true,
-          },
-        },
-        { $group: { _id: '$relationshipId', firstStartedAt: { $min: '$startedAt' } } },
-        {
-          $lookup: {
-            from: 'coaching_relationships',
-            localField: '_id',
-            foreignField: '_id',
-            as: 'relationship',
-          },
-        },
-        { $unwind: '$relationship' },
-        {
-          $match: {
-            'relationship.status': 'ACTIVE',
-            ...this.relationshipAccessMatch(access, 'relationship.'),
-          },
-        },
-        { $match: { firstStartedAt: { $gte: from } } },
-      ])
-      .toArray();
-    return rows.map((row) => row._id);
   }
 
   async countTrainerAssignedRelationships(access: WorkspaceQueryAccess, statuses: string[]) {
@@ -338,7 +310,11 @@ export class AnalyticsRepository {
       .toArray();
   }
 
-  async countCheckins(access: WorkspaceQueryAccess, statuses: string[]) {
+  async countCheckins(
+    access: WorkspaceQueryAccess,
+    statuses: string[],
+    assignmentTypes?: string[],
+  ) {
     const rows = await this.checkins
       .aggregate<{ count: number }>([
         {
@@ -363,7 +339,7 @@ export class AnalyticsRepository {
             ...this.relationshipAccessMatch(access, 'relationship.'),
           },
         },
-        ...this.assignmentScopeStages(access, '$relationship._id'),
+        ...this.assignmentScopeStages(access, '$relationship._id', assignmentTypes),
         { $count: 'count' },
       ])
       .toArray();
@@ -375,6 +351,7 @@ export class AnalyticsRepository {
     status: string,
     limit: number,
     cursor?: { dueAt: Date; id: ObjectId },
+    assignmentTypes?: string[],
   ) {
     return await this.checkins
       .aggregate<CheckInInstanceDocument>([
@@ -408,7 +385,7 @@ export class AnalyticsRepository {
             ...this.relationshipAccessMatch(access, 'relationship.'),
           },
         },
-        ...this.assignmentScopeStages(access, '$relationship._id'),
+        ...this.assignmentScopeStages(access, '$relationship._id', assignmentTypes),
         { $sort: { dueAt: 1, _id: 1 } },
         { $limit: limit + 1 },
       ])
@@ -571,6 +548,7 @@ export class AnalyticsRepository {
     limit: number,
     cutoff?: Date,
     cursor?: ObjectId,
+    assignmentTypes?: string[],
   ) {
     const match = {
       workspaceId: access.workspaceId,
@@ -579,7 +557,7 @@ export class AnalyticsRepository {
       ...(cursor ? { _id: { $gt: cursor } } : {}),
     };
     const pipeline: object[] = [{ $match: match }, { $sort: { _id: 1 } }];
-    pipeline.push(...this.assignmentScopeStages(access, '$_id'));
+    pipeline.push(...this.assignmentScopeStages(access, '$_id', assignmentTypes));
     if (kind === 'NO_ACTIVE_PROGRAM') {
       pipeline.push(
         {
@@ -726,6 +704,8 @@ export class AnalyticsRepository {
     metricDefinitionId: ObjectId,
     from: Date,
     to: Date,
+    limit: number,
+    cursor?: DateIdCursor,
   ) {
     return await this.measurements
       .find({
@@ -733,19 +713,59 @@ export class AnalyticsRepository {
         relationshipId,
         metricDefinitionId,
         measuredAt: { $gte: from, $lt: to },
+        ...(cursor
+          ? {
+              $or: [
+                { measuredAt: { $gt: cursor.occurredAt } },
+                { measuredAt: cursor.occurredAt, _id: { $gt: cursor.id } },
+              ],
+            }
+          : {}),
       })
       .sort({ measuredAt: 1, _id: 1 })
-      .limit(500)
+      .limit(limit + 1)
       .toArray();
+  }
+
+  async measurementWindowEdges(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    metricDefinitionId: ObjectId,
+    from: Date,
+    to: Date,
+  ) {
+    const [firstInWindow, latestInWindow, latest] = await Promise.all([
+      this.measurements.findOne(
+        {
+          workspaceId,
+          relationshipId,
+          metricDefinitionId,
+          measuredAt: { $gte: from, $lt: to },
+        },
+        { sort: { measuredAt: 1, _id: 1 } },
+      ),
+      this.measurements.findOne(
+        {
+          workspaceId,
+          relationshipId,
+          metricDefinitionId,
+          measuredAt: { $gte: from, $lt: to },
+        },
+        { sort: { measuredAt: -1, _id: -1 } },
+      ),
+      this.latestMeasurement(workspaceId, relationshipId, metricDefinitionId, to),
+    ]);
+    return { firstInWindow, latestInWindow, latest };
   }
 
   async latestMeasurement(
     workspaceId: ObjectId,
     relationshipId: ObjectId,
     metricDefinitionId: ObjectId,
+    before: Date,
   ) {
     return await this.measurements.findOne(
-      { workspaceId, relationshipId, metricDefinitionId },
+      { workspaceId, relationshipId, metricDefinitionId, measuredAt: { $lt: before } },
       { sort: { measuredAt: -1, _id: -1 } },
     );
   }
@@ -811,9 +831,22 @@ export class AnalyticsRepository {
     match: Record<string, unknown>,
     sort: Sort,
     limit: number,
+    timestampField: string,
+    cursor?: DateIdCursor,
   ) {
     return await collection
-      .find({ workspaceId, ...match })
+      .find({
+        workspaceId,
+        ...match,
+        ...(cursor
+          ? {
+              $or: [
+                { [timestampField]: { $lt: cursor.occurredAt } },
+                { [timestampField]: cursor.occurredAt, _id: { $lt: cursor.id } },
+              ],
+            }
+          : {}),
+      })
       .sort(sort)
       .limit(limit + 1)
       .toArray();
@@ -854,7 +887,11 @@ export class AnalyticsRepository {
       .toArray();
   }
 
-  private assignmentScopeStages(access: WorkspaceQueryAccess, relationshipExpr: string): object[] {
+  private assignmentScopeStages(
+    access: WorkspaceQueryAccess,
+    relationshipExpr: string,
+    assignmentTypes?: string[],
+  ): object[] {
     if (
       !access.assignedTrainees ||
       access.workspaceAllowed ||
@@ -877,6 +914,7 @@ export class AnalyticsRepository {
                     { $eq: ['$relationshipId', '$$rid'] },
                     { $eq: ['$staffMembershipId', access.membershipId] },
                     { $eq: ['$active', true] },
+                    ...(assignmentTypes ? [{ $in: ['$assignmentType', assignmentTypes] }] : []),
                   ],
                 },
               },

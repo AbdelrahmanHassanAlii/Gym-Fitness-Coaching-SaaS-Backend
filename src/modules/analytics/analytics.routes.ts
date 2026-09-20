@@ -6,6 +6,7 @@ import {
   AnalyticsQuery,
   DashboardQuery,
   ErrorResponse,
+  ProgressAnalyticsQuery,
   RelationshipParams,
   TrainerDashboardQuery,
   WorkspaceParams,
@@ -72,10 +73,10 @@ export async function registerAnalyticsRoutes(
 
   app.get<{
     Params: Static<typeof RelationshipParams>;
-    Querystring: Static<typeof AnalyticsQuery>;
+    Querystring: Static<typeof ProgressAnalyticsQuery>;
   }>(
     '/api/v1/workspaces/:workspaceId/relationships/:relationshipId/analytics/progress',
-    options({ params: RelationshipParams, querystring: AnalyticsQuery }),
+    options({ params: RelationshipParams, querystring: ProgressAnalyticsQuery }),
     async (request) => ({
       data: await container.analytics.progressAnalytics(
         request.ctx,

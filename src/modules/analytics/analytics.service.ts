@@ -10,6 +10,7 @@ import type {
   ActivityCategory,
   AnalyticsRange,
   AttentionCategory,
+  DateIdCursor,
   Granularity,
   RelationshipAccessContext,
 } from './analytics.types';
@@ -30,6 +31,8 @@ const activityCategories: ActivityCategory[] = [
   'INBODY_UPLOADED',
 ];
 
+const trainerDashboardAssignmentTypes = ['PRIMARY_TRAINER', 'ASSISTANT_TRAINER'];
+
 export class AnalyticsApplicationService {
   constructor(
     private readonly repo: AnalyticsRepository,
@@ -48,7 +51,8 @@ export class AnalyticsApplicationService {
       workspaceId,
       permission: Permissions.DashboardTrainerRead,
     });
-    const range = defaultDashboardRange();
+    const timezone = await this.workspaceTimezone(workspaceId);
+    const range = defaultDashboardRange(timezone);
     const [assignedActiveTrainees, completedWorkouts, overdueCheckIns, pendingReviewCheckIns] =
       await Promise.all([
         this.repo.countTrainerAssignedRelationships(access, ['ACTIVE']),
@@ -72,7 +76,10 @@ export class AnalyticsApplicationService {
         overdueCheckIns,
         pendingReviewCheckIns,
       },
-      needsAttention: await this.needsAttention(access, query),
+      needsAttention: await this.needsAttention(access, query, {
+        inactivityCutoff: localDaysAgoStart(range.to, timezone, 7),
+        assignmentTypes: trainerDashboardAssignmentTypes,
+      }),
       recentActivity: null,
       scope: serializeAccess(access),
     };
@@ -98,7 +105,8 @@ export class AnalyticsApplicationService {
     ]);
     const ownerPure = isOwner(access.roles) && access.pureWorkspaceWide && !branchId;
     if (hasActivityParams && !ownerPure) throw badRequest('RECENT_ACTIVITY_NOT_ALLOWED');
-    const range = defaultDashboardRange();
+    const timezone = await this.workspaceTimezone(workspaceId);
+    const range = defaultDashboardRange(timezone);
     const branchLimit = limit(query.branchLimit, 25, 100);
     const branchCursor = decodeCursor(query.branchCursor);
     const branches = await this.repo.branchPage(access, {
@@ -162,7 +170,9 @@ export class AnalyticsApplicationService {
               })
             : null,
       },
-      needsAttention: await this.needsAttention(access, query),
+      needsAttention: await this.needsAttention(access, query, {
+        inactivityCutoff: localDaysAgoStart(range.to, timezone, 7),
+      }),
       recentActivity: ownerPure ? await this.recentActivity(workspaceId, range, query) : null,
     };
   }
@@ -209,7 +219,7 @@ export class AnalyticsApplicationService {
       nutrition: visibility.nutrition ? await this.nutritionAnalyticsFor(accessContext) : null,
       progress: visibility.progress ? await this.progressAnalyticsFor(accessContext, {}) : null,
       checkIns: visibility.checkIns
-        ? await this.checkinSummary(accessContext, defaultAnalyticsRange())
+        ? await this.checkinSummary(accessContext, defaultAnalyticsRange(accessContext.timezone))
         : null,
       adherence: await this.adherenceAnalyticsFor(accessContext, {}),
       needsAttention: await this.needsAttention(
@@ -218,6 +228,9 @@ export class AnalyticsApplicationService {
           requestedRelationshipId: accessContext.relationship._id,
         },
         {},
+        {
+          inactivityCutoff: localDaysAgoStart(new Date(), accessContext.timezone, 7),
+        },
       ),
       access: { actorKind: accessContext.actorKind, sections: visibility },
     };
@@ -306,7 +319,7 @@ export class AnalyticsApplicationService {
     query: Record<string, unknown> = {},
   ) {
     assertSection(input, 'training');
-    const range = parseRange(query);
+    const range = parseRange(query, input.timezone);
     const [workouts, progressEvents, prCount, latestPr] = await Promise.all([
       this.repo.workoutSummary(
         input.access.workspaceId,
@@ -343,7 +356,7 @@ export class AnalyticsApplicationService {
         prCount,
       },
       series: [],
-      latestPr: latestPr ? serializeDoc(latestPr) : null,
+      latestPr: latestPr ? latestPrDto(latestPr) : null,
     };
   }
 
@@ -352,21 +365,31 @@ export class AnalyticsApplicationService {
     query: Record<string, unknown>,
   ) {
     assertSection(input, 'progress');
-    const range = parseRange(query);
+    const range = parseRange(query, input.timezone);
     const metric = await this.repo.activeMetric(
       input.access.workspaceId,
       maybeOid(query.metricDefinitionId, 'METRIC_DEFINITION_NOT_FOUND'),
     );
     if (!metric) throw notFound('METRIC_DEFINITION_NOT_FOUND');
-    const [points, latest, photoCount] = await Promise.all([
+    const pointLimit = limit(query.limit, 100, 500);
+    const pointCursor = decodeDateIdCursor(query.cursor, 'PROGRESS_CURSOR_INVALID');
+    const [points, edges, photoCount] = await Promise.all([
       this.repo.measurementPoints(
         input.access.workspaceId,
         input.relationship._id,
         metric._id,
         range.from,
         range.to,
+        pointLimit,
+        pointCursor,
       ),
-      this.repo.latestMeasurement(input.access.workspaceId, input.relationship._id, metric._id),
+      this.repo.measurementWindowEdges(
+        input.access.workspaceId,
+        input.relationship._id,
+        metric._id,
+        range.from,
+        range.to,
+      ),
       this.repo.countVisibleProgressPhotos({
         workspaceId: input.access.workspaceId,
         relationshipId: input.relationship._id,
@@ -376,8 +399,9 @@ export class AnalyticsApplicationService {
         ),
       }),
     ]);
-    const first = points[0] ?? null;
-    const last = points[points.length - 1] ?? null;
+    const pagePoints = points.slice(0, pointLimit);
+    const first = edges.firstInWindow;
+    const last = edges.latestInWindow;
     const delta = first && last ? round2(last.value - first.value) : null;
     return {
       workspaceId: input.access.workspaceId.toHexString(),
@@ -387,14 +411,17 @@ export class AnalyticsApplicationService {
       summary: {
         firstInWindow: first ? measurementDto(first, metric) : null,
         latestInWindow: last ? measurementDto(last, metric) : null,
-        latest: latest ? measurementDto(latest, metric) : null,
+        latest: edges.latest ? measurementDto(edges.latest, metric) : null,
         delta,
         percentChange:
           first && last && first.value !== 0
             ? round4((last.value - first.value) / first.value)
             : null,
       },
-      points: points.map((point) => measurementDto(point, metric)),
+      points: pagePoints.map((point) => measurementDto(point, metric)),
+      page: pageFromItems(points, pointLimit, (item) =>
+        encodeDateIdCursor(item.measuredAt, item._id),
+      ),
       buckets: [],
       photoSummary: { count: photoCount },
     };
@@ -405,7 +432,7 @@ export class AnalyticsApplicationService {
     query: Record<string, unknown> = {},
   ) {
     assertSection(input, 'nutrition');
-    const range = parseRange(query);
+    const range = parseRange(query, input.timezone);
     const plan = await this.repo.activeNutritionPlan(
       input.access.workspaceId,
       input.relationship._id,
@@ -435,7 +462,7 @@ export class AnalyticsApplicationService {
         : null,
       nutritionTracking: {
         daysTracked: nutritionDays.length,
-        averageAdherencePercent: average(
+        averageAdherenceRate: averageRatioFromPercent(
           nutritionDays.map((entry) => entry.values.NUTRITION?.adherencePercent),
         ),
       },
@@ -452,7 +479,7 @@ export class AnalyticsApplicationService {
     query: Record<string, unknown>,
   ) {
     const visibility = visibilityFor(input.actorKind);
-    const range = parseRange(query);
+    const range = parseRange(query, input.timezone);
     return {
       workspaceId: input.access.workspaceId.toHexString(),
       relationshipId: input.relationship._id.toHexString(),
@@ -508,6 +535,7 @@ export class AnalyticsApplicationService {
       relationshipId,
       permission,
     });
+    const timezone = await this.workspaceTimezone(workspaceId);
     const relationship = await this.repo.findRelationship(workspaceId, relationshipId);
     if (!relationship) throw notFound('RELATIONSHIP_NOT_FOUND');
     if (!['ACTIVE', 'NEEDS_REASSIGNMENT'].includes(relationship.status)) {
@@ -518,7 +546,13 @@ export class AnalyticsApplicationService {
     }
     const actor = await this.relationshipActorKind(access, relationship);
     if (actor === 'OTHER') throw permissionDenied('PERMISSION_DENIED');
-    return { access, relationship, actorKind: actor };
+    return { access, timezone, relationship, actorKind: actor };
+  }
+
+  private async workspaceTimezone(workspaceId: ObjectId) {
+    const timezone = await this.repo.workspaceTimezone(workspaceId);
+    if (!timezone || !isValidTimezone(timezone)) throw badRequest('WORKSPACE_TIMEZONE_INVALID');
+    return timezone;
   }
 
   private async relationshipActorKind(
@@ -559,7 +593,11 @@ export class AnalyticsApplicationService {
     return 'OTHER';
   }
 
-  private async needsAttention(access: WorkspaceQueryAccess, query: Record<string, unknown>) {
+  private async needsAttention(
+    access: WorkspaceQueryAccess,
+    query: Record<string, unknown>,
+    options: { inactivityCutoff: Date; assignmentTypes?: string[] },
+  ) {
     const requestedCategory = query.attentionCategory as AttentionCategory | undefined;
     if (requestedCategory && !attentionCategories.includes(requestedCategory)) {
       throw badRequest('ATTENTION_CATEGORY_INVALID');
@@ -576,6 +614,7 @@ export class AnalyticsApplicationService {
         category,
         limitValue,
         query.attentionCursor,
+        options,
       );
     }
     return result;
@@ -586,13 +625,20 @@ export class AnalyticsApplicationService {
     category: AttentionCategory,
     limitValue: number,
     cursorValue?: unknown,
+    options?: { inactivityCutoff: Date; assignmentTypes?: string[] },
   ) {
     if (category === 'CHECKIN_OVERDUE' || category === 'CHECKIN_PENDING_REVIEW') {
       const status = category === 'CHECKIN_OVERDUE' ? 'OVERDUE' : 'SUBMITTED';
-      const cursor = decodeDateIdCursor(cursorValue);
+      const cursor = decodeDateIdCursor(cursorValue, 'ATTENTION_CURSOR_INVALID');
       const [items, count] = await Promise.all([
-        this.repo.listAttentionCheckins(access, status, limitValue, cursor),
-        this.repo.countCheckins(access, [status]),
+        this.repo.listAttentionCheckins(
+          access,
+          status,
+          limitValue,
+          cursor ? { dueAt: cursor.occurredAt, id: cursor.id } : undefined,
+          options?.assignmentTypes,
+        ),
+        this.repo.countCheckins(access, [status], options?.assignmentTypes),
       ]);
       return page(
         items,
@@ -611,8 +657,9 @@ export class AnalyticsApplicationService {
       access,
       category,
       limitValue,
-      new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+      options?.inactivityCutoff,
       cursor,
+      options?.assignmentTypes,
     );
     return page(
       rows,
@@ -627,7 +674,11 @@ export class AnalyticsApplicationService {
               : 'medium',
       }),
       category === 'NEEDS_REASSIGNMENT'
-        ? await this.repo.countRelationships(access, ['NEEDS_REASSIGNMENT'])
+        ? await this.repo.countRelationships(
+            access,
+            ['NEEDS_REASSIGNMENT'],
+            options?.assignmentTypes,
+          )
         : null,
     );
   }
@@ -644,11 +695,18 @@ export class AnalyticsApplicationService {
     if (query.activityCursor && !requestedCategory) {
       throw badRequest('ACTIVITY_CURSOR_REQUIRES_CATEGORY');
     }
+    const cursor = decodeDateIdCursor(query.activityCursor, 'ACTIVITY_CURSOR_INVALID');
     const limitValue = limit(query.activityLimit, 5, 20);
     const categories = requestedCategory ? [requestedCategory] : activityCategories;
     const result: Record<string, unknown> = {};
     for (const category of categories) {
-      result[category] = await this.activityCategory(workspaceId, range, category, limitValue);
+      result[category] = await this.activityCategory(
+        workspaceId,
+        range,
+        category,
+        limitValue,
+        cursor,
+      );
     }
     return result;
   }
@@ -658,6 +716,7 @@ export class AnalyticsApplicationService {
     range: AnalyticsRange,
     category: ActivityCategory,
     limitValue: number,
+    cursor?: DateIdCursor,
   ) {
     const source =
       category === 'WORKOUT_COMPLETED'
@@ -667,6 +726,8 @@ export class AnalyticsApplicationService {
             { status: 'COMPLETED', completedAt: { $gte: range.from, $lt: range.to } },
             { completedAt: -1, _id: -1 },
             limitValue,
+            'completedAt',
+            cursor,
           )
         : category === 'PR_ACHIEVED'
           ? await this.repo.recentActivity(
@@ -675,6 +736,8 @@ export class AnalyticsApplicationService {
               { eventType: 'ACHIEVED', occurredAt: { $gte: range.from, $lt: range.to } },
               { occurredAt: -1, _id: -1 },
               limitValue,
+              'occurredAt',
+              cursor,
             )
           : category === 'CHECKIN_SUBMITTED'
             ? await this.repo.recentActivity(
@@ -686,6 +749,8 @@ export class AnalyticsApplicationService {
                 },
                 { submittedAt: -1, _id: -1 },
                 limitValue,
+                'submittedAt',
+                cursor,
               )
             : await this.repo.recentActivity(
                 this.repo.documents,
@@ -697,8 +762,17 @@ export class AnalyticsApplicationService {
                 },
                 { createdAt: -1, _id: -1 },
                 limitValue,
+                'createdAt',
+                cursor,
               );
-    return page(source, limitValue, serializeDoc, null);
+    const timeField = activityTimeField(category);
+    return {
+      count: null,
+      items: source.slice(0, limitValue).map((item) => activityItem(category, item, timeField)),
+      ...pageFromItems(source, limitValue, (item) =>
+        encodeDateIdCursor(item[timeField] as Date, item._id as ObjectId),
+      ),
+    };
   }
 
   private async writeSensitive(
@@ -772,29 +846,32 @@ function stage4AllowsRelationship(
   return access.workspaceAllowed || access.assignedTrainees || access.self;
 }
 
-function parseRange(query: Record<string, unknown>): AnalyticsRange {
+function parseRange(query: Record<string, unknown>, timezone: string): AnalyticsRange {
   const now = new Date();
   const from = query.from
-    ? parseDate(String(query.from), 'from')
-    : new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
-  const to = query.to ? parseDate(String(query.to), 'to') : now;
+    ? parseDate(String(query.from), 'from', timezone)
+    : localDaysAgoStart(now, timezone, 29);
+  const to = query.to ? parseDate(String(query.to), 'to', timezone) : now;
   if (to.getTime() <= from.getTime()) throw badRequest('DATE_RANGE_INVALID');
-  if (to.getTime() - from.getTime() > 366 * 24 * 60 * 60 * 1000) {
+  if (localDaySpan(from, to, timezone) > 366) {
     throw badRequest('DATE_RANGE_TOO_LARGE');
   }
-  return { from, to, timezone: 'workspace' };
+  return { from, to, timezone };
 }
 
-function defaultAnalyticsRange(): AnalyticsRange {
-  return parseRange({});
+function defaultAnalyticsRange(timezone: string): AnalyticsRange {
+  return parseRange({}, timezone);
 }
 
-function defaultDashboardRange(): AnalyticsRange {
-  return defaultAnalyticsRange();
+function defaultDashboardRange(timezone: string): AnalyticsRange {
+  return defaultAnalyticsRange(timezone);
 }
 
-function parseDate(value: string, field: string) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return new Date(`${value}T00:00:00.000Z`);
+function parseDate(value: string, field: string, timezone: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year = 0, month = 1, day = 1] = value.split('-').map(Number);
+    return utcFromLocal(timezone, year, month, day);
+  }
   if (!/[zZ]|[+-]\d{2}:\d{2}$/.test(value))
     throw badRequest(`${field.toUpperCase()}_TIMEZONE_REQUIRED`);
   const date = new Date(value);
@@ -807,7 +884,10 @@ function serializeRange(range: AnalyticsRange) {
 }
 
 function localDateBounds(range: AnalyticsRange) {
-  return { from: range.from.toISOString().slice(0, 10), to: range.to.toISOString().slice(0, 10) };
+  return {
+    from: localDateString(range.from, range.timezone),
+    to: localDateString(range.to, range.timezone),
+  };
 }
 
 function oid(value: string, code: string) {
@@ -854,10 +934,21 @@ function decodeCursor(value: unknown) {
   }
 }
 
-function decodeDateIdCursor(value: unknown) {
+function decodeDateIdCursor(value: unknown, code: string) {
   if (!value) return undefined;
-  const parsed = decodeCursor(value) as unknown as { name?: string; id: ObjectId };
-  return { dueAt: new Date(String(parsed.name)), id: parsed.id };
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8')) as {
+      occurredAt?: string;
+      id?: string;
+    };
+    const occurredAt = new Date(String(parsed.occurredAt));
+    if (Number.isNaN(occurredAt.getTime()) || !parsed.id || !ObjectId.isValid(parsed.id)) {
+      throw new Error('invalid cursor');
+    }
+    return { occurredAt, id: new ObjectId(parsed.id) };
+  } catch {
+    throw badRequest(code);
+  }
 }
 
 function page<T>(items: T[], limitValue: number, map: (item: T) => unknown, count: number | null) {
@@ -870,10 +961,19 @@ function page<T>(items: T[], limitValue: number, map: (item: T) => unknown, coun
     nextCursor:
       items.length > limitValue && last
         ? encodeCursor({
-            name: last.dueAt instanceof Date ? last.dueAt.toISOString() : undefined,
+            occurredAt: last.dueAt instanceof Date ? last.dueAt.toISOString() : undefined,
             id: (last._id as ObjectId | undefined)?.toHexString(),
           })
         : null,
+  };
+}
+
+function pageFromItems<T>(items: T[], limitValue: number, cursorFor: (item: T) => string) {
+  const sliced = items.slice(0, limitValue);
+  const last = sliced[sliced.length - 1];
+  return {
+    hasMore: items.length > limitValue,
+    nextCursor: items.length > limitValue && last ? cursorFor(last) : null,
   };
 }
 
@@ -893,6 +993,12 @@ function average(values: Array<number | undefined>) {
   const present = values.filter((value): value is number => typeof value === 'number');
   if (present.length === 0) return null;
   return round2(present.reduce((sum, value) => sum + value, 0) / present.length);
+}
+
+function averageRatioFromPercent(values: Array<number | undefined>) {
+  const present = values.filter((value): value is number => typeof value === 'number');
+  if (present.length === 0) return null;
+  return round4(present.reduce((sum, value) => sum + value / 100, 0) / present.length);
 }
 
 function round2(value: number) {
@@ -924,6 +1030,117 @@ function measurementDto(
   };
 }
 
+function encodeDateIdCursor(occurredAt: Date, id: ObjectId) {
+  return encodeCursor({ occurredAt: occurredAt.toISOString(), id: id.toHexString() });
+}
+
+function activityTimeField(category: ActivityCategory) {
+  return category === 'WORKOUT_COMPLETED'
+    ? 'completedAt'
+    : category === 'PR_ACHIEVED'
+      ? 'occurredAt'
+      : category === 'CHECKIN_SUBMITTED'
+        ? 'submittedAt'
+        : 'createdAt';
+}
+
+function activityItem(
+  category: ActivityCategory,
+  item: Record<string, unknown>,
+  timeField: string,
+) {
+  return {
+    relationshipId: (item.relationshipId as ObjectId | undefined)?.toHexString() ?? null,
+    traineeDisplay: null,
+    occurredAt: (item[timeField] as Date).toISOString(),
+    summary:
+      category === 'WORKOUT_COMPLETED'
+        ? 'Workout completed'
+        : category === 'PR_ACHIEVED'
+          ? 'Personal record achieved'
+          : category === 'CHECKIN_SUBMITTED'
+            ? 'Check-in submitted'
+            : 'InBody uploaded',
+  };
+}
+
+function latestPrDto(item: Record<string, unknown>) {
+  return {
+    occurredAt: (item.occurredAt as Date).toISOString(),
+    exerciseId: (item.exerciseId as ObjectId | undefined)?.toHexString() ?? null,
+    value: item.value ?? null,
+  };
+}
+
+function isValidTimezone(timezone: string) {
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function localDaysAgoStart(now: Date, timezone: string, daysAgo: number) {
+  const parts = localParts(now, timezone);
+  return utcFromLocal(timezone, parts.year, parts.month, parts.day - daysAgo);
+}
+
+function localDaySpan(from: Date, to: Date, timezone: string) {
+  const fromParts = localParts(from, timezone);
+  const toParts = localParts(to, timezone);
+  const fromUtc = Date.UTC(fromParts.year, fromParts.month - 1, fromParts.day);
+  const toUtc = Date.UTC(toParts.year, toParts.month - 1, toParts.day);
+  return Math.floor((toUtc - fromUtc) / (24 * 60 * 60 * 1000)) + 1;
+}
+
+function localDateString(date: Date, timezone: string) {
+  const parts = localParts(date, timezone);
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(
+    2,
+    '0',
+  )}`;
+}
+
+function localParts(date: Date, timezone: string) {
+  const values = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  })
+    .formatToParts(date)
+    .reduce<Record<string, number>>((parts, part) => {
+      if (part.type !== 'literal') parts[part.type] = Number(part.value);
+      return parts;
+    }, {});
+  return {
+    year: values.year ?? 1970,
+    month: values.month ?? 1,
+    day: values.day ?? 1,
+    hour: values.hour ?? 0,
+    minute: values.minute ?? 0,
+    second: values.second ?? 0,
+  };
+}
+
+function utcFromLocal(timezone: string, year: number, month: number, day: number) {
+  let guess = new Date(Date.UTC(year, month - 1, day));
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = localParts(guess, timezone);
+    const diff =
+      Date.UTC(year, month - 1, day) -
+      Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+    if (diff === 0) return guess;
+    guess = new Date(guess.getTime() + diff);
+  }
+  return guess;
+}
+
 function serializeAccess(access: {
   pureWorkspaceWide: boolean;
   assignedTrainees: boolean;
@@ -942,19 +1159,6 @@ function serializeAccess(access: {
     includeRelationshipIds: access.includeRelationshipIds.map((id) => id.toHexString()),
     excludeRelationshipIds: access.excludeRelationshipIds.map((id) => id.toHexString()),
   };
-}
-
-function serializeDoc(doc: Record<string, unknown>) {
-  return Object.fromEntries(
-    Object.entries(doc).map(([key, value]) => [
-      key,
-      value instanceof ObjectId
-        ? value.toHexString()
-        : value instanceof Date
-          ? value.toISOString()
-          : value,
-    ]),
-  );
 }
 
 function notFound(code: string) {

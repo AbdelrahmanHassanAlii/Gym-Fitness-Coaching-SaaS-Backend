@@ -25,6 +25,7 @@ export interface AnalyticsRange {
 
 export interface RelationshipAccessContext {
   access: WorkspaceQueryAccess;
+  timezone: string;
   relationship: {
     _id: ObjectId;
     workspaceId: ObjectId;
@@ -41,4 +42,9 @@ export interface RelationshipAccessContext {
     | 'NUTRITIONIST'
     | 'TRAINEE'
     | 'OTHER';
+}
+
+export interface DateIdCursor {
+  occurredAt: Date;
+  id: ObjectId;
 }

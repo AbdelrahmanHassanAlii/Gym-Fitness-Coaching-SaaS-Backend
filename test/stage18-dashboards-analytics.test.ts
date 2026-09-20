@@ -17,6 +17,8 @@ import {
 } from '../src/modules/permissions/permission.registry';
 import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
+const STAGE18_TEST_TIMEOUT_MS = 120_000;
+
 describe('Stage 18 dashboards and analytics', () => {
   let container: AppContainer;
   let app: FastifyInstance;
@@ -27,7 +29,7 @@ describe('Stage 18 dashboards and analytics', () => {
     await new MigrationRunner(container.database.db, migrations).migrate();
     app = await buildApp(container);
     fixture = await seedStage18Fixture(container);
-  }, INTEGRATION_TEST_TIMEOUT_MS);
+  }, STAGE18_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     if (app) await app.close();
@@ -35,7 +37,7 @@ describe('Stage 18 dashboards and analytics', () => {
       await container.database.db.dropDatabase();
       await container.database.close();
     }
-  }, INTEGRATION_TEST_TIMEOUT_MS);
+  }, STAGE18_TEST_TIMEOUT_MS);
 
   test(
     'migration 023 seeds exact permissions, default profiles, indexes, and no analytics collections',
@@ -447,6 +449,155 @@ describe('Stage 18 dashboards and analytics', () => {
     ).rejects.toMatchObject({ code: 'ACTIVITY_CURSOR_INVALID' });
   });
 
+  test('Recent Activity cursors are category-bound across all categories', async () => {
+    const sameTime = new Date('2026-09-17T00:00:00.000Z');
+    const activitySeeds = [
+      {
+        category: 'WORKOUT_COMPLETED',
+        collection: 'workout_sessions',
+        docs: [
+          {
+            ...workout(fixture.workspaceId, fixture.relationshipId, 'COMPLETED', sameTime),
+            _id: new ObjectId('000000000000000000000201'),
+            rawActuals: { secret: true },
+          },
+          {
+            ...workout(fixture.workspaceId, fixture.westRelationshipId, 'COMPLETED', sameTime),
+            _id: new ObjectId('000000000000000000000202'),
+          },
+        ],
+      },
+      {
+        category: 'PR_ACHIEVED',
+        collection: 'personal_record_events',
+        docs: [
+          {
+            _id: new ObjectId('000000000000000000000211'),
+            workspaceId: fixture.workspaceId,
+            relationshipId: fixture.relationshipId,
+            eventType: 'ACHIEVED',
+            occurredAt: sameTime,
+            exerciseId: new ObjectId(),
+            internalEventId: 'hidden',
+            createdAt: sameTime,
+          },
+          {
+            _id: new ObjectId('000000000000000000000212'),
+            workspaceId: fixture.workspaceId,
+            relationshipId: fixture.westRelationshipId,
+            eventType: 'ACHIEVED',
+            occurredAt: sameTime,
+            exerciseId: new ObjectId(),
+            createdAt: sameTime,
+          },
+        ],
+      },
+      {
+        category: 'CHECKIN_SUBMITTED',
+        collection: 'checkin_instances',
+        docs: [
+          {
+            ...checkin(
+              fixture.workspaceId,
+              fixture.relationshipId,
+              'SUBMITTED',
+              sameTime,
+              'hidden',
+            ),
+            _id: new ObjectId('000000000000000000000221'),
+          },
+          {
+            ...checkin(
+              fixture.workspaceId,
+              fixture.westRelationshipId,
+              'REVIEWED',
+              sameTime,
+              'hidden',
+            ),
+            _id: new ObjectId('000000000000000000000222'),
+          },
+        ],
+      },
+      {
+        category: 'INBODY_UPLOADED',
+        collection: 'documents',
+        docs: [
+          {
+            _id: new ObjectId('000000000000000000000231'),
+            workspaceId: fixture.workspaceId,
+            relationshipId: fixture.relationshipId,
+            category: 'INBODY',
+            status: 'ACTIVE',
+            title: 'Sensitive title',
+            fileId: new ObjectId(),
+            createdAt: sameTime,
+          },
+          {
+            _id: new ObjectId('000000000000000000000232'),
+            workspaceId: fixture.workspaceId,
+            relationshipId: fixture.westRelationshipId,
+            category: 'INBODY',
+            status: 'ACTIVE',
+            fileId: new ObjectId(),
+            storageKey: 'hidden',
+            createdAt: sameTime,
+          },
+        ],
+      },
+    ] as const;
+    for (const seed of activitySeeds) {
+      await container.database.db.collection(seed.collection).insertMany(seed.docs);
+    }
+    const cursors = new Map<string, string>();
+    for (const seed of activitySeeds) {
+      const first = await container.analytics.gymDashboard(
+        ctx(fixture.owner.userId),
+        hex(fixture.workspaceId),
+        { activityCategory: seed.category, activityLimit: 1 },
+      );
+      const pageOne = first.recentActivity?.[seed.category] as {
+        items: Array<Record<string, unknown>>;
+        nextCursor: string;
+        hasMore: boolean;
+      };
+      expect(pageOne.hasMore).toBe(true);
+      expect(Object.keys(pageOne.items[0] ?? {}).sort()).toEqual([
+        'occurredAt',
+        'relationshipId',
+        'summary',
+        'traineeDisplay',
+      ]);
+      expect(JSON.stringify(pageOne.items)).not.toContain('_id');
+      expect(JSON.stringify(pageOne.items)).not.toContain('hidden');
+      const second = await container.analytics.gymDashboard(
+        ctx(fixture.owner.userId),
+        hex(fixture.workspaceId),
+        {
+          activityCategory: seed.category,
+          activityLimit: 1,
+          activityCursor: pageOne.nextCursor,
+        },
+      );
+      const pageTwo = second.recentActivity?.[seed.category] as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(pageTwo.items[0]?.relationshipId).not.toEqual(pageOne.items[0]?.relationshipId);
+      cursors.set(seed.category, pageOne.nextCursor);
+    }
+    await expect(
+      container.analytics.gymDashboard(ctx(fixture.owner.userId), hex(fixture.workspaceId), {
+        activityCategory: 'PR_ACHIEVED',
+        activityCursor: cursors.get('WORKOUT_COMPLETED'),
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVITY_CURSOR_INVALID' });
+    await expect(
+      container.analytics.gymDashboard(ctx(fixture.owner.userId), hex(fixture.workspaceId), {
+        activityCategory: 'INBODY_UPLOADED',
+        activityCursor: cursors.get('CHECKIN_SUBMITTED'),
+      }),
+    ).rejects.toMatchObject({ code: 'ACTIVITY_CURSOR_INVALID' });
+  });
+
   test('trainer attention excludes nutritionist-only assignments for mixed-role memberships', async () => {
     const mixedRelationshipId = new ObjectId();
     await container.database.db
@@ -572,6 +723,130 @@ describe('Stage 18 dashboards and analytics', () => {
     expect(second.summary).toEqual(first.summary);
   });
 
+  test('progress pagination exceeds 500 points and local buckets use latest visible measurement', async () => {
+    const metric = await container.database.db
+      .collection('metric_definitions')
+      .findOne({ normalizedKey: 'body_weight' });
+    if (!metric) throw new Error('missing body weight metric');
+    await container.database.db
+      .collection('workspaces')
+      .updateOne({ _id: fixture.workspaceId }, { $set: { timezone: 'America/New_York' } });
+    const bulk = Array.from({ length: 520 }, (_, index) =>
+      measurement(
+        fixture.workspaceId,
+        fixture.relationshipId,
+        metric._id,
+        1000 + index,
+        new Date(Date.UTC(2026, 0, 1, 12, 0, index)),
+      ),
+    );
+    await container.database.db
+      .collection('measurement_entries')
+      .insertMany([
+        ...bulk,
+        measurement(
+          fixture.workspaceId,
+          fixture.relationshipId,
+          metric._id,
+          3000,
+          new Date('2026-03-08T06:30:00.000Z'),
+        ),
+        measurement(
+          fixture.workspaceId,
+          fixture.relationshipId,
+          metric._id,
+          3001,
+          new Date('2026-03-08T07:30:00.000Z'),
+        ),
+        measurement(
+          fixture.workspaceId,
+          fixture.relationshipId,
+          metric._id,
+          4000,
+          new Date('2026-03-09T04:00:00.000Z'),
+        ),
+      ]);
+    const pageOne = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      {
+        from: '2026-01-01',
+        to: '2026-01-02',
+        limit: 500,
+        metricDefinitionId: hex(metric._id),
+      },
+    );
+    expect(pageOne.points).toHaveLength(500);
+    expect(pageOne.page.hasMore).toBe(true);
+    const pageTwo = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      {
+        from: '2026-01-01',
+        to: '2026-01-02',
+        limit: 500,
+        cursor: pageOne.page.nextCursor,
+        metricDefinitionId: hex(metric._id),
+      },
+    );
+    const allPointIds = new Set([
+      ...pageOne.points.map((point: { id: string }) => point.id),
+      ...pageTwo.points.map((point: { id: string }) => point.id),
+    ]);
+    expect(pageTwo.points).toHaveLength(20);
+    expect(allPointIds.size).toBe(520);
+    expect(pageTwo.summary).toEqual(pageOne.summary);
+
+    const day = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      {
+        from: '2026-03-08',
+        to: '2026-03-09',
+        granularity: 'day',
+        metricDefinitionId: hex(metric._id),
+      },
+    );
+    expect(day.buckets).toHaveLength(1);
+    expect(day.buckets[0]?.latest.value).toBe(3001);
+
+    const week = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      {
+        from: '2026-03-01',
+        to: '2026-03-10',
+        granularity: 'week',
+        metricDefinitionId: hex(metric._id),
+      },
+    );
+    expect(
+      week.buckets.map((bucket: { latest: { value: number } }) => bucket.latest.value),
+    ).toEqual([3001, 4000]);
+
+    const month = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      {
+        from: '2026-01-01',
+        to: '2026-04-01',
+        granularity: 'month',
+        metricDefinitionId: hex(metric._id),
+      },
+    );
+    expect(
+      month.buckets.some((bucket: { latest: { value: number } }) => bucket.latest.value === 4000),
+    ).toBe(true);
+    await container.database.db
+      .collection('workspaces')
+      .updateOne({ _id: fixture.workspaceId }, { $set: { timezone: 'Africa/Cairo' } });
+  });
+
   test('Stage 18 USER_CONTEXT support sensitive mapping covers all sensitive analytics permissions', async () => {
     const supportWithoutSensitive = await seedPlatformActor(container, []);
     const supportWithSensitive = await seedPlatformActor(container, [
@@ -667,6 +942,128 @@ describe('Stage 18 dashboards and analytics', () => {
     );
   });
 
+  test('non-check-in Needs Attention categories consume their own relationship cursors', async () => {
+    const now = new Date('2026-09-19T00:00:00.000Z');
+    const visibleIds = [
+      new ObjectId('000000000000000000000301'),
+      new ObjectId('000000000000000000000303'),
+      new ObjectId('000000000000000000000304'),
+    ];
+    const deniedId = new ObjectId('000000000000000000000302');
+    const reassignmentIds = [
+      new ObjectId('000000000000000000000311'),
+      new ObjectId('000000000000000000000313'),
+      new ObjectId('000000000000000000000314'),
+    ];
+    const deniedReassignmentId = new ObjectId('000000000000000000000312');
+    await container.database.db
+      .collection('coaching_relationships')
+      .insertMany([
+        ...visibleIds.map((id) =>
+          relationship(
+            fixture.workspaceId,
+            id,
+            new ObjectId(),
+            undefined,
+            fixture.branchId,
+            'ACTIVE',
+            now,
+          ),
+        ),
+        relationship(
+          fixture.workspaceId,
+          deniedId,
+          new ObjectId(),
+          undefined,
+          fixture.branchId,
+          'ACTIVE',
+          now,
+        ),
+        ...reassignmentIds.map((id) =>
+          relationship(
+            fixture.workspaceId,
+            id,
+            new ObjectId(),
+            undefined,
+            fixture.branchId,
+            'NEEDS_REASSIGNMENT',
+            now,
+          ),
+        ),
+        relationship(
+          fixture.workspaceId,
+          deniedReassignmentId,
+          new ObjectId(),
+          undefined,
+          fixture.branchId,
+          'NEEDS_REASSIGNMENT',
+          now,
+        ),
+      ]);
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [deniedId, deniedReassignmentId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    for (const category of [
+      'NO_WORKOUT_ACTIVITY_7_DAYS',
+      'NO_ACTIVE_PROGRAM',
+      'NO_ACTIVE_NUTRITION_PLAN',
+      'NEEDS_REASSIGNMENT',
+    ] as const) {
+      const first = await container.analytics.gymDashboard(
+        ctx(fixture.owner.userId),
+        hex(fixture.workspaceId),
+        { attentionCategory: category, attentionLimit: 2 },
+      );
+      const pageOne = first.needsAttention[category] as {
+        items: Array<{ relationshipId: string }>;
+        nextCursor: string;
+        hasMore: boolean;
+      };
+      expect(pageOne.hasMore).toBe(true);
+      const second = await container.analytics.gymDashboard(
+        ctx(fixture.owner.userId),
+        hex(fixture.workspaceId),
+        {
+          attentionCategory: category,
+          attentionLimit: 2,
+          attentionCursor: pageOne.nextCursor,
+        },
+      );
+      const pageTwo = second.needsAttention[category] as {
+        items: Array<{ relationshipId: string }>;
+      };
+      const ids = [...pageOne.items, ...pageTwo.items].map((item) => item.relationshipId);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).not.toContain(hex(deniedId));
+      expect(ids).not.toContain(hex(deniedReassignmentId));
+    }
+    await expect(
+      container.analytics.gymDashboard(ctx(fixture.owner.userId), hex(fixture.workspaceId), {
+        attentionCategory: 'NO_ACTIVE_PROGRAM',
+        attentionCursor: 'not-a-cursor',
+      }),
+    ).rejects.toMatchObject({ code: 'ATTENTION_CURSOR_INVALID' });
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+  });
+
   test('support workspace context and restricted workspaces are denied for all Stage 18 routes', async () => {
     for (const call of serviceCalls(fixture.workspaceId, fixture.relationshipId)) {
       await expect(
@@ -687,6 +1084,180 @@ describe('Stage 18 dashboards and analytics', () => {
     await container.database.db
       .collection('workspaces')
       .updateOne({ _id: fixture.workspaceId }, { $set: { status: 'ACTIVE' } });
+  });
+
+  test('branch breakdown pagination continues deterministically and rejects branchId with cursor', async () => {
+    const branchIds = [
+      new ObjectId('000000000000000000000401'),
+      new ObjectId('000000000000000000000402'),
+      new ObjectId('000000000000000000000403'),
+    ];
+    await container.database.db.collection('branches').insertMany(
+      branchIds.map((id, index) => ({
+        _id: id,
+        workspaceId: fixture.workspaceId,
+        name: `AAA Stage18 ${index}`,
+        status: 'ACTIVE',
+        timezone: 'Africa/Cairo',
+        version: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })),
+    );
+    const first = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      { branchLimit: 2 },
+    );
+    const firstPage = first.branchBreakdown as {
+      items: Array<{ branchId: string; name: string }>;
+      nextCursor: string;
+      hasMore: boolean;
+    };
+    expect(firstPage.hasMore).toBe(true);
+    expect(firstPage.items.map((item) => item.branchId)).toEqual([
+      hex(branchIds[0] as ObjectId),
+      hex(branchIds[1] as ObjectId),
+    ]);
+    const second = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      { branchLimit: 2, branchCursor: firstPage.nextCursor },
+    );
+    const secondPage = second.branchBreakdown as { items: Array<{ branchId: string }> };
+    expect(secondPage.items[0]?.branchId).toBe(hex(branchIds[2] as ObjectId));
+    await expect(
+      container.analytics.gymDashboard(ctx(fixture.owner.userId), hex(fixture.workspaceId), {
+        branchId: hex(fixture.branchId),
+        branchCursor: firstPage.nextCursor,
+      }),
+    ).rejects.toMatchObject({ code: 'BRANCH_CURSOR_NOT_ALLOWED' });
+  });
+
+  test('Stage 18 routes obey scoped narrow ALLOW and scoped DENY at route level', async () => {
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+        {
+          permission: Permissions.DashboardRelationshipRead,
+          effect: 'DENY',
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [fixture.relationshipId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const gym = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(gym.statusCode).toBe(200);
+    expect(gym.json().data.summary.activeTrainees).toBe(1);
+    const deniedRelationship = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/relationships/${hex(
+        fixture.relationshipId,
+      )}/dashboard`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(deniedRelationship.statusCode).toBe(403);
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+  });
+
+  test('profile DENY plus narrow explicit ALLOW reaches only the granted Stage 18 route data', async () => {
+    await container.database.db.collection('permission_profiles').updateOne(
+      { workspaceId: fixture.workspaceId, roleKey: 'GYM_OWNER', isSystemDefault: true },
+      {
+        $addToSet: {
+          permissions: {
+            $each: [
+              { permission: Permissions.DashboardGymRead, effect: 'DENY' },
+              { permission: Permissions.DashboardRelationshipRead, effect: 'DENY' },
+            ],
+          },
+        },
+      },
+    );
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'ALLOW',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+        {
+          permission: Permissions.DashboardRelationshipRead,
+          effect: 'ALLOW',
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [fixture.relationshipId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const gym = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(gym.statusCode).toBe(200);
+    expect(
+      gym.json().data.branchBreakdown.items.map((item: { branchId: string }) => item.branchId),
+    ).toEqual([hex(fixture.branchId)]);
+    const allowedRelationship = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/relationships/${hex(
+        fixture.relationshipId,
+      )}/dashboard`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(allowedRelationship.statusCode).toBe(200);
+    const deniedRelationship = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/relationships/${hex(
+        fixture.westRelationshipId,
+      )}/dashboard`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(deniedRelationship.statusCode).toBe(403);
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+    await container.database.db.collection('permission_profiles').updateOne(
+      { workspaceId: fixture.workspaceId, roleKey: 'GYM_OWNER', isSystemDefault: true },
+      {
+        $pull: {
+          permissions: {
+            permission: {
+              $in: [Permissions.DashboardGymRead, Permissions.DashboardRelationshipRead],
+            },
+            effect: 'DENY',
+          },
+        } as never,
+      },
+    );
   });
 });
 

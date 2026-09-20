@@ -20,7 +20,12 @@ import type {
 } from '../../modules/workspaces/workspace.repository';
 import { AppError } from '../errors/app-error';
 import type { RequestContext } from '../request-context/request-context';
-import type { AuthorizationDecision, AuthorizationRequest } from './access-control.types';
+import type {
+  AuthorizationDecision,
+  AuthorizationRequest,
+  WorkspaceQueryAccess,
+  WorkspaceQueryAccessRequest,
+} from './access-control.types';
 
 const scopeSpecificity = {
   SELF: 60,
@@ -40,6 +45,18 @@ export class AccessControlService {
     private readonly branchAssignments: MembershipBranchAssignmentRepository,
     private readonly profiles: PermissionProfileRepository,
     private readonly grants: AccessGrantRepository,
+    private readonly relationships?: {
+      findByIdInWorkspace(
+        workspaceId: ObjectId,
+        relationshipId: ObjectId,
+      ): Promise<{
+        _id: ObjectId;
+        workspaceId: ObjectId;
+        homeBranchId?: ObjectId;
+        traineeUserId?: ObjectId;
+        status?: string;
+      } | null>;
+    },
   ) {}
 
   async authorize(
@@ -70,6 +87,207 @@ export class AccessControlService {
     } catch {
       return false;
     }
+  }
+
+  async resolveWorkspaceQueryAccess(
+    ctx: RequestContext,
+    input: WorkspaceQueryAccessRequest,
+  ): Promise<WorkspaceQueryAccess> {
+    if (!ctx.userId || !ctx.authSessionId) throw authRequired();
+    if (!permissionKeys.has(input.permission)) throw permissionDenied('PERMISSION_UNKNOWN');
+    if (input.mfaSatisfied === false) {
+      throw new AppError({
+        code: 'TWO_FACTOR_REQUIRED',
+        httpStatus: 403,
+        message: 'MFA is required for this action.',
+      });
+    }
+
+    if (ctx.supportSessionId && !ctx.effectiveMembershipId) {
+      throw permissionDenied('SUPPORT_WORKSPACE_DENIED');
+    }
+
+    const now = new Date();
+    const workspace = await this.workspaces.findById(input.workspaceId);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+    if (workspace.status !== 'ACTIVE') {
+      throw new AppError({
+        code: 'WORKSPACE_INACTIVE',
+        httpStatus: 409,
+        message: 'The workspace is not active.',
+      });
+    }
+
+    if (ctx.supportSessionId) {
+      if (ctx.workspaceId !== input.workspaceId.toHexString() || !ctx.effectiveMembershipId) {
+        throw permissionDenied('SUPPORT_WORKSPACE_DENIED');
+      }
+      await this.assertSupportSensitivePermission(ctx, input.permission, now);
+    }
+
+    const membership = ctx.supportSessionId
+      ? await this.workspaceMemberships.findByIdInWorkspace(
+          input.workspaceId,
+          new ObjectId(required(ctx.effectiveMembershipId)),
+        )
+      : await this.workspaceMemberships.findByUserInWorkspace(
+          input.workspaceId,
+          new ObjectId(ctx.userId),
+        );
+    if (membership?.status !== 'ACTIVE') {
+      throw permissionDenied('WORKSPACE_MEMBERSHIP_REQUIRED');
+    }
+    ctx.workspaceId = workspace._id.toHexString();
+    ctx.workspaceMembershipId = membership._id.toHexString();
+
+    if (input.branchId) {
+      await this.assertStructuralScope(
+        {
+          context: 'WORKSPACE',
+          workspaceId: input.workspaceId,
+          permission: input.permission,
+          scope: { type: 'BRANCH', resourceIds: [input.branchId] },
+        },
+        membership._id,
+      );
+    }
+    if (input.relationshipId && this.relationships) {
+      const relationship = await this.relationships.findByIdInWorkspace(
+        input.workspaceId,
+        input.relationshipId,
+      );
+      if (!relationship) throw notFound('RELATIONSHIP_NOT_FOUND');
+    }
+
+    const profiles = await this.profiles.findManyByIds(membership.permissionProfileIds);
+    const eligibleProfiles = profiles.filter(
+      (profile) =>
+        profile.context === 'WORKSPACE' &&
+        profile.status === 'ACTIVE' &&
+        profile.workspaceId?.equals(workspace._id),
+    );
+    const grants = (
+      await this.grants.listCurrent(
+        'WORKSPACE_MEMBERSHIP',
+        membership._id,
+        'WORKSPACE',
+        workspace._id,
+      )
+    ).filter((grant) => !grant.expiresAt || grant.expiresAt > now);
+
+    const branchResourceIds = grants.flatMap((grant) =>
+      ['BRANCH', 'MULTIPLE_BRANCHES'].includes(grant.scope.type)
+        ? (grant.scope.resourceIds ?? [])
+        : [],
+    );
+    const specificResourceIds = grants.flatMap((grant) =>
+      grant.scope.type === 'SPECIFIC_TRAINEES' ? (grant.scope.resourceIds ?? []) : [],
+    );
+    if (branchResourceIds.length > (input.maxBranches ?? 100)) {
+      throw permissionDenied('SCOPE_RESOURCE_LIMIT_EXCEEDED');
+    }
+    if (specificResourceIds.length > (input.maxSpecificTrainees ?? 500)) {
+      throw permissionDenied('SCOPE_RESOURCE_LIMIT_EXCEEDED');
+    }
+    for (const grant of grants) {
+      if (
+        (grant.scope.type === 'BRANCH' ||
+          grant.scope.type === 'MULTIPLE_BRANCHES' ||
+          grant.scope.type === 'SPECIFIC_TRAINEES') &&
+        (grant.scope.resourceIds ?? []).length === 0
+      ) {
+        throw permissionDenied('SCOPE_RESOURCE_REQUIRED');
+      }
+    }
+
+    const profileEntries = eligibleProfiles.flatMap((profile) =>
+      profile.permissions.filter((entry) => entry.permission === input.permission),
+    );
+    let baseline: 'ALLOW' | 'DENY' | 'NONE' = 'NONE';
+    const reasons: string[] = [];
+    if (profileEntries.some((entry) => entry.effect === 'DENY')) {
+      baseline = 'DENY';
+      reasons.push('profile-deny');
+    } else if (profileEntries.some((entry) => entry.effect === 'ALLOW')) {
+      baseline = 'ALLOW';
+      reasons.push('profile-allow');
+    }
+
+    const decisions = aggregateGrantDecisions(
+      grants.filter((grant) => grant.permission === input.permission),
+    );
+    const workspaceDecision = decisions.workspace;
+    const workspaceAllowed =
+      workspaceDecision === 'ALLOW' || (workspaceDecision !== 'DENY' && baseline === 'ALLOW');
+    const includeBranchIds = decisions.branch.allow;
+    const excludeBranchIds = decisions.branch.deny;
+    const includeRelationshipIds = decisions.relationship.allow;
+    const excludeRelationshipIds = decisions.relationship.deny;
+    const assignedTrainees =
+      decisions.assignedTrainees === 'ALLOW' ||
+      (workspaceAllowed &&
+        ['TRAINER', 'ASSISTANT_TRAINER', 'NUTRITIONIST'].some((role) =>
+          membership.roles.includes(role as never),
+        ));
+    const self =
+      decisions.self === 'ALLOW' ||
+      (workspaceAllowed && membership.roles.includes('TRAINEE' as never));
+
+    if (input.relationshipId && includeRelationshipIds.length > 0) {
+      if (!includeRelationshipIds.some((id) => id.equals(input.relationshipId))) {
+        throw permissionDenied('PERMISSION_DENIED');
+      }
+    }
+    if (
+      input.relationshipId &&
+      excludeRelationshipIds.some((id) => id.equals(input.relationshipId))
+    ) {
+      throw permissionDenied('PERMISSION_DENIED');
+    }
+    if (input.branchId && includeBranchIds.length > 0) {
+      if (!includeBranchIds.some((id) => id.equals(input.branchId))) {
+        throw permissionDenied('PERMISSION_DENIED');
+      }
+    }
+    if (input.branchId && excludeBranchIds.some((id) => id.equals(input.branchId))) {
+      throw permissionDenied('PERMISSION_DENIED');
+    }
+
+    const allowed =
+      workspaceAllowed ||
+      assignedTrainees ||
+      self ||
+      includeBranchIds.length > 0 ||
+      includeRelationshipIds.length > 0;
+    if (!allowed) throw permissionDenied('PERMISSION_DENIED');
+
+    return {
+      allowed,
+      permission: input.permission,
+      workspaceId: workspace._id,
+      membershipId: membership._id,
+      userId: membership.userId,
+      roles: membership.roles,
+      workspaceAllowed,
+      assignedTrainees,
+      self,
+      includeBranchIds,
+      excludeBranchIds,
+      includeRelationshipIds,
+      excludeRelationshipIds,
+      ...(input.branchId ? { requestedBranchId: input.branchId } : {}),
+      ...(input.relationshipId ? { requestedRelationshipId: input.relationshipId } : {}),
+      pureWorkspaceWide:
+        workspaceAllowed &&
+        includeBranchIds.length === 0 &&
+        excludeBranchIds.length === 0 &&
+        includeRelationshipIds.length === 0 &&
+        excludeRelationshipIds.length === 0 &&
+        !assignedTrainees &&
+        !self &&
+        !input.branchId,
+      reasons: reasons.length > 0 ? reasons : ['explicit-query-access'],
+    };
   }
 
   async effectiveAccessForWorkspaceMembership(
@@ -355,6 +573,77 @@ export class AccessControlService {
     if (!decision.allowed) throw permissionDenied('PERMISSION_DENIED');
     return decision;
   }
+}
+
+function aggregateGrantDecisions(grants: AccessGrantDocument[]): {
+  workspace?: PermissionEffect;
+  assignedTrainees?: PermissionEffect;
+  self?: PermissionEffect;
+  branch: { allow: ObjectId[]; deny: ObjectId[] };
+  relationship: { allow: ObjectId[]; deny: ObjectId[] };
+} {
+  const workspace = strongest(grants.filter((grant) => grant.scope.type === 'WORKSPACE'));
+  const assignedTrainees = strongest(
+    grants.filter((grant) => grant.scope.type === 'ASSIGNED_TRAINEES'),
+  );
+  const self = strongest(grants.filter((grant) => grant.scope.type === 'SELF'));
+  const branch = atomDecisions(
+    grants.filter(
+      (grant) => grant.scope.type === 'BRANCH' || grant.scope.type === 'MULTIPLE_BRANCHES',
+    ),
+  );
+  const relationship = atomDecisions(
+    grants.filter((grant) => grant.scope.type === 'SPECIFIC_TRAINEES'),
+  );
+  return {
+    ...(workspace ? { workspace } : {}),
+    ...(assignedTrainees ? { assignedTrainees } : {}),
+    ...(self ? { self } : {}),
+    branch,
+    relationship,
+  };
+}
+
+function strongest(grants: AccessGrantDocument[]): PermissionEffect | undefined {
+  if (grants.length === 0) return undefined;
+  const bestSpecificity = Math.max(...grants.map((grant) => scopeSpecificity[grant.scope.type]));
+  const strongestGrants = grants.filter(
+    (grant) => scopeSpecificity[grant.scope.type] === bestSpecificity,
+  );
+  return strongestGrants.some((grant) => grant.effect === 'DENY') ? 'DENY' : 'ALLOW';
+}
+
+function atomDecisions(grants: AccessGrantDocument[]): {
+  allow: ObjectId[];
+  deny: ObjectId[];
+} {
+  const byId = new Map<string, { id: ObjectId; specificity: number; effect: PermissionEffect }>();
+  for (const grant of grants) {
+    const specificity =
+      grant.scope.type === 'MULTIPLE_BRANCHES'
+        ? scopeSpecificity.BRANCH
+        : scopeSpecificity[grant.scope.type];
+    for (const id of grant.scope.resourceIds ?? []) {
+      const key = id.toHexString();
+      const current = byId.get(key);
+      if (
+        !current ||
+        specificity > current.specificity ||
+        (specificity === current.specificity && grant.effect === 'DENY')
+      ) {
+        byId.set(key, { id, specificity, effect: grant.effect });
+      }
+    }
+  }
+  return {
+    allow: [...byId.values()].filter((item) => item.effect === 'ALLOW').map((item) => item.id),
+    deny: [...byId.values()].filter((item) => item.effect === 'DENY').map((item) => item.id),
+  };
+}
+
+function required(value: string | undefined): string {
+  if (!value) throw permissionDenied('SUPPORT_EFFECTIVE_MEMBERSHIP_REQUIRED');
+  return value;
 }
 
 function scopeApplies(

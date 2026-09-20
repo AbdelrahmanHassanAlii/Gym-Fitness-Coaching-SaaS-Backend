@@ -1,4 +1,4 @@
-import type { Collection, ObjectId, Sort } from 'mongodb';
+import type { Collection, Document, ObjectId, Sort } from 'mongodb';
 import type { WorkspaceQueryAccess } from '../../core/access-control/access-control.types';
 import type { Database } from '../../core/database/database';
 import type { CheckInInstanceDocument } from '../checkins/checkin.types';
@@ -23,6 +23,7 @@ import type { BranchDocument, WorkspaceMembershipDocument } from '../workspaces/
 export class AnalyticsRepository {
   readonly relationships: Collection<CoachingRelationshipDocument>;
   readonly assignments: Collection<Record<string, unknown>>;
+  readonly branchAssignments: Collection<Record<string, unknown>>;
   readonly branches: Collection<BranchDocument>;
   readonly memberships: Collection<WorkspaceMembershipDocument>;
   readonly workouts: Collection<WorkoutSessionDocument>;
@@ -41,6 +42,7 @@ export class AnalyticsRepository {
   constructor(database: Database) {
     this.relationships = database.db.collection('coaching_relationships');
     this.assignments = database.db.collection('trainee_staff_assignments');
+    this.branchAssignments = database.db.collection('membership_branch_assignments');
     this.branches = database.db.collection('branches');
     this.memberships = database.db.collection('workspace_memberships');
     this.workouts = database.db.collection('workout_sessions');
@@ -75,6 +77,31 @@ export class AnalyticsRepository {
         workspaceId: access.workspaceId,
         relationshipId,
         staffMembershipId: access.membershipId,
+        active: true,
+      }),
+    );
+  }
+
+  async activeAssignmentForRelationship(
+    access: WorkspaceQueryAccess,
+    relationshipId: ObjectId,
+    assignmentTypes: string[],
+  ) {
+    return await this.assignments.findOne({
+      workspaceId: access.workspaceId,
+      relationshipId,
+      staffMembershipId: access.membershipId,
+      assignmentType: { $in: assignmentTypes },
+      active: true,
+    });
+  }
+
+  async membershipAssignedToBranch(access: WorkspaceQueryAccess, branchId: ObjectId) {
+    return Boolean(
+      await this.branchAssignments.findOne({
+        workspaceId: access.workspaceId,
+        membershipId: access.membershipId,
+        branchId,
         active: true,
       }),
     );
@@ -159,20 +186,122 @@ export class AnalyticsRepository {
     return rows.map((row) => row._id);
   }
 
-  async countCompletedWorkouts(
-    access: WorkspaceQueryAccess,
-    from: Date,
-    to: Date,
-    relationshipIds?: ObjectId[],
-  ) {
-    const scopedIds = relationshipIds ?? (await this.scopedRelationshipIds(access, 10_000));
-    if (scopedIds.length === 0) return 0;
-    return await this.workouts.countDocuments({
-      workspaceId: access.workspaceId,
-      relationshipId: { $in: scopedIds },
-      status: 'COMPLETED',
-      completedAt: { $gte: from, $lt: to },
-    });
+  async countTrainerAssignedRelationships(access: WorkspaceQueryAccess, statuses: string[]) {
+    const rows = await this.assignmentRootedRelationshipPipeline<{ count: number }>(access, [
+      { $match: { 'relationship.status': { $in: statuses } } },
+      { $count: 'count' },
+    ]);
+    return rows[0]?.count ?? 0;
+  }
+
+  async countTrainerNewlyAssignedRelationships(access: WorkspaceQueryAccess, from: Date) {
+    const rows = await this.assignmentRootedRelationshipPipeline<{ count: number }>(access, [
+      { $match: { 'relationship.status': 'ACTIVE', firstStartedAt: { $gte: from } } },
+      { $count: 'count' },
+    ]);
+    return rows[0]?.count ?? 0;
+  }
+
+  async countTrainerCompletedWorkouts(access: WorkspaceQueryAccess, from: Date, to: Date) {
+    const rows = await this.assignmentRootedRelationshipPipeline<{ count: number }>(access, [
+      { $match: { 'relationship.status': 'ACTIVE' } },
+      {
+        $lookup: {
+          from: 'workout_sessions',
+          let: { rid: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$workspaceId', access.workspaceId] },
+                    { $eq: ['$relationshipId', '$$rid'] },
+                    { $eq: ['$status', 'COMPLETED'] },
+                    { $gte: ['$completedAt', from] },
+                    { $lt: ['$completedAt', to] },
+                  ],
+                },
+              },
+            },
+            { $count: 'count' },
+          ],
+          as: 'counts',
+        },
+      },
+      { $unwind: { path: '$counts', preserveNullAndEmptyArrays: true } },
+      { $group: { _id: null, count: { $sum: { $ifNull: ['$counts.count', 0] } } } },
+    ]);
+    return rows[0]?.count ?? 0;
+  }
+
+  async countTrainerCheckins(access: WorkspaceQueryAccess, statuses: string[]) {
+    const rows = await this.assignmentRootedRelationshipPipeline<{ count: number }>(access, [
+      { $match: { 'relationship.status': 'ACTIVE' } },
+      {
+        $lookup: {
+          from: 'checkin_instances',
+          let: { rid: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$workspaceId', access.workspaceId] },
+                    { $eq: ['$relationshipId', '$$rid'] },
+                    { $in: ['$status', statuses] },
+                  ],
+                },
+              },
+            },
+            { $count: 'count' },
+          ],
+          as: 'counts',
+        },
+      },
+      { $unwind: { path: '$counts', preserveNullAndEmptyArrays: true } },
+      { $group: { _id: null, count: { $sum: { $ifNull: ['$counts.count', 0] } } } },
+    ]);
+    return rows[0]?.count ?? 0;
+  }
+
+  async countCompletedWorkouts(access: WorkspaceQueryAccess, from: Date, to: Date) {
+    const rows = await this.relationships
+      .aggregate<{ count: number }>([
+        {
+          $match: {
+            workspaceId: access.workspaceId,
+            status: { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] },
+            ...this.relationshipAccessMatch(access),
+          },
+        },
+        {
+          $lookup: {
+            from: 'workout_sessions',
+            let: { rid: '$_id' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$workspaceId', access.workspaceId] },
+                      { $eq: ['$relationshipId', '$$rid'] },
+                      { $eq: ['$status', 'COMPLETED'] },
+                      { $gte: ['$completedAt', from] },
+                      { $lt: ['$completedAt', to] },
+                    ],
+                  },
+                },
+              },
+              { $count: 'count' },
+            ],
+            as: 'counts',
+          },
+        },
+        { $unwind: { path: '$counts', preserveNullAndEmptyArrays: true } },
+        { $group: { _id: null, count: { $sum: { $ifNull: ['$counts.count', 0] } } } },
+      ])
+      .toArray();
+    return rows[0]?.count ?? 0;
   }
 
   async activeStaff(workspaceId: ObjectId) {
@@ -209,18 +338,36 @@ export class AnalyticsRepository {
       .toArray();
   }
 
-  async countCheckins(
-    access: WorkspaceQueryAccess,
-    statuses: string[],
-    relationshipIds?: ObjectId[],
-  ) {
-    const scopedIds = relationshipIds ?? (await this.scopedRelationshipIds(access, 10_000));
-    if (scopedIds.length === 0) return 0;
-    return await this.checkins.countDocuments({
-      workspaceId: access.workspaceId,
-      relationshipId: { $in: scopedIds },
-      status: { $in: statuses as never[] },
-    });
+  async countCheckins(access: WorkspaceQueryAccess, statuses: string[]) {
+    const rows = await this.checkins
+      .aggregate<{ count: number }>([
+        {
+          $match: {
+            workspaceId: access.workspaceId,
+            status: { $in: statuses as never[] },
+          },
+        },
+        {
+          $lookup: {
+            from: 'coaching_relationships',
+            localField: 'relationshipId',
+            foreignField: '_id',
+            as: 'relationship',
+          },
+        },
+        { $unwind: '$relationship' },
+        {
+          $match: {
+            'relationship.workspaceId': access.workspaceId,
+            'relationship.status': { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] },
+            ...this.relationshipAccessMatch(access, 'relationship.'),
+          },
+        },
+        ...this.assignmentScopeStages(access, '$relationship._id'),
+        { $count: 'count' },
+      ])
+      .toArray();
+    return rows[0]?.count ?? 0;
   }
 
   async listAttentionCheckins(
@@ -229,25 +376,189 @@ export class AnalyticsRepository {
     limit: number,
     cursor?: { dueAt: Date; id: ObjectId },
   ) {
-    const scopedIds = await this.scopedRelationshipIds(access, 10_000);
-    if (scopedIds.length === 0) return [];
     return await this.checkins
-      .find({
-        workspaceId: access.workspaceId,
-        relationshipId: { $in: scopedIds },
-        status: status as never,
-        ...(cursor
-          ? {
-              $or: [
-                { dueAt: { $gt: cursor.dueAt } },
-                { dueAt: cursor.dueAt, _id: { $gt: cursor.id } },
-              ],
-            }
-          : {}),
-      })
-      .sort({ dueAt: 1, _id: 1 })
-      .limit(limit + 1)
+      .aggregate<CheckInInstanceDocument>([
+        {
+          $match: {
+            workspaceId: access.workspaceId,
+            status: status as never,
+            ...(cursor
+              ? {
+                  $or: [
+                    { dueAt: { $gt: cursor.dueAt } },
+                    { dueAt: cursor.dueAt, _id: { $gt: cursor.id } },
+                  ],
+                }
+              : {}),
+          },
+        },
+        {
+          $lookup: {
+            from: 'coaching_relationships',
+            localField: 'relationshipId',
+            foreignField: '_id',
+            as: 'relationship',
+          },
+        },
+        { $unwind: '$relationship' },
+        {
+          $match: {
+            'relationship.workspaceId': access.workspaceId,
+            'relationship.status': { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] },
+            ...this.relationshipAccessMatch(access, 'relationship.'),
+          },
+        },
+        ...this.assignmentScopeStages(access, '$relationship._id'),
+        { $sort: { dueAt: 1, _id: 1 } },
+        { $limit: limit + 1 },
+      ])
       .toArray();
+  }
+
+  async branchBreakdown(access: WorkspaceQueryAccess, branchIds: ObjectId[], from: Date, to: Date) {
+    if (branchIds.length === 0) return new Map<string, BranchDashboardCounts>();
+    const rows = await this.branches
+      .aggregate<BranchDashboardCounts & { branchId: ObjectId }>([
+        { $match: { workspaceId: access.workspaceId, _id: { $in: branchIds }, status: 'ACTIVE' } },
+        {
+          $lookup: {
+            from: 'coaching_relationships',
+            let: { branchId: '$_id' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ['$workspaceId', access.workspaceId] },
+                      { $eq: ['$homeBranchId', '$$branchId'] },
+                      { $in: ['$status', ['ACTIVE', 'NEEDS_REASSIGNMENT']] },
+                    ],
+                  },
+                  ...this.relationshipAccessMatch(access),
+                },
+              },
+              {
+                $lookup: {
+                  from: 'workout_sessions',
+                  let: { rid: '$_id' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $and: [
+                            { $eq: ['$workspaceId', access.workspaceId] },
+                            { $eq: ['$relationshipId', '$$rid'] },
+                            { $eq: ['$status', 'COMPLETED'] },
+                            { $gte: ['$completedAt', from] },
+                            { $lt: ['$completedAt', to] },
+                          ],
+                        },
+                      },
+                    },
+                    { $count: 'count' },
+                  ],
+                  as: 'workoutCounts',
+                },
+              },
+              {
+                $lookup: {
+                  from: 'checkin_instances',
+                  let: { rid: '$_id' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $and: [
+                            { $eq: ['$workspaceId', access.workspaceId] },
+                            { $eq: ['$relationshipId', '$$rid'] },
+                            { $in: ['$status', ['OVERDUE', 'SUBMITTED']] },
+                          ],
+                        },
+                      },
+                    },
+                    { $group: { _id: '$status', count: { $sum: 1 } } },
+                  ],
+                  as: 'checkinCounts',
+                },
+              },
+              {
+                $project: {
+                  status: 1,
+                  workoutCount: { $ifNull: [{ $first: '$workoutCounts.count' }, 0] },
+                  overdueCount: {
+                    $ifNull: [
+                      {
+                        $first: {
+                          $map: {
+                            input: {
+                              $filter: {
+                                input: '$checkinCounts',
+                                as: 'row',
+                                cond: { $eq: ['$$row._id', 'OVERDUE'] },
+                              },
+                            },
+                            as: 'row',
+                            in: '$$row.count',
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  pendingCount: {
+                    $ifNull: [
+                      {
+                        $first: {
+                          $map: {
+                            input: {
+                              $filter: {
+                                input: '$checkinCounts',
+                                as: 'row',
+                                cond: { $eq: ['$$row._id', 'SUBMITTED'] },
+                              },
+                            },
+                            as: 'row',
+                            in: '$$row.count',
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  activeTrainees: {
+                    $sum: { $cond: [{ $eq: ['$status', 'ACTIVE'] }, 1, 0] },
+                  },
+                  needsReassignment: {
+                    $sum: { $cond: [{ $eq: ['$status', 'NEEDS_REASSIGNMENT'] }, 1, 0] },
+                  },
+                  completedWorkouts: { $sum: '$workoutCount' },
+                  overdueCheckIns: { $sum: '$overdueCount' },
+                  pendingReviewCheckIns: { $sum: '$pendingCount' },
+                },
+              },
+            ],
+            as: 'counts',
+          },
+        },
+        { $unwind: { path: '$counts', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            branchId: '$_id',
+            activeTrainees: { $ifNull: ['$counts.activeTrainees', 0] },
+            needsReassignment: { $ifNull: ['$counts.needsReassignment', 0] },
+            completedWorkouts: { $ifNull: ['$counts.completedWorkouts', 0] },
+            overdueCheckIns: { $ifNull: ['$counts.overdueCheckIns', 0] },
+            pendingReviewCheckIns: { $ifNull: ['$counts.pendingReviewCheckIns', 0] },
+          },
+        },
+      ])
+      .toArray();
+    return new Map(rows.map((row) => [row.branchId.toHexString(), row]));
   }
 
   async listAttentionRelationships(
@@ -268,6 +579,7 @@ export class AnalyticsRepository {
       ...(cursor ? { _id: { $gt: cursor } } : {}),
     };
     const pipeline: object[] = [{ $match: match }, { $sort: { _id: 1 } }];
+    pipeline.push(...this.assignmentScopeStages(access, '$_id'));
     if (kind === 'NO_ACTIVE_PROGRAM') {
       pipeline.push(
         {
@@ -475,6 +787,24 @@ export class AnalyticsRepository {
       .toArray();
   }
 
+  async countVisibleProgressPhotos(input: {
+    workspaceId: ObjectId;
+    relationshipId: ObjectId;
+    traineeSelf: boolean;
+    staffVisible: boolean;
+  }) {
+    const visibilities = [
+      ...(input.traineeSelf ? ['PRIVATE' as const, 'TRAINER_VISIBLE' as const] : []),
+      ...(input.staffVisible ? ['TRAINER_VISIBLE' as const] : []),
+    ];
+    if (visibilities.length === 0) return 0;
+    return await this.photos.countDocuments({
+      workspaceId: input.workspaceId,
+      relationshipId: input.relationshipId,
+      visibility: { $in: [...new Set(visibilities)] },
+    });
+  }
+
   async recentActivity(
     collection: ActivityCollection,
     workspaceId: ObjectId,
@@ -489,52 +819,75 @@ export class AnalyticsRepository {
       .toArray();
   }
 
-  async scopedRelationshipIds(access: WorkspaceQueryAccess, limit: number) {
-    const filter = {
-      workspaceId: access.workspaceId,
-      status: { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] as CoachingRelationshipStatus[] },
-      ...this.relationshipAccessMatch(access),
-    };
-    if (
-      access.assignedTrainees &&
-      !access.workspaceAllowed &&
-      access.includeBranchIds.length === 0
-    ) {
-      const rows = await this.assignments
-        .aggregate<{ _id: ObjectId }>([
-          {
-            $match: {
-              workspaceId: access.workspaceId,
-              staffMembershipId: access.membershipId,
-              active: true,
-            },
+  private async assignmentRootedRelationshipPipeline<T extends Document>(
+    access: WorkspaceQueryAccess,
+    rest: object[],
+  ) {
+    return await this.assignments
+      .aggregate<T>([
+        {
+          $match: {
+            workspaceId: access.workspaceId,
+            staffMembershipId: access.membershipId,
+            assignmentType: { $in: ['PRIMARY_TRAINER', 'ASSISTANT_TRAINER'] },
+            active: true,
           },
-          { $group: { _id: '$relationshipId' } },
-          {
-            $lookup: {
-              from: 'coaching_relationships',
-              localField: '_id',
-              foreignField: '_id',
-              as: 'relationship',
-            },
+        },
+        { $group: { _id: '$relationshipId', firstStartedAt: { $min: '$startedAt' } } },
+        {
+          $lookup: {
+            from: 'coaching_relationships',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'relationship',
           },
-          { $unwind: '$relationship' },
-          {
-            $match: {
-              'relationship.status': { $in: ['ACTIVE', 'NEEDS_REASSIGNMENT'] },
-              ...this.relationshipAccessMatch(access, 'relationship.'),
-            },
+        },
+        { $unwind: '$relationship' },
+        {
+          $match: {
+            'relationship.workspaceId': access.workspaceId,
+            ...this.relationshipAccessMatch(access, 'relationship.'),
           },
-          { $limit: limit },
-        ])
-        .toArray();
-      return rows.map((row) => row._id);
-    }
-    const rows = await this.relationships
-      .find(filter, { projection: { _id: 1 } })
-      .limit(limit)
+        },
+        ...rest,
+      ])
       .toArray();
-    return rows.map((row) => row._id);
+  }
+
+  private assignmentScopeStages(access: WorkspaceQueryAccess, relationshipExpr: string): object[] {
+    if (
+      !access.assignedTrainees ||
+      access.workspaceAllowed ||
+      access.includeBranchIds.length > 0 ||
+      access.includeRelationshipIds.length > 0
+    ) {
+      return [];
+    }
+    return [
+      {
+        $lookup: {
+          from: 'trainee_staff_assignments',
+          let: { rid: relationshipExpr },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$workspaceId', access.workspaceId] },
+                    { $eq: ['$relationshipId', '$$rid'] },
+                    { $eq: ['$staffMembershipId', access.membershipId] },
+                    { $eq: ['$active', true] },
+                  ],
+                },
+              },
+            },
+            { $limit: 1 },
+          ],
+          as: 'stage18AssignmentScope',
+        },
+      },
+      { $match: { stage18AssignmentScope: { $ne: [] } } },
+    ];
   }
 
   relationshipAccessMatch(access: WorkspaceQueryAccess, prefix = '') {
@@ -563,3 +916,11 @@ export class AnalyticsRepository {
 }
 
 type ActivityCollection = Collection<Record<string, unknown>>;
+
+interface BranchDashboardCounts {
+  activeTrainees: number;
+  needsReassignment: number;
+  completedWorkouts: number;
+  overdueCheckIns: number;
+  pendingReviewCheckIns: number;
+}

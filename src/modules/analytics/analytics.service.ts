@@ -49,15 +49,17 @@ export class AnalyticsApplicationService {
       permission: Permissions.DashboardTrainerRead,
     });
     const range = defaultDashboardRange();
-    const newlyAssignedIds = await this.repo.trainerAssignmentRelationshipIds(access, range.from);
-    const relationshipIds = await this.repo.scopedRelationshipIds(access, 10_000);
     const [assignedActiveTrainees, completedWorkouts, overdueCheckIns, pendingReviewCheckIns] =
       await Promise.all([
-        this.repo.countRelationships(access, ['ACTIVE']),
-        this.repo.countCompletedWorkouts(access, range.from, range.to, relationshipIds),
-        this.repo.countCheckins(access, ['OVERDUE'], relationshipIds),
-        this.repo.countCheckins(access, ['SUBMITTED'], relationshipIds),
+        this.repo.countTrainerAssignedRelationships(access, ['ACTIVE']),
+        this.repo.countTrainerCompletedWorkouts(access, range.from, range.to),
+        this.repo.countTrainerCheckins(access, ['OVERDUE']),
+        this.repo.countTrainerCheckins(access, ['SUBMITTED']),
       ]);
+    const newlyAssignedTrainees = await this.repo.countTrainerNewlyAssignedRelationships(
+      access,
+      range.from,
+    );
     await this.writeSensitive(ctx, workspaceId, 'trainer_dashboard', workspaceId);
     return {
       workspaceId: workspaceId.toHexString(),
@@ -65,7 +67,7 @@ export class AnalyticsApplicationService {
       window: serializeRange(range),
       summary: {
         assignedActiveTrainees,
-        newlyAssignedTrainees: newlyAssignedIds.length,
+        newlyAssignedTrainees,
         completedWorkouts,
         overdueCheckIns,
         pendingReviewCheckIns,
@@ -105,7 +107,6 @@ export class AnalyticsApplicationService {
       ...(branchId ? { branchId } : {}),
     });
     const branchPage = branches.slice(0, branchLimit);
-    const relationshipIds = await this.repo.scopedRelationshipIds(access, 10_000);
     const [
       activeTrainees,
       needsReassignment,
@@ -117,10 +118,16 @@ export class AnalyticsApplicationService {
       this.repo.countRelationships(access, ['ACTIVE']),
       this.repo.countRelationships(access, ['NEEDS_REASSIGNMENT']),
       this.repo.activeStaff(workspaceId),
-      this.repo.countCompletedWorkouts(access, range.from, range.to, relationshipIds),
-      this.repo.countCheckins(access, ['OVERDUE'], relationshipIds),
-      this.repo.countCheckins(access, ['SUBMITTED'], relationshipIds),
+      this.repo.countCompletedWorkouts(access, range.from, range.to),
+      this.repo.countCheckins(access, ['OVERDUE']),
+      this.repo.countCheckins(access, ['SUBMITTED']),
     ]);
+    const branchCounts = await this.repo.branchBreakdown(
+      access,
+      branchPage.map((branch) => branch._id),
+      range.from,
+      range.to,
+    );
     await this.writeSensitive(ctx, workspaceId, 'gym_dashboard', workspaceId);
     return {
       workspaceId: workspaceId.toHexString(),
@@ -139,11 +146,12 @@ export class AnalyticsApplicationService {
         items: branchPage.map((branch) => ({
           branchId: branch._id.toHexString(),
           name: branch.name,
-          activeTrainees: 0,
-          needsReassignment: 0,
-          completedWorkouts: 0,
-          overdueCheckIns: 0,
-          pendingReviewCheckIns: 0,
+          activeTrainees: branchCounts.get(branch._id.toHexString())?.activeTrainees ?? 0,
+          needsReassignment: branchCounts.get(branch._id.toHexString())?.needsReassignment ?? 0,
+          completedWorkouts: branchCounts.get(branch._id.toHexString())?.completedWorkouts ?? 0,
+          overdueCheckIns: branchCounts.get(branch._id.toHexString())?.overdueCheckIns ?? 0,
+          pendingReviewCheckIns:
+            branchCounts.get(branch._id.toHexString())?.pendingReviewCheckIns ?? 0,
         })),
         hasMore: branches.length > branchLimit,
         nextCursor:
@@ -350,7 +358,7 @@ export class AnalyticsApplicationService {
       maybeOid(query.metricDefinitionId, 'METRIC_DEFINITION_NOT_FOUND'),
     );
     if (!metric) throw notFound('METRIC_DEFINITION_NOT_FOUND');
-    const [points, latest] = await Promise.all([
+    const [points, latest, photoCount] = await Promise.all([
       this.repo.measurementPoints(
         input.access.workspaceId,
         input.relationship._id,
@@ -359,6 +367,14 @@ export class AnalyticsApplicationService {
         range.to,
       ),
       this.repo.latestMeasurement(input.access.workspaceId, input.relationship._id, metric._id),
+      this.repo.countVisibleProgressPhotos({
+        workspaceId: input.access.workspaceId,
+        relationshipId: input.relationship._id,
+        traineeSelf: input.actorKind === 'TRAINEE',
+        staffVisible: ['OWNER', 'MANAGER', 'TRAINER', 'ASSISTANT_TRAINER'].includes(
+          input.actorKind,
+        ),
+      }),
     ]);
     const first = points[0] ?? null;
     const last = points[points.length - 1] ?? null;
@@ -380,7 +396,7 @@ export class AnalyticsApplicationService {
       },
       points: points.map((point) => measurementDto(point, metric)),
       buckets: [],
-      photoSummary: { count: 0 },
+      photoSummary: { count: photoCount },
     };
   }
 
@@ -497,15 +513,50 @@ export class AnalyticsApplicationService {
     if (!['ACTIVE', 'NEEDS_REASSIGNMENT'].includes(relationship.status)) {
       throw permissionDenied('RELATIONSHIP_NOT_ACCESSIBLE');
     }
-    const assigned = await this.repo.relationshipAllowedByAssignment(access, relationshipId);
-    const selfAllowed = access.self && relationship.traineeUserId.equals(access.userId);
-    const broadAllowed =
-      access.workspaceAllowed ||
-      (relationship.homeBranchId &&
-        access.includeBranchIds.some((branchId) => branchId.equals(relationship.homeBranchId))) ||
-      access.includeRelationshipIds.some((id) => id.equals(relationshipId));
-    if (!broadAllowed && !assigned && !selfAllowed) throw permissionDenied('PERMISSION_DENIED');
-    return { access, relationship, actorKind: actorKind(access.roles, selfAllowed) };
+    if (!stage4AllowsRelationship(access, relationship)) {
+      throw permissionDenied('PERMISSION_DENIED');
+    }
+    const actor = await this.relationshipActorKind(access, relationship);
+    if (actor === 'OTHER') throw permissionDenied('PERMISSION_DENIED');
+    return { access, relationship, actorKind: actor };
+  }
+
+  private async relationshipActorKind(
+    access: WorkspaceQueryAccess,
+    relationship: RelationshipAccessContext['relationship'],
+  ): Promise<RelationshipAccessContext['actorKind']> {
+    if (access.roles.includes('GYM_OWNER')) return 'OWNER';
+    if (
+      access.roles.includes('GYM_MANAGER') &&
+      relationship.homeBranchId &&
+      (await this.repo.membershipAssignedToBranch(access, relationship.homeBranchId))
+    ) {
+      return 'MANAGER';
+    }
+    if (
+      access.roles.includes('TRAINER') &&
+      (await this.repo.activeAssignmentForRelationship(access, relationship._id, [
+        'PRIMARY_TRAINER',
+      ]))
+    ) {
+      return 'TRAINER';
+    }
+    if (
+      access.roles.includes('ASSISTANT_TRAINER') &&
+      (await this.repo.activeAssignmentForRelationship(access, relationship._id, [
+        'ASSISTANT_TRAINER',
+      ]))
+    ) {
+      return 'ASSISTANT_TRAINER';
+    }
+    if (
+      access.roles.includes('NUTRITIONIST') &&
+      (await this.repo.activeAssignmentForRelationship(access, relationship._id, ['NUTRITIONIST']))
+    ) {
+      return 'NUTRITIONIST';
+    }
+    if (access.self && relationship.traineeUserId.equals(access.userId)) return 'TRAINEE';
+    return 'OTHER';
   }
 
   private async needsAttention(access: WorkspaceQueryAccess, query: Record<string, unknown>) {
@@ -575,7 +626,9 @@ export class AnalyticsApplicationService {
               ? 'low'
               : 'medium',
       }),
-      category === 'NEEDS_REASSIGNMENT' ? rows.length : null,
+      category === 'NEEDS_REASSIGNMENT'
+        ? await this.repo.countRelationships(access, ['NEEDS_REASSIGNMENT'])
+        : null,
     );
   }
 
@@ -692,18 +745,31 @@ function assertSection(
   if (!visibilityFor(input.actorKind)[section]) throw permissionDenied('PERMISSION_DENIED');
 }
 
-function actorKind(roles: string[], self: boolean): RelationshipAccessContext['actorKind'] {
-  if (self) return 'TRAINEE';
-  if (roles.includes('GYM_OWNER')) return 'OWNER';
-  if (roles.includes('GYM_MANAGER')) return 'MANAGER';
-  if (roles.includes('TRAINER')) return 'TRAINER';
-  if (roles.includes('ASSISTANT_TRAINER')) return 'ASSISTANT_TRAINER';
-  if (roles.includes('NUTRITIONIST')) return 'NUTRITIONIST';
-  return 'OTHER';
-}
-
 function isOwner(roles: string[]) {
   return roles.includes('GYM_OWNER');
+}
+
+function stage4AllowsRelationship(
+  access: WorkspaceQueryAccess,
+  relationship: RelationshipAccessContext['relationship'],
+) {
+  if (access.excludeRelationshipIds.some((id) => id.equals(relationship._id))) return false;
+  if (
+    relationship.homeBranchId &&
+    access.excludeBranchIds.some((id) => id.equals(relationship.homeBranchId))
+  ) {
+    return false;
+  }
+  if (access.includeRelationshipIds.length > 0) {
+    return access.includeRelationshipIds.some((id) => id.equals(relationship._id));
+  }
+  if (access.includeBranchIds.length > 0) {
+    return Boolean(
+      relationship.homeBranchId &&
+        access.includeBranchIds.some((id) => id.equals(relationship.homeBranchId)),
+    );
+  }
+  return access.workspaceAllowed || access.assignedTrainees || access.self;
 }
 
 function parseRange(query: Record<string, unknown>): AnalyticsRange {

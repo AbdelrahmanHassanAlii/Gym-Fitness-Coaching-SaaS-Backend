@@ -1,0 +1,1034 @@
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import type { FastifyInstance } from 'fastify';
+import { ObjectId } from 'mongodb';
+import { buildApp } from '../src/api/build-app';
+import type { AppContainer } from '../src/bootstrap/app-container';
+import { createAppContainer } from '../src/bootstrap/app-container';
+import type { AppConfig } from '../src/config/config.types';
+import type { RequestContext } from '../src/core/request-context/request-context';
+import { migrations } from '../src/migrations';
+import { migration023Stage18DashboardsAnalytics } from '../src/migrations/023-stage18-dashboards-analytics';
+import { MigrationRunner } from '../src/migrations/migration-runner';
+import { AnalyticsRepository } from '../src/modules/analytics/analytics.repository';
+import { AnalyticsApplicationService } from '../src/modules/analytics/analytics.service';
+import {
+  Permissions,
+  systemPermissionProfiles,
+} from '../src/modules/permissions/permission.registry';
+import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
+
+describe('Stage 18 dashboards and analytics', () => {
+  let container: AppContainer;
+  let app: FastifyInstance;
+  let fixture: Awaited<ReturnType<typeof seedStage18Fixture>>;
+
+  beforeAll(async () => {
+    container = await createAppContainer(integrationConfig(`stage18_${new ObjectId()}`));
+    await new MigrationRunner(container.database.db, migrations).migrate();
+    app = await buildApp(container);
+    fixture = await seedStage18Fixture(container);
+  }, INTEGRATION_TEST_TIMEOUT_MS);
+
+  afterAll(async () => {
+    if (app) await app.close();
+    if (container) {
+      await container.database.db.dropDatabase();
+      await container.database.close();
+    }
+  }, INTEGRATION_TEST_TIMEOUT_MS);
+
+  test(
+    'migration 023 seeds exact permissions, default profiles, indexes, and no analytics collections',
+    async () => {
+      const local = await createAppContainer(
+        integrationConfig(`stage18_migration_${new ObjectId()}`),
+      );
+      try {
+        await new MigrationRunner(local.database.db, migrations).migrate();
+        const keys = [
+          Permissions.DashboardTrainerRead,
+          Permissions.DashboardGymRead,
+          Permissions.DashboardRelationshipRead,
+          Permissions.AnalyticsTrainingRead,
+          Permissions.AnalyticsProgressRead,
+          Permissions.AnalyticsNutritionRead,
+          Permissions.AnalyticsAdherenceRead,
+        ];
+        expect(
+          await local.database.db
+            .collection('permission_definitions')
+            .countDocuments({ key: { $in: keys } }),
+        ).toBe(7);
+        expect(
+          await local.database.db.collection('permission_profiles').countDocuments({
+            isSystemDefault: false,
+            permissions: { $elemMatch: { permission: { $in: keys } } },
+          }),
+        ).toBe(0);
+        const owner = await local.permissionProfiles.findSystemDefault({
+          context: 'WORKSPACE',
+          workspaceId: fixture.workspaceId,
+          roleKey: 'GYM_OWNER',
+        });
+        expect(
+          systemPermissionProfiles
+            .find((profile) => profile.roleKey === 'GYM_OWNER')
+            ?.permissions.map((entry) => entry.permission),
+        ).toEqual(expect.arrayContaining(keys));
+        expect(owner).toBeNull();
+        expect(
+          await local.database.db.listCollections({ name: 'analytics_snapshots' }).hasNext(),
+        ).toBe(false);
+        await migration023Stage18DashboardsAnalytics.up(local.database.db);
+        await migration023Stage18DashboardsAnalytics.up(local.database.db);
+        expect(
+          (await local.database.db.collection('workout_sessions').indexes()).map(
+            (index) => index.name,
+          ),
+        ).toContain('workouts_recent_completed_activity');
+        expect(
+          (await local.database.db.collection('documents').indexes()).map((index) => index.name),
+        ).toContain('documents_recent_inbody_activity');
+      } finally {
+        await local.database.db.dropDatabase();
+        await local.database.close();
+      }
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
+
+  test('trainer dashboard is assignment-rooted, exact, audited, and has no recent activity', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/trainer`,
+      headers: await bearer(container, fixture.trainer.userId),
+    });
+    expect(response.statusCode).toBe(200);
+    const data = response.json().data;
+    expect(data.summary).toMatchObject({
+      assignedActiveTrainees: 1,
+      newlyAssignedTrainees: 1,
+      completedWorkouts: 2,
+      overdueCheckIns: 1,
+      pendingReviewCheckIns: 1,
+    });
+    expect(data.needsAttention.CHECKIN_OVERDUE.count).toBe(1);
+    expect(data.needsAttention.CHECKIN_PENDING_REVIEW.count).toBe(1);
+    expect(data.recentActivity).toBeNull();
+    expect(await auditCount(container, 'trainer_dashboard')).toBeGreaterThan(0);
+
+    const activityParam = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/trainer?activityLimit=1`,
+      headers: await bearer(container, fixture.trainer.userId),
+    });
+    expect(activityParam.statusCode).toBe(422);
+    expect(activityParam.json().error.code).toBe('RECENT_ACTIVITY_NOT_ALLOWED');
+  });
+
+  test('gym dashboard computes branch counts and gates recent activity before source queries', async () => {
+    const owner = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(owner.statusCode).toBe(200);
+    const data = owner.json().data;
+    expect(data.summary).toMatchObject({
+      activeTrainees: 3,
+      needsReassignment: 1,
+      completedWorkouts: 4,
+      overdueCheckIns: 2,
+      pendingReviewCheckIns: 2,
+    });
+    const main = data.branchBreakdown.items.find(
+      (item: { branchId: string }) => item.branchId === hex(fixture.branchId),
+    );
+    expect(main).toMatchObject({
+      activeTrainees: 2,
+      needsReassignment: 1,
+      completedWorkouts: 3,
+      overdueCheckIns: 2,
+      pendingReviewCheckIns: 2,
+    });
+    expect(Object.keys(data.recentActivity)).toEqual([
+      'WORKOUT_COMPLETED',
+      'PR_ACHIEVED',
+      'CHECKIN_SUBMITTED',
+      'INBODY_UPLOADED',
+    ]);
+    expect(data.recentActivity.WORKOUT_COMPLETED.hasMore).toBe(true);
+
+    const countingRepo = new CountingAnalyticsRepository(container.database);
+    container.analytics = new AnalyticsApplicationService(
+      countingRepo,
+      container.accessControl,
+      container.audit,
+    );
+    const manager = await container.analytics.gymDashboard(
+      ctx(fixture.manager.userId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(manager.recentActivity).toBeNull();
+    expect(countingRepo.activityCalls).toBe(0);
+    await expect(
+      container.analytics.gymDashboard(ctx(fixture.owner.userId), hex(fixture.workspaceId), {
+        branchId: hex(fixture.branchId),
+        activityLimit: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'RECENT_ACTIVITY_NOT_ALLOWED' });
+    expect(countingRepo.activityCalls).toBe(0);
+  });
+
+  test('relationship routes require Stage 4 permission plus current domain eligibility and block cross-workspace IDs', async () => {
+    await expect(
+      container.analytics.relationshipDashboard(
+        ctx(fixture.trainer.userId),
+        hex(fixture.workspaceId),
+        hex(fixture.unassignedRelationshipId),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      container.analytics.trainingAnalytics(
+        ctx(fixture.trainer.userId),
+        hex(fixture.workspaceId),
+        hex(fixture.otherWorkspaceRelationshipId),
+        {},
+      ),
+    ).rejects.toMatchObject({ code: 'RELATIONSHIP_NOT_FOUND' });
+    for (const route of relationshipRoutes(
+      fixture.workspaceId,
+      fixture.otherWorkspaceRelationshipId,
+    )) {
+      const response = await app.inject({
+        method: 'GET',
+        url: route,
+        headers: await bearer(container, fixture.owner.userId),
+      });
+      expect(response.statusCode).toBe(404);
+    }
+  });
+
+  test('relationship dashboard enforces stable null field visibility by actor', async () => {
+    const assistant = await container.analytics.relationshipDashboard(
+      ctx(fixture.assistant.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    expect(assistant.training).not.toBeNull();
+    expect(assistant.progress).not.toBeNull();
+    expect(assistant.checkIns).not.toBeNull();
+    expect(assistant.nutrition).toBeNull();
+
+    const nutritionist = await container.analytics.relationshipDashboard(
+      ctx(fixture.nutritionist.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    expect(nutritionist.training).toBeNull();
+    expect(nutritionist.progress).toBeNull();
+    expect(nutritionist.checkIns).toBeNull();
+    expect(nutritionist.nutrition).not.toBeNull();
+
+    const trainee = await container.analytics.relationshipDashboard(
+      ctx(fixture.trainee.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    const serialized = JSON.stringify(trainee);
+    expect(serialized).not.toContain('membershipId');
+    expect(serialized).not.toContain('fileId');
+    expect(serialized).not.toContain('signedUrl');
+    expect(serialized).not.toContain('storageKey');
+    expect(serialized).not.toContain('sensitive answer');
+  });
+
+  test('analytics formulas use persisted Stage 8-12 truth and actor component filters', async () => {
+    const training = await container.analytics.trainingAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      { from: '2026-09-01', to: '2026-10-01' },
+    );
+    expect(training.summary).toMatchObject({
+      completedSessions: 2,
+      abandonedSessions: 1,
+      programDaysCompleted: 2,
+      programDaysSkipped: 1,
+      programDaysDeferred: 1,
+      workoutAdherenceRate: 0.6667,
+      prCount: 1,
+    });
+
+    const progress = await container.analytics.progressAnalytics(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      { from: '2026-09-01', to: '2026-10-01' },
+    );
+    expect(progress.summary.delta).toBe(5);
+    expect(progress.summary.percentChange).toBeNull();
+    expect(progress.points).toHaveLength(2);
+    expect(progress.photoSummary.count).toBe(1);
+
+    const nutrition = await container.analytics.nutritionAnalytics(
+      ctx(fixture.nutritionist.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      { from: '2026-09-01', to: '2026-10-01' },
+    );
+    expect(nutrition.targets).toMatchObject({ targetCalories: 2200, waterTargetMl: 3000 });
+    expect(nutrition.nutritionTracking.averageAdherencePercent).toBe(87.5);
+    expect(nutrition.waterTracking.averageMl).toBe(2500);
+
+    const assistantAdherence = await container.analytics.adherenceAnalytics(
+      ctx(fixture.assistant.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+      { from: '2026-09-01', to: '2026-10-01' },
+    );
+    expect(assistantAdherence.training).not.toBeNull();
+    expect(assistantAdherence.checkIns).toMatchObject({
+      dueCount: 4,
+      submittedOrReviewedCount: 2,
+      complianceRate: 0.5,
+    });
+    expect(assistantAdherence.nutrition).toBeNull();
+    expect(assistantAdherence.water).toBeNull();
+  });
+
+  test('Needs Attention pagination uses per-category cursors and denies do not affect counts', async () => {
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [fixture.deniedRelationshipId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const first = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      {
+        attentionCategory: 'CHECKIN_OVERDUE',
+        attentionLimit: 1,
+      },
+    );
+    const overdue = first.needsAttention.CHECKIN_OVERDUE as {
+      count: number;
+      items: Array<{ relationshipId: string }>;
+      hasMore: boolean;
+    };
+    expect(overdue.count).toBe(1);
+    expect(overdue.items).toHaveLength(1);
+    expect(overdue.hasMore).toBe(false);
+    expect(overdue.items[0]?.relationshipId).toBe(hex(fixture.relationshipId));
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+  });
+
+  test('support workspace context and restricted workspaces are denied for all Stage 18 routes', async () => {
+    for (const call of serviceCalls(fixture.workspaceId, fixture.relationshipId)) {
+      await expect(
+        call({ ...ctx(fixture.owner.userId), supportSessionId: new ObjectId().toHexString() }),
+      ).rejects.toMatchObject({
+        code: 'SUPPORT_WORKSPACE_DENIED',
+      });
+    }
+
+    await container.database.db
+      .collection('workspaces')
+      .updateOne({ _id: fixture.workspaceId }, { $set: { status: 'RESTRICTED' } });
+    for (const call of serviceCalls(fixture.workspaceId, fixture.relationshipId)) {
+      await expect(call(ctx(fixture.owner.userId))).rejects.toMatchObject({
+        code: 'WORKSPACE_INACTIVE',
+      });
+    }
+    await container.database.db
+      .collection('workspaces')
+      .updateOne({ _id: fixture.workspaceId }, { $set: { status: 'ACTIVE' } });
+  });
+});
+
+class CountingAnalyticsRepository extends AnalyticsRepository {
+  activityCalls = 0;
+  override async recentActivity(...args: Parameters<AnalyticsRepository['recentActivity']>) {
+    this.activityCalls += 1;
+    return await super.recentActivity(...args);
+  }
+}
+
+async function seedStage18Fixture(container: AppContainer) {
+  const db = container.database.db;
+  const now = new Date('2026-09-20T10:00:00.000Z');
+  const owner = await seedActor(container, 'GYM_OWNER');
+  const manager = await seedActor(container, 'GYM_MANAGER');
+  const trainer = await seedActor(container, 'TRAINER');
+  const assistant = await seedActor(container, 'ASSISTANT_TRAINER');
+  const nutritionist = await seedActor(container, 'NUTRITIONIST');
+  const trainee = await seedActor(container, 'TRAINEE');
+  const otherTrainee = await seedActor(container, 'TRAINEE');
+  const workspace = await container.workspaceRepo.create({
+    type: 'GYM',
+    name: 'Stage 18 Gym',
+    ownerUserId: owner.userId,
+    timezone: 'Africa/Cairo',
+    defaultLanguage: 'en',
+  });
+  const branch = await container.branches.create({
+    workspaceId: workspace._id,
+    name: 'Main',
+    timezone: 'Africa/Cairo',
+  });
+  const west = await container.branches.create({
+    workspaceId: workspace._id,
+    name: 'West',
+    timezone: 'Africa/Cairo',
+  });
+  for (const actor of [owner, manager, trainer, assistant, nutritionist, trainee, otherTrainee]) {
+    actor.membershipId = (
+      await container.workspaceMemberships.createActive({
+        workspaceId: workspace._id,
+        userId: actor.userId,
+        roles: [actor.role as never],
+      })
+    )._id;
+    await assignProfile(container, workspace._id, actor.membershipId, actor.role);
+  }
+  for (const actor of [manager, trainer, assistant, nutritionist]) {
+    await container.membershipBranchAssignments.createActive(
+      workspace._id,
+      actor.membershipId,
+      branch._id,
+    );
+  }
+  const relationshipId = new ObjectId();
+  const unassignedRelationshipId = new ObjectId();
+  const deniedRelationshipId = new ObjectId();
+  const westRelationshipId = new ObjectId();
+  await db
+    .collection('coaching_relationships')
+    .insertMany([
+      relationship(
+        workspace._id,
+        relationshipId,
+        trainee.userId,
+        trainee.membershipId,
+        branch._id,
+        'ACTIVE',
+        now,
+      ),
+      relationship(
+        workspace._id,
+        unassignedRelationshipId,
+        otherTrainee.userId,
+        otherTrainee.membershipId,
+        branch._id,
+        'ACTIVE',
+        now,
+      ),
+      relationship(
+        workspace._id,
+        deniedRelationshipId,
+        new ObjectId(),
+        undefined,
+        branch._id,
+        'NEEDS_REASSIGNMENT',
+        now,
+      ),
+      relationship(
+        workspace._id,
+        westRelationshipId,
+        new ObjectId(),
+        undefined,
+        west._id,
+        'ACTIVE',
+        now,
+      ),
+    ]);
+  await db
+    .collection('trainee_staff_assignments')
+    .insertMany([
+      staffAssignment(workspace._id, relationshipId, trainer.membershipId, 'PRIMARY_TRAINER', now),
+      staffAssignment(
+        workspace._id,
+        relationshipId,
+        assistant.membershipId,
+        'ASSISTANT_TRAINER',
+        now,
+      ),
+      staffAssignment(
+        workspace._id,
+        relationshipId,
+        nutritionist.membershipId,
+        'NUTRITIONIST',
+        now,
+      ),
+    ]);
+  await seedAnalyticsFacts(
+    db,
+    workspace._id,
+    relationshipId,
+    deniedRelationshipId,
+    westRelationshipId,
+    now,
+  );
+  const otherWorkspace = await container.workspaceRepo.create({
+    type: 'GYM',
+    name: 'Other Stage 18 Gym',
+    ownerUserId: owner.userId,
+    timezone: 'Africa/Cairo',
+    defaultLanguage: 'en',
+  });
+  const otherWorkspaceRelationshipId = new ObjectId();
+  await db
+    .collection('coaching_relationships')
+    .insertOne(
+      relationship(
+        otherWorkspace._id,
+        otherWorkspaceRelationshipId,
+        owner.userId,
+        undefined,
+        undefined,
+        'ACTIVE',
+        now,
+      ),
+    );
+  return {
+    workspaceId: workspace._id,
+    branchId: branch._id,
+    relationshipId,
+    unassignedRelationshipId,
+    deniedRelationshipId,
+    westRelationshipId,
+    otherWorkspaceRelationshipId,
+    owner,
+    manager,
+    trainer,
+    assistant,
+    nutritionist,
+    trainee,
+  };
+}
+
+async function seedAnalyticsFacts(
+  db: AppContainer['database']['db'],
+  workspaceId: ObjectId,
+  relationshipId: ObjectId,
+  deniedRelationshipId: ObjectId,
+  westRelationshipId: ObjectId,
+  now: Date,
+) {
+  await db
+    .collection('workout_sessions')
+    .insertMany([
+      workout(workspaceId, relationshipId, 'COMPLETED', new Date('2026-09-10T09:00:00.000Z')),
+      workout(workspaceId, relationshipId, 'ABANDONED', new Date('2026-09-11T09:00:00.000Z')),
+      workout(workspaceId, deniedRelationshipId, 'COMPLETED', new Date('2026-09-12T09:00:00.000Z')),
+      workout(workspaceId, westRelationshipId, 'COMPLETED', new Date('2026-09-13T09:00:00.000Z')),
+      workout(workspaceId, relationshipId, 'COMPLETED', new Date('2026-09-14T09:00:00.000Z')),
+    ]);
+  await db
+    .collection('program_progress_events')
+    .insertMany([
+      progressEvent(workspaceId, relationshipId, 'COMPLETED', '2026-09-01'),
+      progressEvent(workspaceId, relationshipId, 'COMPLETED', '2026-09-02'),
+      progressEvent(workspaceId, relationshipId, 'SKIPPED', '2026-09-03'),
+      progressEvent(workspaceId, relationshipId, 'DEFERRED', '2026-09-04'),
+    ]);
+  await db
+    .collection('checkin_instances')
+    .insertMany([
+      checkin(workspaceId, relationshipId, 'OVERDUE', new Date('2026-09-05T00:00:00.000Z')),
+      checkin(
+        workspaceId,
+        relationshipId,
+        'SUBMITTED',
+        new Date('2026-09-06T00:00:00.000Z'),
+        'sensitive answer',
+      ),
+      checkin(workspaceId, relationshipId, 'REVIEWED', new Date('2026-09-07T00:00:00.000Z')),
+      checkin(workspaceId, relationshipId, 'DUE', new Date('2026-09-08T00:00:00.000Z')),
+      checkin(workspaceId, deniedRelationshipId, 'OVERDUE', new Date('2026-09-09T00:00:00.000Z')),
+      checkin(workspaceId, deniedRelationshipId, 'SUBMITTED', new Date('2026-09-10T00:00:00.000Z')),
+    ]);
+  await db.collection('personal_record_events').insertMany([
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      eventType: 'ACHIEVED',
+      occurredAt: new Date('2026-09-12T00:00:00.000Z'),
+      exerciseId: new ObjectId(),
+      value: 100,
+      createdAt: now,
+    },
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      eventType: 'ADJUSTED',
+      occurredAt: new Date('2026-09-13T00:00:00.000Z'),
+      exerciseId: new ObjectId(),
+      value: 105,
+      createdAt: now,
+    },
+  ]);
+  const metricDefinitionId = new ObjectId();
+  await db.collection('metric_definitions').insertOne({
+    _id: metricDefinitionId,
+    workspaceId: null,
+    normalizedKey: 'body_weight',
+    key: 'BODY_WEIGHT',
+    name: 'Body Weight',
+    unit: 'kg',
+    status: 'ACTIVE',
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db
+    .collection('measurement_entries')
+    .insertMany([
+      measurement(
+        workspaceId,
+        relationshipId,
+        metricDefinitionId,
+        0,
+        new Date('2026-09-01T00:00:00.000Z'),
+      ),
+      measurement(
+        workspaceId,
+        relationshipId,
+        metricDefinitionId,
+        5,
+        new Date('2026-09-10T00:00:00.000Z'),
+      ),
+      measurement(
+        workspaceId,
+        relationshipId,
+        metricDefinitionId,
+        7,
+        new Date('2026-10-01T00:00:00.000Z'),
+      ),
+    ]);
+  await db.collection('progress_photo_entries').insertMany([
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      capturedAt: now,
+      visibility: 'TRAINER_VISIBLE',
+      photos: [{ type: 'FRONT', fileId: new ObjectId() }],
+      createdBy: new ObjectId(),
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      capturedAt: now,
+      visibility: 'PRIVATE',
+      photos: [{ type: 'SIDE', fileId: new ObjectId() }],
+      createdBy: new ObjectId(),
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]);
+  const planId = new ObjectId();
+  const revisionId = new ObjectId();
+  await db.collection('nutrition_plans').insertOne({
+    _id: planId,
+    workspaceId,
+    relationshipId,
+    name: 'Current Plan',
+    status: 'ACTIVE',
+    currentRevisionId: revisionId,
+    version: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.collection('nutrition_plan_revisions').insertOne({
+    _id: revisionId,
+    workspaceId,
+    relationshipId,
+    nutritionPlanId: planId,
+    revision: 1,
+    targetCalories: 2200,
+    targetProteinG: 160,
+    targetCarbsG: 240,
+    targetFatG: 70,
+    waterTargetMl: 3000,
+    createdBy: new ObjectId(),
+    createdAt: now,
+  });
+  await db.collection('daily_tracking_entries').insertMany([
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      localDate: '2026-09-01',
+      values: { NUTRITION: { adherencePercent: 80 }, WATER: { ml: 2000 } },
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      _id: new ObjectId(),
+      workspaceId,
+      relationshipId,
+      localDate: '2026-09-02',
+      values: { NUTRITION: { adherencePercent: 95 }, WATER: { ml: 3000 } },
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]);
+  await db.collection('documents').insertOne({
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    category: 'INBODY',
+    status: 'ACTIVE',
+    title: 'InBody',
+    createdAt: new Date('2026-09-15T00:00:00.000Z'),
+  });
+}
+
+function serviceCalls(workspaceId: ObjectId, relationshipId: ObjectId) {
+  return [
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.trainerDashboard(ctxArg, hex(workspaceId), {}),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.gymDashboard(ctxArg, hex(workspaceId), {}),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.relationshipDashboard(ctxArg, hex(workspaceId), hex(relationshipId)),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.trainingAnalytics(ctxArg, hex(workspaceId), hex(relationshipId), {}),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.progressAnalytics(ctxArg, hex(workspaceId), hex(relationshipId), {}),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.nutritionAnalytics(
+        ctxArg,
+        hex(workspaceId),
+        hex(relationshipId),
+        {},
+      ),
+    (ctxArg: ReturnType<typeof ctx>) =>
+      containerRef().analytics.adherenceAnalytics(
+        ctxArg,
+        hex(workspaceId),
+        hex(relationshipId),
+        {},
+      ),
+  ];
+}
+
+let activeContainer: AppContainer | undefined;
+function containerRef() {
+  if (!activeContainer) throw new Error('container not set');
+  return activeContainer;
+}
+
+async function seedActor(container: AppContainer, role: string) {
+  activeContainer = container;
+  const userId = new ObjectId();
+  await container.database.db.collection('users').insertOne({
+    _id: userId,
+    email: `${role.toLowerCase()}-${userId.toHexString()}@example.test`,
+    normalizedEmail: `${role.toLowerCase()}-${userId.toHexString()}@example.test`,
+    passwordHash: 'hash',
+    emailVerifiedAt: new Date(),
+    firstName: 'Stage',
+    lastName: 'Eighteen',
+    preferredLanguage: 'en',
+    timezone: 'Africa/Cairo',
+    status: 'ACTIVE',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  return { userId, role, membershipId: new ObjectId() };
+}
+
+async function assignProfile(
+  container: AppContainer,
+  workspaceId: ObjectId,
+  membershipId: ObjectId,
+  roleKey: string,
+) {
+  const seed = systemPermissionProfiles.find(
+    (profile) => profile.context === 'WORKSPACE' && profile.roleKey === roleKey,
+  );
+  if (!seed) throw new Error(`missing profile ${roleKey}`);
+  const profile =
+    (await container.permissionProfiles.findSystemDefault({
+      context: 'WORKSPACE',
+      workspaceId,
+      roleKey,
+    })) ??
+    (await container.permissionProfiles.create({
+      context: 'WORKSPACE',
+      workspaceId,
+      roleKey,
+      name: seed.name,
+      permissions: seed.permissions,
+      isSystemDefault: true,
+    }));
+  const membership = await container.workspaceMemberships.findByIdInWorkspace(
+    workspaceId,
+    membershipId,
+  );
+  if (!membership) throw new Error('missing membership');
+  await container.workspaceMemberships.updateRoleAndProfileContributions(
+    workspaceId,
+    membershipId,
+    membership.accessVersion ?? 0,
+    {
+      roles: membership.roles,
+      permissionProfileIds: [profile._id],
+    },
+  );
+}
+
+function relationship(
+  workspaceId: ObjectId,
+  id: ObjectId,
+  traineeUserId: ObjectId,
+  traineeMembershipId: ObjectId | undefined,
+  branchId: ObjectId | undefined,
+  status: string,
+  now: Date,
+) {
+  return {
+    _id: id,
+    workspaceId,
+    traineeUserId,
+    ...(traineeMembershipId ? { traineeMembershipId } : {}),
+    status,
+    ...(branchId ? { homeBranchId: branchId } : {}),
+    engagementPeriods: [{ startedAt: now }],
+    version: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function staffAssignment(
+  workspaceId: ObjectId,
+  relationshipId: ObjectId,
+  staffMembershipId: ObjectId,
+  assignmentType: string,
+  now: Date,
+) {
+  return {
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    staffMembershipId,
+    assignmentType,
+    active: true,
+    startedAt: now,
+    assignedBy: new ObjectId(),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function workout(workspaceId: ObjectId, relationshipId: ObjectId, status: string, at: Date) {
+  return {
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    status,
+    startedAt: at,
+    completedAt: status === 'COMPLETED' ? at : undefined,
+    abandonedAt: status === 'ABANDONED' ? at : undefined,
+    createdAt: at,
+    updatedAt: at,
+  };
+}
+
+function progressEvent(
+  workspaceId: ObjectId,
+  relationshipId: ObjectId,
+  type: string,
+  localDate: string,
+) {
+  const occurredAt = new Date(`${localDate}T12:00:00.000Z`);
+  return {
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    type,
+    occurredAt,
+    localDate,
+    createdAt: occurredAt,
+  };
+}
+
+function checkin(
+  workspaceId: ObjectId,
+  relationshipId: ObjectId,
+  status: string,
+  dueAt: Date,
+  answer?: string,
+) {
+  return {
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    assignmentId: new ObjectId(),
+    templateId: new ObjectId(),
+    templateRevisionId: new ObjectId(),
+    status,
+    dueAt,
+    submittedAt: ['SUBMITTED', 'REVIEWED'].includes(status) ? dueAt : undefined,
+    responses: answer ? [{ fieldKey: 'notes', value: answer }] : [],
+    periodKey: dueAt.toISOString(),
+    periodStartAt: dueAt,
+    periodEndAt: dueAt,
+    opensAt: dueAt,
+    timezone: 'Africa/Cairo',
+    version: 0,
+    createdAt: dueAt,
+    updatedAt: dueAt,
+  };
+}
+
+function measurement(
+  workspaceId: ObjectId,
+  relationshipId: ObjectId,
+  metricDefinitionId: ObjectId,
+  value: number,
+  measuredAt: Date,
+) {
+  return {
+    _id: new ObjectId(),
+    workspaceId,
+    relationshipId,
+    metricDefinitionId,
+    value,
+    measuredAt,
+    recordedBy: new ObjectId(),
+    createdAt: measuredAt,
+    updatedAt: measuredAt,
+  };
+}
+
+function relationshipRoutes(workspaceId: ObjectId, relationshipId: ObjectId) {
+  const base = `/api/v1/workspaces/${hex(workspaceId)}/relationships/${hex(relationshipId)}`;
+  return [
+    `${base}/dashboard`,
+    `${base}/analytics/training`,
+    `${base}/analytics/progress`,
+    `${base}/analytics/nutrition`,
+    `${base}/analytics/adherence`,
+  ];
+}
+
+async function bearer(container: AppContainer, userId: ObjectId) {
+  const session = await container.authSessions.create({
+    userId,
+    authenticationMethods: ['pwd'],
+    restrictedUntilVerified: false,
+    ipAddress: '127.0.0.1',
+    clientType: 'API',
+    transport: 'JSON',
+    mfaSatisfiedAt: new Date(),
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+  });
+  return {
+    authorization: `Bearer ${container.jwt.createAccessToken({ userId: hex(userId), authSessionId: hex(session._id), authenticationMethods: ['pwd'] })}`,
+  };
+}
+
+function ctx(userId: ObjectId): RequestContext {
+  return {
+    correlationId: new ObjectId().toHexString(),
+    userId: hex(userId),
+    authSessionId: new ObjectId().toHexString(),
+    ipAddress: '127.0.0.1',
+    locale: 'en',
+    timezone: 'Africa/Cairo',
+  };
+}
+
+async function auditCount(container: AppContainer, accessKind: string) {
+  return await container.database.db.collection('audit_events').countDocuments({ accessKind });
+}
+
+function hex(id: ObjectId) {
+  return id.toHexString();
+}
+
+function integrationConfig(dbName: string): AppConfig {
+  return {
+    env: 'test',
+    app: { host: '0.0.0.0', port: 3000, docsEnabled: false, trustProxy: false, allowedOrigins: [] },
+    mongo: {
+      uri:
+        process.env.MONGODB_URI ??
+        'mongodb://localhost:27017/gym_platform?replicaSet=rs0&directConnection=true',
+      dbName,
+      connectTimeoutMs: 500,
+    },
+    logging: { level: 'silent' },
+    audit: { retentionPolicy: 'INDEFINITE' },
+    auth: {
+      jwtActiveKeyId: 'local',
+      jwtPrivateKey: [
+        '-----BEGIN PRIVATE KEY-----',
+        'MC4CAQAwBQYDK2VwBCIEIP27WzZ2lrwob/CusOSRmtVPlS0TPTrBOFjTuBztUPm8',
+        '-----END PRIVATE KEY-----',
+      ].join('\n'),
+      jwtPublicKeys: {
+        local: [
+          '-----BEGIN PUBLIC KEY-----',
+          'MCowBQYDK2VwAyEAVk4E+7jo4OHXHcYC1lvT+vqaViaFNdUPnMcuSDPpp60=',
+          '-----END PUBLIC KEY-----',
+        ].join('\n'),
+      },
+      accessTokenTtlSeconds: 900,
+      refreshTokenTtlSeconds: 2_592_000,
+      webRefreshCookieSameSite: 'LAX',
+      otpHmacSecret: 'secret',
+      totpEncryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      loginIdentifierIpWindowMs: 900_000,
+      loginIdentifierIpMaxAttempts: 5,
+      loginIdentifierIpBlockMs: 900_000,
+      loginIpWindowMs: 900_000,
+      loginIpMaxAttempts: 30,
+      challengeTtlSeconds: 600,
+      challengeMaxAttempts: 5,
+      challengeResendCooldownSeconds: 60,
+      challengeMaxSendsPerHour: 5,
+      mfaChallengeTtlSeconds: 300,
+      mfaChallengeMaxAttempts: 5,
+      recoveryCodeCount: 10,
+      passwordResetIdentifierMaxPerHour: 3,
+      passwordResetIpMaxPerHour: 10,
+    },
+    worker: {
+      id: 'test-worker',
+      outboxPollIntervalMs: 1000,
+      outboxLockMs: 30_000,
+      outboxMaxAttempts: 8,
+      jobLeaseMs: 30_000,
+    },
+    subscriptions: { trialExpiryAction: 'FROZEN', paidGraceDays: 0, frozenToExpiredDays: 30 },
+    support: { defaultSessionMinutes: 30, maxSessionMinutes: 60 },
+  };
+}

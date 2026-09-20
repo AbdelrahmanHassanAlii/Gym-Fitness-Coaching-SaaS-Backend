@@ -48,3 +48,7 @@ export interface DateIdCursor {
   occurredAt: Date;
   id: ObjectId;
 }
+
+export interface CategoryDateIdCursor extends DateIdCursor {
+  category: ActivityCategory;
+}

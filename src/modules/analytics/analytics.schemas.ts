@@ -37,7 +37,7 @@ export const AnalyticsQuery = Type.Object(
   {
     from: Type.Optional(Type.String()),
     to: Type.Optional(Type.String()),
-    granularity: Type.Optional(Type.String()),
+    granularity: Type.Optional(Type.Union([Type.Literal('day'), Type.Literal('week')])),
     metricDefinitionId: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
@@ -47,7 +47,14 @@ export const ProgressAnalyticsQuery = Type.Object(
   {
     from: Type.Optional(Type.String()),
     to: Type.Optional(Type.String()),
-    granularity: Type.Optional(Type.String()),
+    granularity: Type.Optional(
+      Type.Union([
+        Type.Literal('none'),
+        Type.Literal('day'),
+        Type.Literal('week'),
+        Type.Literal('month'),
+      ]),
+    ),
     metricDefinitionId: Type.Optional(Type.String()),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
     cursor: Type.Optional(Type.String()),

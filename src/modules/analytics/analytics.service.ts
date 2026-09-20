@@ -10,6 +10,7 @@ import type {
   ActivityCategory,
   AnalyticsRange,
   AttentionCategory,
+  CategoryDateIdCursor,
   DateIdCursor,
   Granularity,
   RelationshipAccessContext,
@@ -320,6 +321,7 @@ export class AnalyticsApplicationService {
   ) {
     assertSection(input, 'training');
     const range = parseRange(query, input.timezone);
+    const selectedGranularity = granularity(query.granularity, ['day', 'week'], 'day');
     const [workouts, progressEvents, prCount, latestPr] = await Promise.all([
       this.repo.workoutSummary(
         input.access.workspaceId,
@@ -340,11 +342,12 @@ export class AnalyticsApplicationService {
     const progressCounts = mapCounts(progressEvents);
     const completed = progressCounts.COMPLETED ?? 0;
     const skipped = progressCounts.SKIPPED ?? 0;
+    const series = await this.trainingSeries(input, range, selectedGranularity);
     return {
       workspaceId: input.access.workspaceId.toHexString(),
       relationshipId: input.relationship._id.toHexString(),
       range: serializeRange(range),
-      granularity: granularity(query.granularity, ['day', 'week'], 'day'),
+      granularity: selectedGranularity,
       summary: {
         startedSessions: sumCounts(workoutCounts),
         completedSessions: workoutCounts.COMPLETED ?? 0,
@@ -355,9 +358,93 @@ export class AnalyticsApplicationService {
         workoutAdherenceRate: ratio(completed, completed + skipped),
         prCount,
       },
-      series: [],
+      series,
       latestPr: latestPr ? latestPrDto(latestPr) : null,
     };
+  }
+
+  private async trainingSeries(
+    input: RelationshipAccessContext,
+    range: AnalyticsRange,
+    selectedGranularity: Granularity,
+  ) {
+    const [workouts, progressEvents] = await Promise.all([
+      this.repo.workoutEventsInRange(
+        input.access.workspaceId,
+        input.relationship._id,
+        range.from,
+        range.to,
+      ),
+      this.repo.progressEventsInRange(
+        input.access.workspaceId,
+        input.relationship._id,
+        range.from,
+        range.to,
+      ),
+    ]);
+    const buckets = new Map<
+      string,
+      ReturnType<typeof bucketWindow> & {
+        startedSessions: number;
+        completedSessions: number;
+        abandonedSessions: number;
+        programDaysCompleted: number;
+        programDaysSkipped: number;
+        programDaysDeferred: number;
+      }
+    >();
+    const ensure = (date: Date) => {
+      const bucket = bucketWindow(date, range.timezone, selectedGranularity);
+      const current = buckets.get(bucket.key);
+      if (current) return current;
+      const created = {
+        ...bucket,
+        startedSessions: 0,
+        completedSessions: 0,
+        abandonedSessions: 0,
+        programDaysCompleted: 0,
+        programDaysSkipped: 0,
+        programDaysDeferred: 0,
+      };
+      buckets.set(bucket.key, created);
+      return created;
+    };
+    for (const workout of workouts) {
+      const eventAt =
+        workout.status === 'COMPLETED'
+          ? workout.completedAt
+          : workout.status === 'ABANDONED'
+            ? workout.abandonedAt
+            : workout.startedAt;
+      if (!eventAt) continue;
+      const bucket = ensure(eventAt);
+      bucket.startedSessions += 1;
+      if (workout.status === 'COMPLETED') bucket.completedSessions += 1;
+      if (workout.status === 'ABANDONED') bucket.abandonedSessions += 1;
+    }
+    for (const event of progressEvents) {
+      const bucket = ensure(event.occurredAt);
+      if (event.type === 'COMPLETED') bucket.programDaysCompleted += 1;
+      if (event.type === 'SKIPPED') bucket.programDaysSkipped += 1;
+      if (event.type === 'DEFERRED') bucket.programDaysDeferred += 1;
+    }
+    return [...buckets.values()]
+      .sort((left, right) => left.start.getTime() - right.start.getTime())
+      .map((bucket) => ({
+        key: bucket.key,
+        from: bucket.start.toISOString(),
+        to: bucket.end.toISOString(),
+        startedSessions: bucket.startedSessions,
+        completedSessions: bucket.completedSessions,
+        abandonedSessions: bucket.abandonedSessions,
+        programDaysCompleted: bucket.programDaysCompleted,
+        programDaysSkipped: bucket.programDaysSkipped,
+        programDaysDeferred: bucket.programDaysDeferred,
+        workoutAdherenceRate: ratio(
+          bucket.programDaysCompleted,
+          bucket.programDaysCompleted + bucket.programDaysSkipped,
+        ),
+      }));
   }
 
   private async progressAnalyticsFor(
@@ -366,6 +453,11 @@ export class AnalyticsApplicationService {
   ) {
     assertSection(input, 'progress');
     const range = parseRange(query, input.timezone);
+    const selectedGranularity = granularity(
+      query.granularity,
+      ['none', 'day', 'week', 'month'],
+      'none',
+    );
     const metric = await this.repo.activeMetric(
       input.access.workspaceId,
       maybeOid(query.metricDefinitionId, 'METRIC_DEFINITION_NOT_FOUND'),
@@ -373,7 +465,7 @@ export class AnalyticsApplicationService {
     if (!metric) throw notFound('METRIC_DEFINITION_NOT_FOUND');
     const pointLimit = limit(query.limit, 100, 500);
     const pointCursor = decodeDateIdCursor(query.cursor, 'PROGRESS_CURSOR_INVALID');
-    const [points, edges, photoCount] = await Promise.all([
+    const [points, edges, photoCount, bucketPoints] = await Promise.all([
       this.repo.measurementPoints(
         input.access.workspaceId,
         input.relationship._id,
@@ -398,6 +490,15 @@ export class AnalyticsApplicationService {
           input.actorKind,
         ),
       }),
+      selectedGranularity === 'none'
+        ? Promise.resolve([])
+        : this.repo.measurementsInRange(
+            input.access.workspaceId,
+            input.relationship._id,
+            metric._id,
+            range.from,
+            range.to,
+          ),
     ]);
     const pagePoints = points.slice(0, pointLimit);
     const first = edges.firstInWindow;
@@ -422,7 +523,7 @@ export class AnalyticsApplicationService {
       page: pageFromItems(points, pointLimit, (item) =>
         encodeDateIdCursor(item.measuredAt, item._id),
       ),
-      buckets: [],
+      buckets: progressBuckets(bucketPoints, metric, range, selectedGranularity),
       photoSummary: { count: photoCount },
     };
   }
@@ -433,6 +534,7 @@ export class AnalyticsApplicationService {
   ) {
     assertSection(input, 'nutrition');
     const range = parseRange(query, input.timezone);
+    const selectedGranularity = granularity(query.granularity, ['day', 'week'], 'day');
     const plan = await this.repo.activeNutritionPlan(
       input.access.workspaceId,
       input.relationship._id,
@@ -471,6 +573,7 @@ export class AnalyticsApplicationService {
         averageMl: average(waterDays.map((entry) => entry.values.WATER?.ml)),
         targetMl: plan.revision?.waterTargetMl ?? null,
       },
+      series: nutritionSeries(tracking, range, selectedGranularity, plan.revision?.waterTargetMl),
     };
   }
 
@@ -480,21 +583,30 @@ export class AnalyticsApplicationService {
   ) {
     const visibility = visibilityFor(input.actorKind);
     const range = parseRange(query, input.timezone);
+    const selectedGranularity = granularity(query.granularity, ['day', 'week'], 'day');
+    const [training, checkIns, checkInSeriesValue, nutrition] = await Promise.all([
+      visibility.training ? this.trainingAnalyticsFor(input, query) : Promise.resolve(null),
+      visibility.checkIns ? this.checkinSummary(input, range) : Promise.resolve(null),
+      visibility.checkIns
+        ? this.checkinSeries(input, range, selectedGranularity)
+        : Promise.resolve(null),
+      visibility.nutrition ? this.nutritionAnalyticsFor(input, query) : Promise.resolve(null),
+    ]);
     return {
       workspaceId: input.access.workspaceId.toHexString(),
       relationshipId: input.relationship._id.toHexString(),
       range: serializeRange(range),
-      granularity: granularity(query.granularity, ['day', 'week'], 'day'),
-      training: visibility.training
-        ? (await this.trainingAnalyticsFor(input, query)).summary
-        : null,
-      checkIns: visibility.checkIns ? await this.checkinSummary(input, range) : null,
-      nutrition: visibility.nutrition
-        ? (await this.nutritionAnalyticsFor(input, query)).nutritionTracking
-        : null,
-      water: visibility.nutrition
-        ? (await this.nutritionAnalyticsFor(input, query)).waterTracking
-        : null,
+      granularity: selectedGranularity,
+      training: training?.summary ?? null,
+      checkIns,
+      nutrition: nutrition?.nutritionTracking ?? null,
+      water: nutrition?.waterTracking ?? null,
+      series: adherenceSeries(
+        training?.series,
+        checkInSeriesValue,
+        nutrition?.series,
+        selectedGranularity,
+      ),
     };
   }
 
@@ -520,6 +632,48 @@ export class AnalyticsApplicationService {
       submittedOrReviewedCount: numerator,
       complianceRate: ratio(numerator, denominator),
     };
+  }
+
+  private async checkinSeries(
+    input: RelationshipAccessContext,
+    range: AnalyticsRange,
+    selectedGranularity: Granularity,
+  ) {
+    const checkins = await this.repo.checkinsInRange(
+      input.access.workspaceId,
+      input.relationship._id,
+      range.from,
+      range.to,
+    );
+    const buckets = new Map<
+      string,
+      ReturnType<typeof bucketWindow> & { numerator: number; denominator: number }
+    >();
+    const ensure = (date: Date) => {
+      const bucket = bucketWindow(date, range.timezone, selectedGranularity);
+      const current = buckets.get(bucket.key);
+      if (current) return current;
+      const created = { ...bucket, numerator: 0, denominator: 0 };
+      buckets.set(bucket.key, created);
+      return created;
+    };
+    for (const checkin of checkins) {
+      const bucket = ensure(checkin.dueAt);
+      bucket.denominator += 1;
+      if (checkin.status === 'SUBMITTED' || checkin.status === 'REVIEWED') {
+        bucket.numerator += 1;
+      }
+    }
+    return [...buckets.values()]
+      .sort((left, right) => left.start.getTime() - right.start.getTime())
+      .map((bucket) => ({
+        key: bucket.key,
+        from: bucket.start.toISOString(),
+        to: bucket.end.toISOString(),
+        dueCount: bucket.denominator,
+        submittedOrReviewedCount: bucket.numerator,
+        complianceRate: ratio(bucket.numerator, bucket.denominator),
+      }));
   }
 
   private async relationshipAccess(
@@ -652,7 +806,7 @@ export class AnalyticsApplicationService {
         count,
       );
     }
-    const cursor = maybeOid(cursorValue, 'ATTENTION_CURSOR_INVALID');
+    const cursor = decodeObjectIdCursor(cursorValue, 'ATTENTION_CURSOR_INVALID');
     const rows = await this.repo.listAttentionRelationships(
       access,
       category,
@@ -661,7 +815,7 @@ export class AnalyticsApplicationService {
       cursor,
       options?.assignmentTypes,
     );
-    return page(
+    return relationshipAttentionPage(
       rows,
       limitValue,
       (item) => ({
@@ -695,7 +849,11 @@ export class AnalyticsApplicationService {
     if (query.activityCursor && !requestedCategory) {
       throw badRequest('ACTIVITY_CURSOR_REQUIRES_CATEGORY');
     }
-    const cursor = decodeDateIdCursor(query.activityCursor, 'ACTIVITY_CURSOR_INVALID');
+    const cursor = decodeActivityCursor(
+      query.activityCursor,
+      requestedCategory,
+      'ACTIVITY_CURSOR_INVALID',
+    );
     const limitValue = limit(query.activityLimit, 5, 20);
     const categories = requestedCategory ? [requestedCategory] : activityCategories;
     const result: Record<string, unknown> = {};
@@ -770,7 +928,7 @@ export class AnalyticsApplicationService {
       count: null,
       items: source.slice(0, limitValue).map((item) => activityItem(category, item, timeField)),
       ...pageFromItems(source, limitValue, (item) =>
-        encodeDateIdCursor(item[timeField] as Date, item._id as ObjectId),
+        encodeActivityCursor(category, item[timeField] as Date, item._id as ObjectId),
       ),
     };
   }
@@ -951,6 +1109,48 @@ function decodeDateIdCursor(value: unknown, code: string) {
   }
 }
 
+function decodeObjectIdCursor(value: unknown, code: string) {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8')) as {
+      id?: string;
+    };
+    if (!parsed.id || !ObjectId.isValid(parsed.id)) throw new Error('invalid cursor');
+    return new ObjectId(parsed.id);
+  } catch {
+    throw badRequest(code);
+  }
+}
+
+function decodeActivityCursor(
+  value: unknown,
+  category: ActivityCategory | undefined,
+  code: string,
+): CategoryDateIdCursor | undefined {
+  if (!value) return undefined;
+  if (!category) throw badRequest(code);
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8')) as {
+      category?: ActivityCategory;
+      occurredAt?: string;
+      id?: string;
+    };
+    const occurredAt = new Date(String(parsed.occurredAt));
+    if (
+      parsed.category !== category ||
+      !activityCategories.includes(parsed.category as ActivityCategory) ||
+      Number.isNaN(occurredAt.getTime()) ||
+      !parsed.id ||
+      !ObjectId.isValid(parsed.id)
+    ) {
+      throw new Error('invalid cursor');
+    }
+    return { category: parsed.category, occurredAt, id: new ObjectId(parsed.id) };
+  } catch {
+    throw badRequest(code);
+  }
+}
+
 function page<T>(items: T[], limitValue: number, map: (item: T) => unknown, count: number | null) {
   const sliced = items.slice(0, limitValue);
   const last = sliced[sliced.length - 1] as Record<string, unknown> | undefined;
@@ -965,6 +1165,23 @@ function page<T>(items: T[], limitValue: number, map: (item: T) => unknown, coun
             id: (last._id as ObjectId | undefined)?.toHexString(),
           })
         : null,
+  };
+}
+
+function relationshipAttentionPage<T extends { _id: ObjectId }>(
+  items: T[],
+  limitValue: number,
+  map: (item: T) => unknown,
+  count: number | null,
+) {
+  const sliced = items.slice(0, limitValue);
+  const last = sliced[sliced.length - 1];
+  return {
+    ...(count === null ? { count: null } : { count }),
+    items: sliced.map(map),
+    hasMore: items.length > limitValue,
+    nextCursor:
+      items.length > limitValue && last ? encodeCursor({ id: last._id.toHexString() }) : null,
   };
 }
 
@@ -1001,6 +1218,137 @@ function averageRatioFromPercent(values: Array<number | undefined>) {
   return round4(present.reduce((sum, value) => sum + value / 100, 0) / present.length);
 }
 
+function progressBuckets(
+  points: Array<{ value: number; measuredAt: Date; _id: ObjectId }>,
+  metric: { _id: ObjectId; unit: string; key?: string; name: string },
+  range: AnalyticsRange,
+  selectedGranularity: Granularity,
+) {
+  if (selectedGranularity === 'none') return [];
+  const latestByBucket = new Map<
+    string,
+    ReturnType<typeof bucketWindow> & { point: { value: number; measuredAt: Date; _id: ObjectId } }
+  >();
+  for (const point of points) {
+    const bucket = bucketWindow(point.measuredAt, range.timezone, selectedGranularity);
+    const current = latestByBucket.get(bucket.key);
+    if (
+      !current ||
+      point.measuredAt > current.point.measuredAt ||
+      (point.measuredAt.getTime() === current.point.measuredAt.getTime() &&
+        point._id.toHexString() > current.point._id.toHexString())
+    ) {
+      latestByBucket.set(bucket.key, { ...bucket, point });
+    }
+  }
+  return [...latestByBucket.values()]
+    .sort((left, right) => left.start.getTime() - right.start.getTime())
+    .map((bucket) => ({
+      key: bucket.key,
+      from: bucket.start.toISOString(),
+      to: bucket.end.toISOString(),
+      latest: measurementDto(bucket.point, metric),
+    }));
+}
+
+function nutritionSeries(
+  entries: Array<{
+    localDate: string;
+    values: { NUTRITION?: { adherencePercent?: number }; WATER?: { ml?: number } };
+  }>,
+  range: AnalyticsRange,
+  selectedGranularity: Granularity,
+  waterTargetMl?: number | null,
+) {
+  const buckets = new Map<
+    string,
+    ReturnType<typeof bucketWindow> & {
+      nutritionRates: number[];
+      waterMl: number[];
+    }
+  >();
+  const ensure = (localDate: string) => {
+    const bucket = bucketWindow(
+      localDateInstant(localDate, range.timezone),
+      range.timezone,
+      selectedGranularity,
+    );
+    const current = buckets.get(bucket.key);
+    if (current) return current;
+    const created = { ...bucket, nutritionRates: [], waterMl: [] };
+    buckets.set(bucket.key, created);
+    return created;
+  };
+  for (const entry of entries) {
+    const bucket = ensure(entry.localDate);
+    if (typeof entry.values.NUTRITION?.adherencePercent === 'number') {
+      bucket.nutritionRates.push(entry.values.NUTRITION.adherencePercent / 100);
+    }
+    if (typeof entry.values.WATER?.ml === 'number') bucket.waterMl.push(entry.values.WATER.ml);
+  }
+  return [...buckets.values()]
+    .sort((left, right) => left.start.getTime() - right.start.getTime())
+    .map((bucket) => {
+      const averageWaterMl =
+        bucket.waterMl.length > 0
+          ? round2(bucket.waterMl.reduce((sum, value) => sum + value, 0) / bucket.waterMl.length)
+          : null;
+      const waterAdherenceRate =
+        averageWaterMl !== null && waterTargetMl && waterTargetMl > 0
+          ? round4(Math.min(averageWaterMl / waterTargetMl, 1))
+          : null;
+      return {
+        key: bucket.key,
+        from: bucket.start.toISOString(),
+        to: bucket.end.toISOString(),
+        nutritionAdherenceRate:
+          bucket.nutritionRates.length > 0
+            ? round4(
+                bucket.nutritionRates.reduce((sum, value) => sum + value, 0) /
+                  bucket.nutritionRates.length,
+              )
+            : null,
+        averageWaterMl,
+        waterAdherenceRate,
+      };
+    });
+}
+
+function adherenceSeries(
+  trainingSeriesValue: unknown,
+  checkInSeriesValue: unknown,
+  nutritionSeriesValue: unknown,
+  selectedGranularity: Granularity,
+) {
+  if (selectedGranularity === 'none') return [];
+  const byKey = new Map<string, Record<string, unknown>>();
+  for (const item of Array.isArray(trainingSeriesValue) ? trainingSeriesValue : []) {
+    const row = item as Record<string, unknown>;
+    byKey.set(String(row.key), {
+      key: row.key,
+      from: row.from,
+      to: row.to,
+      training: { workoutAdherenceRate: row.workoutAdherenceRate },
+    });
+  }
+  for (const item of Array.isArray(checkInSeriesValue) ? checkInSeriesValue : []) {
+    const row = item as Record<string, unknown>;
+    const current = byKey.get(String(row.key)) ?? { key: row.key, from: row.from, to: row.to };
+    current.checkIns = { complianceRate: row.complianceRate };
+    byKey.set(String(row.key), current);
+  }
+  for (const item of Array.isArray(nutritionSeriesValue) ? nutritionSeriesValue : []) {
+    const row = item as Record<string, unknown>;
+    const current = byKey.get(String(row.key)) ?? { key: row.key, from: row.from, to: row.to };
+    current.nutrition = { adherenceRate: row.nutritionAdherenceRate };
+    current.water = { adherenceRate: row.waterAdherenceRate };
+    byKey.set(String(row.key), current);
+  }
+  return [...byKey.values()].sort((left, right) =>
+    String(left.key).localeCompare(String(right.key)),
+  );
+}
+
 function round2(value: number) {
   return Math.round(value * 100) / 100;
 }
@@ -1009,10 +1357,10 @@ function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
 }
 
-function granularity(value: unknown, allowed: Granularity[], fallback: Granularity) {
+function granularity<T extends Granularity>(value: unknown, allowed: T[], fallback: T): T {
   if (!value) return fallback;
-  if (!allowed.includes(value as Granularity)) throw badRequest('GRANULARITY_INVALID');
-  return value;
+  if (!allowed.includes(value as T)) throw badRequest('GRANULARITY_INVALID');
+  return value as T;
 }
 
 function measurementDto(
@@ -1032,6 +1380,10 @@ function measurementDto(
 
 function encodeDateIdCursor(occurredAt: Date, id: ObjectId) {
   return encodeCursor({ occurredAt: occurredAt.toISOString(), id: id.toHexString() });
+}
+
+function encodeActivityCursor(category: ActivityCategory, occurredAt: Date, id: ObjectId) {
+  return encodeCursor({ category, occurredAt: occurredAt.toISOString(), id: id.toHexString() });
 }
 
 function activityTimeField(category: ActivityCategory) {
@@ -1100,6 +1452,54 @@ function localDateString(date: Date, timezone: string) {
     2,
     '0',
   )}`;
+}
+
+function localDateInstant(localDate: string, timezone: string) {
+  const [year = 0, month = 1, day = 1] = localDate.split('-').map(Number);
+  return utcFromLocal(timezone, year, month, day);
+}
+
+function bucketWindow(date: Date, timezone: string, selectedGranularity: Granularity) {
+  const parts = localParts(date, timezone);
+  if (selectedGranularity === 'month') {
+    const start = utcFromLocal(timezone, parts.year, parts.month, 1);
+    const end = utcFromLocal(timezone, parts.year, parts.month + 1, 1);
+    return {
+      key: `${parts.year}-${String(parts.month).padStart(2, '0')}`,
+      start,
+      end,
+    };
+  }
+  if (selectedGranularity === 'week') {
+    const localUtc = Date.UTC(parts.year, parts.month - 1, parts.day);
+    const dayOfWeek = new Date(localUtc).getUTCDay();
+    const daysSinceMonday = (dayOfWeek + 6) % 7;
+    const monday = new Date(localUtc - daysSinceMonday * 24 * 60 * 60 * 1000);
+    const start = utcFromLocal(
+      timezone,
+      monday.getUTCFullYear(),
+      monday.getUTCMonth() + 1,
+      monday.getUTCDate(),
+    );
+    const end = utcFromLocal(
+      timezone,
+      monday.getUTCFullYear(),
+      monday.getUTCMonth() + 1,
+      monday.getUTCDate() + 7,
+    );
+    return {
+      key: localDateString(start, timezone),
+      start,
+      end,
+    };
+  }
+  const start = utcFromLocal(timezone, parts.year, parts.month, parts.day);
+  const end = utcFromLocal(timezone, parts.year, parts.month, parts.day + 1);
+  return {
+    key: localDateString(start, timezone),
+    start,
+    end,
+  };
 }
 
 function localParts(date: Date, timezone: string) {

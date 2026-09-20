@@ -758,6 +758,24 @@ export class AnalyticsRepository {
     return { firstInWindow, latestInWindow, latest };
   }
 
+  async measurementsInRange(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    metricDefinitionId: ObjectId,
+    from: Date,
+    to: Date,
+  ) {
+    return await this.measurements
+      .find({
+        workspaceId,
+        relationshipId,
+        metricDefinitionId,
+        measuredAt: { $gte: from, $lt: to },
+      })
+      .sort({ measuredAt: 1, _id: 1 })
+      .toArray();
+  }
+
   async latestMeasurement(
     workspaceId: ObjectId,
     relationshipId: ObjectId,
@@ -804,6 +822,56 @@ export class AnalyticsRepository {
       .find({ workspaceId, relationshipId, localDate: { $gte: fromDate, $lt: toDate } })
       .sort({ localDate: 1 })
       .limit(366)
+      .toArray();
+  }
+
+  async workoutEventsInRange(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    from: Date,
+    to: Date,
+  ) {
+    return await this.workouts
+      .find({
+        workspaceId,
+        relationshipId,
+        startedAt: { $lt: to },
+        $or: [
+          { completedAt: { $gte: from, $lt: to } },
+          { abandonedAt: { $gte: from, $lt: to } },
+          { startedAt: { $gte: from, $lt: to } },
+        ],
+      })
+      .sort({ startedAt: 1, _id: 1 })
+      .toArray();
+  }
+
+  async progressEventsInRange(
+    workspaceId: ObjectId,
+    relationshipId: ObjectId,
+    from: Date,
+    to: Date,
+  ) {
+    return await this.progressEvents
+      .find({
+        workspaceId,
+        relationshipId,
+        occurredAt: { $gte: from, $lt: to },
+        type: { $in: ['COMPLETED', 'SKIPPED', 'DEFERRED'] },
+      })
+      .sort({ occurredAt: 1, _id: 1 })
+      .toArray();
+  }
+
+  async checkinsInRange(workspaceId: ObjectId, relationshipId: ObjectId, from: Date, to: Date) {
+    return await this.checkins
+      .find({
+        workspaceId,
+        relationshipId,
+        dueAt: { $gte: from, $lt: to },
+        status: { $in: ['DUE', 'OVERDUE', 'SUBMITTED', 'REVIEWED'] },
+      })
+      .sort({ dueAt: 1, _id: 1 })
       .toArray();
   }
 

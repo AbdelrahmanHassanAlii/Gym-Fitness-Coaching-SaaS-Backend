@@ -32,9 +32,11 @@ describe('Stage 18 dashboards and analytics', () => {
   }, STAGE18_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
-    if (app) await app.close();
     if (container) {
       await container.database.db.dropDatabase();
+    }
+    if (app) await app.close();
+    if (container) {
       await container.database.close();
     }
   }, STAGE18_TEST_TIMEOUT_MS);
@@ -183,6 +185,179 @@ describe('Stage 18 dashboards and analytics', () => {
     expect(countingRepo.activityCalls).toBe(0);
   });
 
+  test('Recent Activity source queries are skipped for every ineligible scope', async () => {
+    const originalAnalytics = container.analytics;
+    const countingRepo = new CountingAnalyticsRepository(container.database);
+    container.analytics = new AnalyticsApplicationService(
+      countingRepo,
+      container.accessControl,
+      container.audit,
+    );
+
+    const ownerControl = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(ownerControl.statusCode).toBe(200);
+    expect(ownerControl.json().data.recentActivity.WORKOUT_COMPLETED.items.length).toBeGreaterThan(
+      0,
+    );
+    expect(countingRepo.activityCalls).toBeGreaterThan(0);
+
+    countingRepo.activityCalls = 0;
+    const trainer = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/trainer`,
+      headers: await bearer(container, fixture.trainer.userId),
+    });
+    expect(trainer.statusCode).toBe(200);
+    expect(trainer.json().data.recentActivity).toBeNull();
+    expect(countingRepo.activityCalls).toBe(0);
+
+    const manager = await container.analytics.gymDashboard(
+      ctx(fixture.manager.userId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(manager.recentActivity).toBeNull();
+    expect(countingRepo.activityCalls).toBe(0);
+
+    const branchFiltered = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      { branchId: hex(fixture.branchId) },
+    );
+    expect(branchFiltered.recentActivity).toBeNull();
+    expect(countingRepo.activityCalls).toBe(0);
+
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const branchDenied = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(branchDenied.recentActivity).toBeNull();
+    expect(
+      branchDenied.branchBreakdown.items.some(
+        (item: { branchId: string }) => item.branchId === hex(fixture.branchId),
+      ),
+    ).toBe(false);
+    expect(countingRepo.activityCalls).toBe(0);
+
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'SPECIFIC_TRAINEES', resourceIds: [fixture.relationshipId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const relationshipDenied = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(relationshipDenied.recentActivity).toBeNull();
+    expect(relationshipDenied.summary.activeTrainees).toBe(2);
+    expect(countingRepo.activityCalls).toBe(0);
+
+    await container.database.db.collection('permission_profiles').updateOne(
+      { workspaceId: fixture.workspaceId, roleKey: 'GYM_OWNER', isSystemDefault: true },
+      {
+        $addToSet: {
+          permissions: { permission: Permissions.DashboardGymRead, effect: 'DENY' },
+        },
+      },
+    );
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'ALLOW',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const narrowAllowed = await container.analytics.gymDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(narrowAllowed.recentActivity).toBeNull();
+    expect(
+      narrowAllowed.branchBreakdown.items.map((item: { branchId: string }) => item.branchId),
+    ).toEqual([hex(fixture.branchId)]);
+    expect(countingRepo.activityCalls).toBe(0);
+    await container.database.db.collection('permission_profiles').updateOne(
+      { workspaceId: fixture.workspaceId, roleKey: 'GYM_OWNER', isSystemDefault: true },
+      {
+        $pull: {
+          permissions: { permission: Permissions.DashboardGymRead, effect: 'DENY' },
+        } as never,
+      },
+    );
+
+    const supportWithSensitive = await seedPlatformActor(container, [
+      Permissions.SupportSensitiveRead,
+    ]);
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const narrowedSupportOwner = await container.analytics.gymDashboard(
+      supportCtx(supportWithSensitive, fixture.owner, fixture.workspaceId),
+      hex(fixture.workspaceId),
+      {},
+    );
+    expect(narrowedSupportOwner.recentActivity).toBeNull();
+    expect(countingRepo.activityCalls).toBe(0);
+
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+    container.analytics = originalAnalytics;
+  });
+
   test('relationship routes require Stage 4 permission plus current domain eligibility and block cross-workspace IDs', async () => {
     await expect(
       container.analytics.relationshipDashboard(
@@ -210,6 +385,81 @@ describe('Stage 18 dashboards and analytics', () => {
       });
       expect(response.statusCode).toBe(404);
     }
+  });
+
+  test('Owner relationship dashboard exposes all allowed sections without raw sensitive fields', async () => {
+    const owner = await container.analytics.relationshipDashboard(
+      ctx(fixture.owner.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    expect(owner.relationship).not.toBeNull();
+    expect(owner.assignedStaff.length).toBeGreaterThan(0);
+    expect(owner.training).not.toBeNull();
+    expect(owner.nutrition).not.toBeNull();
+    expect(owner.progress).not.toBeNull();
+    expect(owner.checkIns).not.toBeNull();
+    expect(owner.adherence).not.toBeNull();
+    expect(owner.needsAttention).not.toBeNull();
+    expect(owner.access.actorKind).toBe('OWNER');
+    expect(owner.access.sections).toEqual({
+      training: true,
+      nutrition: true,
+      progress: true,
+      checkIns: true,
+    });
+    expectNoForbiddenAnalyticsFields(owner);
+  });
+
+  test('Manager relationship dashboard honors assigned-branch visibility without photo metadata leakage', async () => {
+    const manager = await container.analytics.relationshipDashboard(
+      ctx(fixture.manager.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    expect(manager.relationship).toMatchObject({
+      status: 'ACTIVE',
+      homeBranchId: hex(fixture.branchId),
+    });
+    expect(manager.training).not.toBeNull();
+    expect(manager.nutrition).not.toBeNull();
+    expect(manager.progress).not.toBeNull();
+    const managerProgress = manager.progress;
+    if (!managerProgress) throw new Error('expected manager progress section');
+    expect(managerProgress.photoSummary).toEqual({ count: 1 });
+    expect(manager.checkIns).not.toBeNull();
+    expect(manager.adherence).not.toBeNull();
+    expect(manager.access.actorKind).toBe('MANAGER');
+    expectNoForbiddenAnalyticsFields(manager);
+
+    await expect(
+      container.analytics.relationshipDashboard(
+        ctx(fixture.manager.userId),
+        hex(fixture.workspaceId),
+        hex(fixture.westRelationshipId),
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  test('Trainer relationship dashboard exposes trainer sections without forbidden raw data', async () => {
+    const trainer = await container.analytics.relationshipDashboard(
+      ctx(fixture.trainer.userId),
+      hex(fixture.workspaceId),
+      hex(fixture.relationshipId),
+    );
+    expect(trainer.training).not.toBeNull();
+    expect(trainer.progress).not.toBeNull();
+    expect(trainer.checkIns).not.toBeNull();
+    expect(trainer.nutrition).not.toBeNull();
+    expect(trainer.adherence).not.toBeNull();
+    expect(trainer.access.actorKind).toBe('TRAINER');
+    expect(trainer.access.sections).toEqual({
+      training: true,
+      nutrition: true,
+      progress: true,
+      checkIns: true,
+    });
+    expectNoForbiddenAnalyticsFields(trainer);
   });
 
   test('relationship dashboard enforces stable null field visibility by actor', async () => {
@@ -1179,6 +1429,57 @@ describe('Stage 18 dashboards and analytics', () => {
     );
   });
 
+  test('WORKSPACE DENY plus BRANCH ALLOW reaches Stage 18 gym dashboard route data', async () => {
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'DENY',
+          scope: { type: 'WORKSPACE' },
+        },
+        {
+          permission: Permissions.DashboardGymRead,
+          effect: 'ALLOW',
+          scope: { type: 'BRANCH', resourceIds: [fixture.branchId] },
+        },
+      ],
+      fixture.owner.userId,
+    );
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym`,
+      headers: await bearer(container, fixture.owner.userId),
+    });
+    expect(response.statusCode).toBe(200);
+    const data = response.json().data;
+    expect(data.recentActivity).toBeNull();
+    expect(data.branchBreakdown.items).toHaveLength(1);
+    const [branchOnly] = data.branchBreakdown.items;
+    expect(branchOnly.branchId).toBe(hex(fixture.branchId));
+    expect(data.summary).toMatchObject({
+      activeTrainees: branchOnly.activeTrainees,
+      needsReassignment: branchOnly.needsReassignment,
+      completedWorkouts: branchOnly.completedWorkouts,
+      overdueCheckIns: branchOnly.overdueCheckIns,
+      pendingReviewCheckIns: branchOnly.pendingReviewCheckIns,
+    });
+    expect(data.summary.activeTrainees).toBeGreaterThan(0);
+    expect(JSON.stringify(data)).not.toContain(hex(fixture.westRelationshipId));
+    expect(JSON.stringify(data.needsAttention)).not.toContain(hex(fixture.westRelationshipId));
+    await container.accessGrants.replaceCurrent(
+      'WORKSPACE_MEMBERSHIP',
+      fixture.owner.membershipId,
+      'WORKSPACE',
+      fixture.workspaceId,
+      [],
+      fixture.owner.userId,
+    );
+  });
+
   test('profile DENY plus narrow explicit ALLOW reaches only the granted Stage 18 route data', async () => {
     await container.database.db.collection('permission_profiles').updateOne(
       { workspaceId: fixture.workspaceId, roleKey: 'GYM_OWNER', isSystemDefault: true },
@@ -1901,6 +2202,23 @@ function ctx(userId: ObjectId): RequestContext {
 
 async function auditCount(container: AppContainer, accessKind: string) {
   return await container.database.db.collection('audit_events').countDocuments({ accessKind });
+}
+
+function expectNoForbiddenAnalyticsFields(value: unknown) {
+  const serialized = JSON.stringify(value);
+  for (const forbidden of [
+    'healthProfile',
+    'coachingNotes',
+    'fileId',
+    'signedUrl',
+    'storageKey',
+    'sensitive answer',
+    'trainerFeedback',
+    'freeText',
+    'membershipId',
+  ]) {
+    expect(serialized).not.toContain(forbidden);
+  }
 }
 
 function hex(id: ObjectId) {

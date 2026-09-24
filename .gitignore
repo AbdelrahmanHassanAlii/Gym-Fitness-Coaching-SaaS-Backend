@@ -6,4 +6,6 @@ dist/
 build/
 coverage/
 reports/pre-push-checks.md
-docs/
+docs/*
+!docs/v1/
+!docs/v1/**

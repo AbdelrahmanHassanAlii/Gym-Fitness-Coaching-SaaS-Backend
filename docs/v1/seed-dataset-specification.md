@@ -67,6 +67,12 @@ The future implementation must keep the V1-DATA-01 non-production guard, databas
 allowlist, namespace rules, deterministic ids, rerun strategy, and manifest
 format. V1-DATA-02 does not authorize seed implementation.
 
+V1-DATA-03 implements the first seed system as a manifest-first non-production
+CLI. The CLI materializes deterministic fixture ids, known logins, scenario
+aliases, target counts, and QA references in `seed_manifests` and optional
+manifest JSON output. It intentionally does not directly insert high-volume
+business-domain records into locked Stage 2-18 collections.
+
 ## Dataset Names
 
 The seed CLI designed in V1-DATA-01 should accept exactly these dataset names:

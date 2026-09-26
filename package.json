@@ -19,6 +19,7 @@
     "prepare": "husky",
     "db:migrate": "bun src/cli/db-migrate.ts",
     "db:migrate:status": "bun src/cli/db-migrate-status.ts",
+    "db:seed:v1": "bun src/cli/v1-seed.ts",
     "platform-admin:create": "bun src/cli/platform-admin-create.ts"
   },
   "dependencies": {

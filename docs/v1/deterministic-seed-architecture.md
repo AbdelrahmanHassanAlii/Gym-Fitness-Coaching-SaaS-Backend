@@ -42,22 +42,28 @@ database writes, or generated artifacts.
 
 ## Current Repository Seed Status
 
-No first-class V1 seed system exists in the locked repository.
+V1-DATA-03 adds the first V1 seed tooling under `src/seeds/v1` and
+`src/cli/v1-seed.ts`.
 
 Repository evidence:
 
-- `package.json` has no `seed`, `db:seed`, or test-data script.
+- `package.json` exposes `db:seed:v1`.
+- `src/cli/v1-seed.ts` implements the non-production seed CLI.
+- `src/seeds/v1` implements guard checks, deterministic ids, manifest building,
+  namespace reset for `seed_manifests`, migration verification, and manifest
+  emission.
 - `src/cli` contains migration status/run commands and
-  `platform-admin-create.ts`, but no dataset seeder.
+  `platform-admin-create.ts` in addition to the V1 seed CLI.
 - Backend tests contain stage-local helper functions such as `seedGym`,
   `seedWorkspaceUser`, `seedSensitiveSourceFixture`, `seedActiveSubscription`,
   and `seedPolicy`. These helpers are useful implementation evidence, but they
-  are not deterministic, shared, public, or safe enough to become the V1 seed
-  system directly.
+  are not reused directly by the V1 seed CLI.
 
-V1-DATA-01 therefore designs the smallest appropriate future seed architecture:
-a non-production CLI/tooling module that reuses repository runtime patterns and
-domain invariants, while leaving implementation to V1-DATA-03.
+The V1-DATA-03 implementation is manifest-first: it creates deterministic fixture
+ids and known login/scenario aliases, verifies migrations, enforces
+non-production guards, and writes/upserts a `seed_manifests` record. It does not
+modify locked Stage 2-18 business behavior or directly insert business-domain
+fixtures into existing production collections.
 
 ## Goals
 

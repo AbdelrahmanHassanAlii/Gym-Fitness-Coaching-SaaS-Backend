@@ -9,3 +9,4 @@ reports/pre-push-checks.md
 docs/*
 !docs/v1/
 !docs/v1/**
+.seed-output/

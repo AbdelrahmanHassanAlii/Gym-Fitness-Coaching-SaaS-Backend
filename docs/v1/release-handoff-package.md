@@ -52,7 +52,7 @@ repository-grounded, reviewed by V1-REL-02, and protected by V1-REL-03.
 | QA/integration scenario catalog | `docs/v1/qa-integration-scenario-catalog.md` | V1-QA-01 / #19 | Complete | Yes | Manual QA and future integration scenario source. |
 | Release handoff package and checklist | `docs/v1/release-handoff-package.md` | V1-REL-01 / #20 | Complete when committed | Yes | This document. |
 | Documentation quality review | `docs/v1/documentation-quality-review.md` | V1-REL-02 / #21 | Complete when committed | Yes | Reviews consistency and stale/duplicate docs. |
-| Locked-stage protection review | REL-03 output | V1-REL-03 / #22 | Pending | Yes | Must verify no locked behavior drift. |
+| Locked-stage protection review | `docs/v1/locked-stage-protection-review.md` | V1-REL-03 / #22 | Complete when committed | Yes | Verifies no locked behavior drift. |
 
 ## Required Handoff Checklist
 
@@ -60,7 +60,7 @@ These items block V1 handoff until complete:
 
 - [ ] V1-REL-01 committed and issue #20 closed.
 - [x] V1-REL-02 completed: documentation quality and consistency review.
-- [ ] V1-REL-03 completed: locked-stage protection review.
+- [x] V1-REL-03 review artifact prepared: locked-stage protection review.
 - [ ] Every artifact in the package table marked blocking has a concrete file or
   issue output.
 - [ ] Each document states repository implementation as the source of truth.

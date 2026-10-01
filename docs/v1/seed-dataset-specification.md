@@ -13,9 +13,8 @@ plan, generated artifacts, previous summaries, and earlier planning notes.
 Repository code, tests, migrations, and the V1 documentation created from them
 win when they disagree with this document.
 
-This document is a dataset specification only. It does not implement seed code,
-scripts, fixtures, database writes, tests, migrations, configuration, generated
-artifacts, or production behavior.
+This document began as a dataset specification. It now also records the dataset
+availability produced by the V1 seed implementation under `src/seeds/v1`.
 
 ## Out Of Scope
 
@@ -67,11 +66,23 @@ The future implementation must keep the V1-DATA-01 non-production guard, databas
 allowlist, namespace rules, deterministic ids, rerun strategy, and manifest
 format. V1-DATA-02 does not authorize seed implementation.
 
-V1-DATA-03 implements the first seed system as a manifest-first non-production
-CLI. The CLI materializes deterministic fixture ids, known logins, scenario
-aliases, target counts, and QA references in `seed_manifests` and optional
-manifest JSON output. It intentionally does not directly insert high-volume
-business-domain records into locked Stage 2-18 collections.
+V1-DATA-03 implements the first seed system as a non-production CLI that
+materializes deterministic fixture ids, known logins, scenario aliases, target
+counts, QA references, and actual business-domain records. The seed adapts to
+locked Stage 2-18 behavior; it does not modify production routes, services,
+schemas, migrations, permissions, indexes, workers, or API contracts.
+
+Current validation status:
+
+- `SMALL` is runtime validated against a disposable local MongoDB database and is
+  usable for frontend development and smoke testing.
+- `REALISTIC` is runtime validated against a disposable local MongoDB database
+  and is usable for broad frontend integration QA.
+- `STRESS` is implemented and statically validated, including opt-in guard and
+  deterministic plan generation. Runtime database validation is deferred.
+- QA-021 and QA-022 are marked `PROVIDER_DEPENDENT` because full checksum
+  mismatch and storage-quota execution depends on object-storage/provider
+  metadata behavior outside the local seed database.
 
 ## Dataset Names
 

@@ -13,9 +13,8 @@ catalog, generated artifacts, previous summaries, and planning notes. Repository
 code, tests, migrations, and repository-grounded V1 docs win when they disagree
 with this document.
 
-This document is a QA scenario design only. It does not implement automated
-tests, seed code, source changes, migrations, OpenAPI changes, product features,
-database writes, or runtime behavior.
+This document began as a QA scenario design. It now also records fixture
+availability from the V1 deterministic seed implementation.
 
 ## Evidence Used
 
@@ -124,6 +123,46 @@ fixture without violating locked behavior, it must:
 2. record the omission in the seed manifest;
 3. link the omission to the affected QA scenario id;
 4. document the repository-backed reason.
+
+The current V1 seed implementation exposes manifest QA coverage for QA-001
+through QA-030. `SMALL` and `REALISTIC` were runtime validated against disposable
+local MongoDB databases. `STRESS` was statically validated for deterministic
+plan generation and guard behavior, with runtime validation deferred.
+
+| Scenario | Seed status | Runtime fixture availability |
+| --- | --- | --- |
+| QA-001 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-002 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-003 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-004 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-005 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-006 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-007 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-008 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-009 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-010 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-011 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-012 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-013 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-014 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-015 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-016 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-017 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-018 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-019 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-020 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-021 | PROVIDER_DEPENDENT | Local database fixtures exist; full checksum mismatch execution depends on object-storage/provider metadata. |
+| QA-022 | PROVIDER_DEPENDENT | Local database fixtures exist; full storage quota/upload-provider execution depends on object-storage/provider metadata. |
+| QA-023 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-024 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-025 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-026 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-027 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-028 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-029 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+| QA-030 | READY | `SMALL`, `REALISTIC`, `STRESS` |
+
+No QA scenario is currently marked `UNAVAILABLE`.
 
 ## Locked-Stage Protection
 

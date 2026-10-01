@@ -13,6 +13,8 @@ export function assertSeedGuards(config: AppConfig, options: SeedCliOptions): vo
   if (config.env === 'production') failures.push('config.env is production');
   if (process.env.NODE_ENV === 'production') failures.push('NODE_ENV is production');
   if (!options.allowNonProduction) failures.push('missing --allow-non-production');
+  if (options.dataset === 'STRESS' && !options.allowStress)
+    failures.push('STRESS dataset requires --allow-stress');
   if (!namespacePattern.test(options.namespace))
     failures.push('namespace does not match safe pattern');
   if (!isDatabaseAllowed(config.mongo.dbName)) {

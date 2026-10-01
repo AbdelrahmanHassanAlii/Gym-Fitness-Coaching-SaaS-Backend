@@ -5,6 +5,11 @@ import type { AppConfig } from '../../config/config.types';
 import { AppError } from '../../core/errors/app-error';
 import { migrations } from '../../migrations';
 import { MigrationRunner } from '../../migrations/migration-runner';
+import {
+  buildV1BusinessSeedPlan,
+  insertV1BusinessSeed,
+  resetV1BusinessSeed,
+} from './business-seed';
 import { resetSeedNamespace } from './seed-cleanup';
 import type { SeedCliOptions } from './seed-config';
 import { assertSeedGuards } from './seed-guards';
@@ -33,8 +38,12 @@ export async function runV1Seed(input: {
   });
 
   validateManifest(manifest);
+  const seedPlan = await buildV1BusinessSeedPlan(manifest);
+  manifest.fixtureAliases = seedPlan.fixtureAliases;
+  manifest.qaScenarios = seedPlan.qaScenarios;
 
   let deletedManifestCount = 0;
+  let deletedBusinessCount = 0;
   if (!input.options.dryRun) {
     if (input.options.resetNamespace) {
       deletedManifestCount = await resetSeedNamespace(
@@ -42,7 +51,15 @@ export async function runV1Seed(input: {
         input.options.namespace,
         input.options.dataset,
       );
+      deletedBusinessCount = await resetV1BusinessSeed(input.db, seedPlan);
     }
+
+    await insertV1BusinessSeed(input.db, seedPlan);
+    manifest.actualCounts = {
+      ...manifest.actualCounts,
+      ...seedPlan.actualCounts,
+      deletedBusinessRecords: deletedBusinessCount,
+    };
 
     await input.db.collection<SeedManifest>('seed_manifests').updateOne(
       { _id: manifest._id },

@@ -7,13 +7,19 @@ export interface SeedCliOptions {
   dataset: SeedDataset;
   namespace: string;
   allowNonProduction: boolean;
+  allowStress: boolean;
   resetNamespace: boolean;
   dryRun: boolean;
   emitManifestPath: string | undefined;
   logicalSeed: string | undefined;
 }
 
-const booleanFlags = new Set(['allow-non-production', 'reset-namespace', 'dry-run']);
+const booleanFlags = new Set([
+  'allow-non-production',
+  'allow-stress',
+  'reset-namespace',
+  'dry-run',
+]);
 const valueFlags = new Set(['dataset', 'namespace', 'emit-manifest', 'seed']);
 
 export function parseSeedArgs(argv: string[]): SeedCliOptions {
@@ -50,6 +56,7 @@ export function parseSeedArgs(argv: string[]): SeedCliOptions {
     dataset,
     namespace,
     allowNonProduction: parsed.get('allow-non-production') === true,
+    allowStress: parsed.get('allow-stress') === true,
     resetNamespace: parsed.get('reset-namespace') === true,
     dryRun: parsed.get('dry-run') === true,
     emitManifestPath: optionalStringValue(parsed.get('emit-manifest'), 'emit-manifest'),

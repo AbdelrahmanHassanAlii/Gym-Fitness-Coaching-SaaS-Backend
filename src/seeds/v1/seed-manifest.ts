@@ -41,14 +41,24 @@ export interface SeedManifest {
     exports: Record<string, ObjectId>;
     versions: Record<string, number>;
   };
-  qaScenarios: Record<
+  fixtureAliases: Record<
     string,
     {
-      fixtureAliases: string[];
-      status: 'MANIFEST_READY';
+      status: 'READY' | 'PROVIDER_DEPENDENT' | 'UNAVAILABLE_WITH_REASON';
+      records: Array<{ collection: string; id: ObjectId }>;
+      reason?: string;
     }
   >;
+  qaScenarios: Record<string, SeedQaScenarioCoverage>;
   warnings: string[];
+}
+
+export interface SeedQaScenarioCoverage {
+  fixtureAliases: string[];
+  status: 'READY' | 'PROVIDER_DEPENDENT' | 'UNAVAILABLE_WITH_REASON';
+  datasets: SeedDataset[];
+  records: Record<string, Array<{ collection: string; id: ObjectId }>>;
+  reason?: string;
 }
 
 const targetCountsByDataset: Record<SeedDataset, Record<string, number>> = {
@@ -135,6 +145,8 @@ const loginAliases = [
   ['workspace.assistant_active', 'assistant.active', 'Assistant trainer'],
   ['workspace.nutritionist_active', 'nutritionist.active', 'Nutritionist'],
   ['workspace.mixed_role', 'mixed.role', 'Mixed role staff actor'],
+  ['workspace.explicit_deny', 'explicit.deny', 'Staff actor with explicit DENY fixture'],
+  ['workspace.inactive_membership', 'inactive.membership', 'Inactive membership actor'],
   ['trainee.self_active', 'trainee.self', 'Trainee SELF actor'],
   ['trainee.self_restricted', 'trainee.restricted', 'Restricted trainee actor'],
 ] as const;
@@ -342,16 +354,23 @@ export function buildSeedManifest(input: {
       role,
     })),
     knownIds,
+    fixtureAliases: {},
     qaScenarios: Object.fromEntries(
       Object.entries(qaScenarioAliases).map(([id, fixtureAliases]) => [
         id,
-        { fixtureAliases, status: 'MANIFEST_READY' as const },
+        {
+          fixtureAliases,
+          status: 'UNAVAILABLE_WITH_REASON' as const,
+          datasets: [] as SeedDataset[],
+          records: {},
+          reason: 'Business seed plan has not populated fixture coverage yet.',
+        },
       ]),
     ),
     warnings: [
-      'V1-DATA-03 seeds the deterministic manifest and stable fixture identifiers in seed_manifests.',
-      'Business collection fixture insertion remains intentionally outside locked Stage 2-18 behavior changes.',
-      'Use the manifest aliases as stable references for frontend/QA until deeper fixture builders are added.',
+      'V1 seed data is deterministic, fake, and intended only for local/QA seed databases.',
+      'Known seed logins share the non-secret password printed in this manifest.',
+      'Large dataset modes use direct database inserts for historical facts instead of replaying every public command.',
     ],
   };
 }

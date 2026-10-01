@@ -13,9 +13,9 @@ OpenAPI, previous summaries, and this document. Route files, schemas, services,
 repositories, tests, migrations, and existing V1 docs win when they disagree with
 generated artifacts.
 
-This document is a seed-system architecture design only. It does not implement
-seed code, scripts, fixtures, source changes, migrations, tests, configuration,
-database writes, or generated artifacts.
+This document began as a seed-system architecture design. It now also records
+the repository state after the V1 business-domain seed implementation was added
+under `src/seeds/v1`.
 
 ## Evidence Used
 
@@ -59,11 +59,33 @@ Repository evidence:
   and `seedPolicy`. These helpers are useful implementation evidence, but they
   are not reused directly by the V1 seed CLI.
 
-The V1-DATA-03 implementation is manifest-first: it creates deterministic fixture
-ids and known login/scenario aliases, verifies migrations, enforces
-non-production guards, and writes/upserts a `seed_manifests` record. It does not
-modify locked Stage 2-18 business behavior or directly insert business-domain
-fixtures into existing production collections.
+The V1-DATA-03 implementation now materializes deterministic non-production
+business-domain fixtures into the locked Stage 2-18 collections and records
+ownership in `seed_owned_records` for namespace-scoped reset. The manifest still
+remains the fixture contract: it exposes known logins, stable ids, fixture
+aliases, QA scenario coverage, unavailable/provider-dependent scenarios, dataset
+counts, and seed warnings.
+
+Runtime validation has been completed for:
+
+- `SMALL` against disposable local MongoDB database
+  `gym_seed_codex_small`.
+- `REALISTIC` against disposable local MongoDB database
+  `gym_seed_codex_realistic`.
+
+`STRESS` has been implemented and statically validated for deterministic plan
+generation, opt-in guard behavior, batching scale, and QA alias coverage, but
+runtime database validation is deferred because STRESS is explicitly
+resource-heavy and must not be part of normal local/frontend setup.
+
+QA-021 and QA-022 remain provider-dependent because full checksum mismatch and
+storage quota execution depends on object-storage/provider metadata behavior.
+The seed still creates the local database fixtures and marks those scenarios as
+provider-dependent rather than claiming they are fully locally executable.
+
+The implementation does not modify locked Stage 2-18 production routes,
+services, repositories, schemas, migrations, indexes, workers, permissions, or
+API contracts.
 
 ## Goals
 

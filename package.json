@@ -11,7 +11,7 @@
     "build:api": "bun build src/api/main.ts --target=bun --outdir=dist/api",
     "build:worker": "bun build src/worker/main.ts --target=bun --outdir=dist/worker",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --max-concurrency=1",
     "lint": "biome check src test",
     "format": "biome check --write src test",
     "openapi:emit": "bun scripts/export-openapi.ts",

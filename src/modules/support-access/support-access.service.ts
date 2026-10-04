@@ -907,8 +907,13 @@ function validIpRange(range: string): boolean {
 function supportReadOnlyOperation(request: { method: string; url: string }): boolean {
   if (['GET', 'HEAD'].includes(request.method)) return true;
   if (request.method !== 'POST') return false;
-  return /^\/api\/v1\/workspaces\/[0-9a-f]{24}\/files\/[0-9a-f]{24}\/download-url(?:\?.*)?$/i.test(
-    request.url,
+  return (
+    /^\/api\/v1\/workspaces\/[0-9a-f]{24}\/files\/[0-9a-f]{24}\/download-url(?:\?.*)?$/i.test(
+      request.url,
+    ) ||
+    /^\/api\/v1\/workspaces\/[0-9a-f]{24}\/me\/effective-access\/decisions(?:\?.*)?$/i.test(
+      request.url,
+    )
   );
 }
 

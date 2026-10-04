@@ -9,6 +9,7 @@ import { Permissions } from './permission.registry';
 import {
   ArchivePermissionProfileBody,
   CreatePermissionProfileBody,
+  CurrentEffectiveAccessDecisionsBody,
   ErrorResponse,
   PlatformMembershipParams,
   PlatformProfileParams,
@@ -219,6 +220,35 @@ export async function registerPermissionRoutes(
         request.ctx,
         request.params.workspaceId,
         request.params.membershipId,
+        request.body,
+      ),
+    }),
+  );
+
+  app.post<{
+    Params: Static<typeof IdParams>;
+    Body: Static<typeof CurrentEffectiveAccessDecisionsBody>;
+  }>(
+    '/api/v1/workspaces/:workspaceId/me/effective-access/decisions',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Permissions'],
+        params: IdParams,
+        body: CurrentEffectiveAccessDecisionsBody,
+        response: {
+          200: {},
+          400: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.accessControl.currentEffectiveAccessDecisions(
+        request.ctx,
+        objectId(request.params.workspaceId),
         request.body,
       ),
     }),

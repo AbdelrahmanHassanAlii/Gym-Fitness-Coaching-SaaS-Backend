@@ -36,6 +36,24 @@ const scopeSpecificity = {
   WORKSPACE: 10,
 } as const;
 
+const stage19DecisionBatchLimit = 25;
+const stage19Scopes = ['WORKSPACE', 'BRANCH', 'RELATIONSHIP'] as const;
+const stage19RelationshipDecisionStatuses = new Set(['ACTIVE', 'NEEDS_REASSIGNMENT']);
+const permissionDefinitionsByKey = new Map(
+  permissionDefinitions.map((definition) => [definition.key, definition]),
+);
+
+type Stage19Scope = (typeof stage19Scopes)[number];
+type CurrentEffectiveAccessDecisionInput = {
+  expectedAccessVersion?: number;
+  requests: Array<{
+    permission: string;
+    scope: string;
+    branchId?: string | null;
+    relationshipId?: string | null;
+  }>;
+};
+
 export class AccessControlService {
   constructor(
     private readonly platformMemberships: PlatformMembershipRepository,
@@ -87,6 +105,61 @@ export class AccessControlService {
     } catch {
       return false;
     }
+  }
+
+  async currentEffectiveAccessDecisions(
+    ctx: RequestContext,
+    workspaceId: ObjectId,
+    input: CurrentEffectiveAccessDecisionInput,
+  ) {
+    const { membership, context } = await this.resolveCurrentWorkspaceMembership(ctx, workspaceId);
+    if (
+      input.expectedAccessVersion !== undefined &&
+      input.expectedAccessVersion !== (membership.accessVersion ?? 0)
+    ) {
+      throw new AppError({
+        code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'Workspace membership access version changed.',
+      });
+    }
+
+    const requests = await this.normalizeCurrentDecisionRequests(workspaceId, input.requests);
+    const decisions = [];
+    for (const request of requests) {
+      const authorizationRequest = {
+        context: 'WORKSPACE' as const,
+        workspaceId,
+        permission: request.permission,
+        scope: request.authorizationScope,
+      };
+      try {
+        const decision = await this.authorize(ctx, authorizationRequest);
+        decisions.push({
+          request: request.responseRequest,
+          allowed: decision.allowed,
+          effect: decision.effect,
+        });
+      } catch (error) {
+        if (isDeniedDecision(error)) {
+          decisions.push({
+            request: request.responseRequest,
+            allowed: false,
+            effect: 'DENY' as const,
+          });
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return {
+      workspaceId: workspaceId.toHexString(),
+      membershipId: membership._id.toHexString(),
+      accessVersion: membership.accessVersion ?? 0,
+      context,
+      decisions,
+    };
   }
 
   async resolveWorkspaceQueryAccess(
@@ -398,6 +471,148 @@ export class AccessControlService {
           return safePermissionDecision(decision);
         }),
     };
+  }
+
+  private async resolveCurrentWorkspaceMembership(ctx: RequestContext, workspaceId: ObjectId) {
+    if (!ctx.userId || !ctx.authSessionId) throw authRequired();
+    if (ctx.supportSessionId && !ctx.effectiveMembershipId) {
+      throw permissionDenied('SUPPORT_WORKSPACE_DENIED');
+    }
+
+    const workspace = await this.workspaces.findById(workspaceId);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+    if (workspace.status !== 'ACTIVE') {
+      throw new AppError({
+        code: 'WORKSPACE_INACTIVE',
+        httpStatus: 409,
+        message: 'The workspace is not active.',
+      });
+    }
+
+    if (ctx.supportSessionId) {
+      if (ctx.workspaceId !== workspaceId.toHexString() || !ctx.effectiveMembershipId) {
+        throw permissionDenied('SUPPORT_WORKSPACE_DENIED');
+      }
+      const membership = await this.workspaceMemberships.findByIdInWorkspace(
+        workspaceId,
+        new ObjectId(required(ctx.effectiveMembershipId)),
+      );
+      if (membership?.status !== 'ACTIVE') {
+        throw permissionDenied('SUPPORT_EFFECTIVE_MEMBERSHIP_REQUIRED');
+      }
+      if (ctx.effectiveUserId && !membership.userId.equals(new ObjectId(ctx.effectiveUserId))) {
+        throw permissionDenied('SUPPORT_EFFECTIVE_MEMBERSHIP_REQUIRED');
+      }
+      ctx.workspaceId = workspaceId.toHexString();
+      ctx.workspaceMembershipId = membership._id.toHexString();
+      return { membership, context: 'SUPPORT_USER_CONTEXT' as const };
+    }
+
+    const membership = await this.workspaceMemberships.findByUserInWorkspace(
+      workspaceId,
+      new ObjectId(ctx.userId),
+    );
+    if (membership?.status !== 'ACTIVE') {
+      throw permissionDenied('WORKSPACE_MEMBERSHIP_REQUIRED');
+    }
+    ctx.workspaceId = workspaceId.toHexString();
+    ctx.workspaceMembershipId = membership._id.toHexString();
+    return { membership, context: 'USER' as const };
+  }
+
+  private async normalizeCurrentDecisionRequests(
+    workspaceId: ObjectId,
+    requests: CurrentEffectiveAccessDecisionInput['requests'],
+  ) {
+    if (requests.length > stage19DecisionBatchLimit) {
+      throw invalidAccessDecisionRequest('ACCESS_DECISION_BATCH_TOO_LARGE');
+    }
+
+    const seen = new Set<string>();
+    const normalized = [];
+    for (const request of requests) {
+      const permission = request.permission;
+      const definition = permissionDefinitionsByKey.get(permission);
+      if (!definition) {
+        throw invalidAccessDecisionRequest('PERMISSION_UNKNOWN');
+      }
+      if (!definition.allowedContexts.includes('WORKSPACE')) {
+        throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+      }
+
+      const scope = request.scope as Stage19Scope;
+      if (!stage19Scopes.includes(scope)) {
+        throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+      }
+
+      const branchIdText = normalizeOptionalId(request.branchId);
+      const relationshipIdText = normalizeOptionalId(request.relationshipId);
+      let responseRequest:
+        | { permission: string; scope: 'WORKSPACE' }
+        | { permission: string; scope: 'BRANCH'; branchId: string }
+        | { permission: string; scope: 'RELATIONSHIP'; relationshipId: string };
+      let authorizationScope: AuthorizationRequest['scope'];
+
+      if (scope === 'WORKSPACE') {
+        if (branchIdText || relationshipIdText) {
+          throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+        }
+        assertPermissionScopeAllowed(definition.allowedScopes, 'WORKSPACE');
+        responseRequest = { permission, scope };
+        authorizationScope = { type: 'WORKSPACE' };
+      } else if (scope === 'BRANCH') {
+        if (!branchIdText || relationshipIdText) {
+          throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+        }
+        assertPermissionScopeAllowed(definition.allowedScopes, 'BRANCH');
+        const branchId = objectId(branchIdText, 'BRANCH_NOT_FOUND');
+        const branches = await this.branches.listByIdsInWorkspace(workspaceId, [branchId]);
+        if (branches[0]?.status !== 'ACTIVE') throw notFound('BRANCH_NOT_FOUND');
+        responseRequest = { permission, scope, branchId: branchId.toHexString() };
+        authorizationScope = {
+          type: 'BRANCH',
+          resourceIds: [branchId],
+          requiresAssignment: false,
+        };
+      } else {
+        if (!relationshipIdText || branchIdText) {
+          throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+        }
+        assertPermissionScopeAllowed(definition.allowedScopes, 'SPECIFIC_TRAINEES');
+        const relationshipId = objectId(relationshipIdText, 'RELATIONSHIP_NOT_FOUND');
+        const relationship = await this.relationships?.findByIdInWorkspace(
+          workspaceId,
+          relationshipId,
+        );
+        if (!relationship || !stage19RelationshipDecisionStatuses.has(relationship.status ?? '')) {
+          throw notFound('RELATIONSHIP_NOT_FOUND');
+        }
+        responseRequest = {
+          permission,
+          scope,
+          relationshipId: relationshipId.toHexString(),
+        };
+        authorizationScope = { type: 'SPECIFIC_TRAINEES', resourceIds: [relationshipId] };
+      }
+
+      const key = [
+        responseRequest.permission,
+        responseRequest.scope,
+        'branchId' in responseRequest ? responseRequest.branchId : '',
+        'relationshipId' in responseRequest ? responseRequest.relationshipId : '',
+      ].join('|');
+      if (seen.has(key)) {
+        throw new AppError({
+          code: 'ACCESS_DECISION_REQUEST_DUPLICATE',
+          httpStatus: 409,
+          message: 'Duplicate access decision request.',
+        });
+      }
+      seen.add(key);
+      normalized.push({ permission, responseRequest, authorizationScope });
+    }
+
+    return normalized;
   }
 
   private async authorizePlatform(
@@ -766,6 +981,36 @@ function permissionDenied(reason: string): AppError {
     httpStatus: 403,
     message: 'Permission denied.',
   });
+}
+
+function invalidAccessDecisionRequest(code: string): AppError {
+  return new AppError({
+    code,
+    httpStatus: 422,
+    message: 'Invalid access decision request.',
+  });
+}
+
+function objectId(value: string, notFoundCode: string): ObjectId {
+  if (!ObjectId.isValid(value)) throw notFound(notFoundCode);
+  return new ObjectId(value);
+}
+
+function normalizeOptionalId(value: string | null | undefined): string | undefined {
+  return value === null || value === undefined ? undefined : value;
+}
+
+function assertPermissionScopeAllowed(allowedScopes: string[], scope: string): void {
+  if (!allowedScopes.includes(scope as never)) {
+    throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+  }
+}
+
+function isDeniedDecision(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    (error.code === 'PERMISSION_DENIED' || error.code === 'SCOPE_DENIED')
+  );
 }
 
 function supportWorkspacePermission(permission: string): boolean {

@@ -102,6 +102,31 @@ export class TraineeApplicationService {
     return { relationship: safeRelationship(relationship) };
   }
 
+  async getCurrentUserRelationship(ctx: RequestContext, workspaceId: string) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const userId = ctx.effectiveUserId ?? ctx.userId;
+    if (!userId || !ObjectId.isValid(userId)) throw forbidden();
+    if (ctx.supportSessionId && !ctx.effectiveUserId) throw forbidden('SUPPORT_WORKSPACE_DENIED');
+
+    const workspace = await this.requireWorkspace(id);
+    if (workspace.status !== 'ACTIVE') throw conflict('WORKSPACE_INACTIVE');
+
+    const membership = await this.memberships.findByUserInWorkspace(id, new ObjectId(userId));
+    if (membership?.status !== 'ACTIVE') throw forbidden();
+
+    const relationship = await this.relationships.findByWorkspaceAndUser(id, new ObjectId(userId));
+    if (relationship?.status !== 'ACTIVE') return { relationship: null };
+
+    return {
+      relationship: {
+        id: relationship._id.toHexString(),
+        workspaceId: relationship.workspaceId.toHexString(),
+        status: relationship.status,
+        version: relationship.version,
+      },
+    };
+  }
+
   async inviteTrainee(
     ctx: RequestContext,
     workspaceId: string,
@@ -1873,9 +1898,9 @@ function notFound(code: string): AppError {
   return new AppError({ code, httpStatus: 404, message: 'Resource not found.' });
 }
 
-function forbidden(): AppError {
+function forbidden(code = 'PERMISSION_DENIED'): AppError {
   return new AppError({
-    code: 'PERMISSION_DENIED',
+    code,
     httpStatus: 403,
     message: 'Permission denied.',
   });

@@ -94,4 +94,22 @@ export const ReplaceAccessGrantsBody = Type.Object(
   { additionalProperties: false },
 );
 
+export const CurrentEffectiveAccessDecisionRequest = Type.Object(
+  {
+    permission: Type.String({ minLength: 1 }),
+    scope: Type.String({ minLength: 1 }),
+    branchId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])),
+    relationshipId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])),
+  },
+  { additionalProperties: false },
+);
+
+export const CurrentEffectiveAccessDecisionsBody = Type.Object(
+  {
+    expectedAccessVersion: Type.Optional(Type.Number()),
+    requests: Type.Array(CurrentEffectiveAccessDecisionRequest, { minItems: 1 }),
+  },
+  { additionalProperties: false },
+);
+
 export { ErrorResponse, SuccessResponse };

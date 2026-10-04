@@ -31,6 +31,24 @@ export async function registerTraineeRoutes(
   app: FastifyInstance,
   container: AppContainer,
 ): Promise<void> {
+  app.get<{ Params: Static<typeof WorkspaceParams> }>(
+    '/api/v1/workspaces/:workspaceId/me/relationship',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Trainees'],
+        params: WorkspaceParams,
+        response: { 200: {}, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse },
+      },
+    },
+    async (request) => ({
+      data: await container.trainees.getCurrentUserRelationship(
+        request.ctx,
+        request.params.workspaceId,
+      ),
+    }),
+  );
+
   app.get<{
     Params: Static<typeof WorkspaceParams>;
     Querystring: Static<typeof RelationshipQuery>;

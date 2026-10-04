@@ -152,6 +152,11 @@ export class AccessControlService {
         throw error;
       }
     }
+    await this.assertCurrentWorkspaceMembershipStillCurrent(
+      workspaceId,
+      membership._id,
+      membership.accessVersion ?? 0,
+    );
 
     return {
       workspaceId: workspaceId.toHexString(),
@@ -572,7 +577,6 @@ export class AccessControlService {
         authorizationScope = {
           type: 'BRANCH',
           resourceIds: [branchId],
-          requiresAssignment: false,
         };
       } else {
         if (!relationshipIdText || branchIdText) {
@@ -613,6 +617,35 @@ export class AccessControlService {
     }
 
     return normalized;
+  }
+
+  private async assertCurrentWorkspaceMembershipStillCurrent(
+    workspaceId: ObjectId,
+    membershipId: ObjectId,
+    accessVersion: number,
+  ): Promise<void> {
+    const [workspace, membership] = await Promise.all([
+      this.workspaces.findById(workspaceId),
+      this.workspaceMemberships.findByIdInWorkspace(workspaceId, membershipId),
+    ]);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
+    if (workspace.status !== 'ACTIVE') {
+      throw new AppError({
+        code: 'WORKSPACE_INACTIVE',
+        httpStatus: 409,
+        message: 'The workspace is not active.',
+      });
+    }
+    if (membership?.status !== 'ACTIVE') {
+      throw permissionDenied('WORKSPACE_MEMBERSHIP_REQUIRED');
+    }
+    if ((membership.accessVersion ?? 0) !== accessVersion) {
+      throw new AppError({
+        code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+        message: 'Workspace membership access version changed.',
+      });
+    }
   }
 
   private async authorizePlatform(

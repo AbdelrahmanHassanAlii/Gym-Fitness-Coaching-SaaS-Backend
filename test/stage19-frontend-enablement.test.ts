@@ -168,6 +168,34 @@ describe('Stage 19 current-user effective access decisions', () => {
     ]);
   });
 
+  test('preserves locked Stage 4 branch assignment checks', async () => {
+    const ids = testIds();
+    const result = await accessServiceWith({
+      ids,
+      profiles: [profile(ids, [{ permission: Permissions.WorkoutsCreate, effect: 'ALLOW' }])],
+    }).currentEffectiveAccessDecisions(ctx(ids), ids.workspaceId, {
+      requests: [
+        {
+          permission: Permissions.WorkoutsCreate,
+          scope: 'BRANCH',
+          branchId: hex(ids.branchId),
+        },
+      ],
+    });
+
+    expect(result.decisions).toEqual([
+      {
+        request: {
+          permission: Permissions.WorkoutsCreate,
+          scope: 'BRANCH',
+          branchId: hex(ids.branchId),
+        },
+        allowed: false,
+        effect: 'DENY',
+      },
+    ]);
+  });
+
   test('enforces accessVersion precondition and support context boundaries', async () => {
     const ids = testIds();
     const service = accessServiceWith({
@@ -194,6 +222,21 @@ describe('Stage 19 current-user effective access decisions', () => {
         requests: [{ permission: Permissions.WorkoutsCreate, scope: 'WORKSPACE' }],
       }),
     ).resolves.toMatchObject({ context: 'SUPPORT_USER_CONTEXT' });
+  });
+
+  test('rejects decisions when accessVersion changes during evaluation', async () => {
+    const ids = testIds();
+    await expect(
+      accessServiceWith({
+        ids,
+        profiles: [profile(ids, [{ permission: Permissions.WorkoutsCreate, effect: 'ALLOW' }])],
+        accessVersion: 3,
+        postEvaluationAccessVersion: 4,
+      }).currentEffectiveAccessDecisions(ctx(ids), ids.workspaceId, {
+        expectedAccessVersion: 3,
+        requests: [{ permission: Permissions.WorkoutsCreate, scope: 'WORKSPACE' }],
+      }),
+    ).rejects.toMatchObject({ code: 'WORKSPACE_MEMBERSHIP_ACCESS_VERSION_CONFLICT' });
   });
 });
 
@@ -273,6 +316,7 @@ function accessServiceWith(input: {
   branches?: Array<Record<string, unknown>>;
   relationship?: AccessRelationshipFixture | null;
   accessVersion?: number;
+  postEvaluationAccessVersion?: number;
   membershipStatus?: 'ACTIVE' | 'SUSPENDED' | 'ENDED';
 }) {
   const profiles = input.profiles ?? [];
@@ -281,7 +325,10 @@ function accessServiceWith(input: {
     { findById: async () => ({ _id: input.ids.workspaceId, status: 'ACTIVE' }) } as never,
     { listByIdsInWorkspace: async () => input.branches ?? [branch(input.ids, 'ACTIVE')] } as never,
     {
-      findByIdInWorkspace: async () => membership(input),
+      findByIdInWorkspace: async () => {
+        const accessVersion = input.postEvaluationAccessVersion ?? input.accessVersion;
+        return membership(accessVersion === undefined ? input : { ...input, accessVersion });
+      },
       findByUserInWorkspace: async () => membership(input),
     } as never,
     { listActive: async () => [] } as never,

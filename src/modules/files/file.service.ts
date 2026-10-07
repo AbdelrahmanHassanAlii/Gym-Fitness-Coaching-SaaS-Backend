@@ -147,6 +147,11 @@ export class FileApplicationService {
     return {
       uploadIntentId: intent._id.toHexString(),
       uploadUrl: presigned.url,
+      uploadRequest: {
+        method: presigned.method,
+        url: presigned.url,
+        headers: presigned.headers,
+      },
       expiresAt: intent.expiresAt.toISOString(),
       uploadUrlExpiresAt: presigned.expiresAt.toISOString(),
       reservedBytes: intent.reservedBytes,

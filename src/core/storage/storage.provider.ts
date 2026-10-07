@@ -4,6 +4,11 @@ export interface PresignedUrl {
   headers?: Record<string, string>;
 }
 
+export interface PresignedUploadRequest extends PresignedUrl {
+  method: 'PUT';
+  headers: Record<string, string>;
+}
+
 export interface ObjectMetadata {
   key: string;
   sizeBytes: number;
@@ -29,7 +34,7 @@ export interface CreateDownloadUrlInput {
 
 export interface StorageProvider {
   readonly provider: string;
-  createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUrl>;
+  createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUploadRequest>;
   putObject(input: {
     key: string;
     body: Uint8Array;

@@ -121,8 +121,10 @@ describe('Stage 13 files and documents', () => {
       sizeBytes: 123,
       expiresAt: new Date(Date.now() + 60_000),
     });
+    expect(upload.method).toBe('PUT');
     expect(upload.headers?.['if-none-match']).toBe('*');
-    expect(upload.headers?.['content-length']).toBe('123');
+    expect(upload.headers?.['content-type']).toBe('application/pdf');
+    expect(upload.headers).not.toHaveProperty('content-length');
     fake.putObject({ key: 'same-key', sizeBytes: 1, contentType: 'application/pdf' });
     expect(() =>
       fake.putObject({ key: 'same-key', sizeBytes: 2, contentType: 'application/pdf' }),
@@ -135,6 +137,39 @@ describe('Stage 13 files and documents', () => {
       accessKey: 'AKIA_TEST',
       secretKey: 'secret',
     });
+    const browserUpload = await provider.createUploadUrl({
+      key: 'workspaces/ws/2026/01/key',
+      contentType: 'application/pdf',
+      sizeBytes: 123,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(browserUpload.method).toBe('PUT');
+    expect(browserUpload.headers).toEqual({
+      'content-type': 'application/pdf',
+      'if-none-match': '*',
+    });
+    expect(browserUpload.headers).not.toHaveProperty('content-length');
+    expect(new URL(browserUpload.url).searchParams.get('X-Amz-SignedHeaders')?.split(';')).toEqual([
+      'content-type',
+      'host',
+      'if-none-match',
+    ]);
+    const checksumUpload = await provider.createUploadUrl({
+      key: 'workspaces/ws/2026/01/key-checksum',
+      contentType: 'application/pdf',
+      sizeBytes: 123,
+      checksumSha256: 'a'.repeat(64),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(checksumUpload.headers).toEqual({
+      'content-type': 'application/pdf',
+      'if-none-match': '*',
+      'x-amz-checksum-sha256': 'a'.repeat(64),
+    });
+    expect(new URL(checksumUpload.url).searchParams.get('X-Amz-SignedHeaders')?.split(';')).toEqual(
+      ['content-type', 'host', 'if-none-match', 'x-amz-checksum-sha256'],
+    );
+
     const calls: Array<{ method?: string | undefined; headers?: unknown }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_url, init) => {
@@ -176,6 +211,34 @@ describe('Stage 13 files and documents', () => {
             tx,
           ),
         );
+        expect(intent.uploadRequest).toEqual({
+          method: 'PUT',
+          url: intent.uploadUrl,
+          headers: {
+            'content-type': 'application/pdf',
+            'if-none-match': '*',
+          },
+        });
+        expect(intent.uploadRequest.headers).not.toHaveProperty('content-length');
+        expect(intent).not.toHaveProperty('storageKey');
+        expect(intent).not.toHaveProperty('bucket');
+        expect(intent.uploadRequest.headers).not.toHaveProperty('authorization');
+        expect(intent.uploadRequest.headers).not.toHaveProperty('x-amz-security-token');
+        const browserRequest = {
+          method: intent.uploadRequest.method,
+          url: intent.uploadRequest.url,
+          headers: intent.uploadRequest.headers,
+          body: new Uint8Array([1, 2, 3]),
+        };
+        expect(browserRequest).toEqual({
+          method: 'PUT',
+          url: intent.uploadUrl,
+          headers: {
+            'content-type': 'application/pdf',
+            'if-none-match': '*',
+          },
+          body: new Uint8Array([1, 2, 3]),
+        });
         const usageAfterReserve = await container.database.db
           .collection('workspace_usage')
           .findOne({ workspaceId: seed.workspaceObjectId });
@@ -304,6 +367,12 @@ describe('Stage 13 files and documents', () => {
           fileName: 'missing-checksum.pdf',
           checksumSha256: checksum,
         });
+        expect(missingIntent.uploadRequest.headers).toMatchObject({
+          'content-type': 'application/pdf',
+          'if-none-match': '*',
+          'x-amz-checksum-sha256': checksum,
+        });
+        expect(missingIntent.uploadRequest.headers).not.toHaveProperty('content-length');
         storage.putObject({
           key: await intentKey(container.database.db, missingIntent.uploadIntentId),
           sizeBytes: 400,

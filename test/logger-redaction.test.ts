@@ -21,7 +21,13 @@ describe('logger redaction', () => {
       'https://storage.example.com/private/key?X-Amz-Credential=AKIA%2Fscope&X-Amz-Signature=abc&X-Amz-Security-Token=token';
     logger.info({
       uploadUrl: signed,
-      body: { data: { downloadUrl: signed, publicUrl: 'https://example.com/help' } },
+      body: {
+        data: {
+          downloadUrl: signed,
+          publicUrl: 'https://example.com/help',
+          uploadRequest: { method: 'PUT', url: signed },
+        },
+      },
       err: new Error(`failed for ${signed}`),
     });
 

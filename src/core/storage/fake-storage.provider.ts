@@ -2,6 +2,7 @@ import type {
   CreateDownloadUrlInput,
   CreateUploadUrlInput,
   ObjectMetadata,
+  PresignedUploadRequest,
   PresignedUrl,
   StorageProvider,
 } from './storage.provider';
@@ -15,19 +16,19 @@ export class FakeStorageProvider implements StorageProvider {
   failNextStat = false;
   failNextDelete = false;
 
-  async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUrl> {
+  async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUploadRequest> {
     if (this.failNextUploadUrl) {
       this.failNextUploadUrl = false;
       throw new Error('Injected upload presign failure');
     }
     return {
+      method: 'PUT',
       url: `https://storage.test/upload/${encodeURIComponent(input.key)}?signature=test`,
       expiresAt: input.expiresAt,
       headers: {
-        'content-length': String(input.sizeBytes),
         'content-type': input.contentType,
         'if-none-match': '*',
-        ...(input.checksumSha256 ? { 'x-checksum-sha256': input.checksumSha256 } : {}),
+        ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
       },
     };
   }

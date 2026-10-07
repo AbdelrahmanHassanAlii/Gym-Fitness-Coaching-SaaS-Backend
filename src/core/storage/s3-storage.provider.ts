@@ -5,6 +5,7 @@ import type {
   CreateDownloadUrlInput,
   CreateUploadUrlInput,
   ObjectMetadata,
+  PresignedUploadRequest,
   PresignedUrl,
   StorageProvider,
 } from './storage.provider';
@@ -25,14 +26,14 @@ export class S3CompatibleStorageProvider implements StorageProvider {
 
   constructor(private readonly config: S3Config) {}
 
-  async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUrl> {
+  async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUploadRequest> {
     const headers = {
-      'content-length': String(input.sizeBytes),
       'content-type': input.contentType,
       'if-none-match': '*',
       ...(input.checksumSha256 ? { 'x-amz-checksum-sha256': input.checksumSha256 } : {}),
     };
     return {
+      method: 'PUT',
       url: this.presign('PUT', input.key, input.expiresAt, headers),
       expiresAt: input.expiresAt,
       headers,

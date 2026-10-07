@@ -112,6 +112,14 @@ Response body is wrapped by the idempotency route as `{ data: ... }`:
   "data": {
     "uploadIntentId": "intentId",
     "uploadUrl": "https://...",
+    "uploadRequest": {
+      "method": "PUT",
+      "url": "https://...",
+      "headers": {
+        "content-type": "application/pdf",
+        "if-none-match": "*"
+      }
+    },
     "expiresAt": "2026-01-01T00:15:00.000Z",
     "uploadUrlExpiresAt": "2026-01-01T00:10:00.000Z",
     "reservedBytes": 500,
@@ -135,37 +143,44 @@ Implementation behavior:
 - For relationship-scoped document uploads, the actor must be relationship-self
   or assigned staff with the relevant workspace permissions.
 
-### Upload Headers
+### Upload Request
 
-The storage provider signs upload URLs with these headers:
+Stage 20 adds the browser upload request contract as an additive response field.
+Clients should use `uploadRequest.method`, `uploadRequest.url`, and
+`uploadRequest.headers` exactly as returned. `uploadRequest.url` is the same
+presigned capability as the legacy `uploadUrl` field.
 
-- `content-length`
-- `content-type`
+- `method` is `PUT`.
+- `headers` includes `content-type`.
 - `if-none-match: *`
-- `x-amz-checksum-sha256` when a checksum is supplied
+- `headers` includes `x-amz-checksum-sha256` only when `checksumSha256` was
+  supplied on the upload intent request.
 
-Important implementation gap: the backend service currently returns
-`uploadUrl`, expiry, reserved bytes, and expected version, but does not echo the
-storage provider's signed `headers` object in the API response. The frontend
-should send headers matching the upload intent values when uploading directly to
-storage. This is repository behavior, not a new API contract. If direct browser
-uploads fail because signed headers are unavailable, create a follow-up
-implementation issue rather than changing V1 documentation.
+The browser upload contract intentionally does not include `content-length`.
+Browser JavaScript must not set `Content-Length`; the backend preserves upload
+size safety through reservation-time quota accounting and confirmation-time
+storage `HEAD` validation.
 
 ## Direct Object Upload
 
 After receiving the upload intent response, upload the file bytes directly to
-`uploadUrl`.
+`uploadRequest.url`.
 
 Frontend upload requirements from implementation evidence:
 
-- Use HTTP `PUT` to the returned storage URL.
-- Send the same content type as `mimeType`.
-- Send the same content length as `sizeBytes`.
+- Use `uploadRequest.method`.
+- Send only the headers returned in `uploadRequest.headers`.
 - Do not overwrite an existing object; provider uses `if-none-match: *`.
 - If `checksumSha256` was supplied to the backend, include the matching
-  SHA-256 checksum header expected by the storage provider.
+  SHA-256 checksum header returned in `uploadRequest.headers`.
 - Do not send the file bytes to the backend API.
+
+Web clients must not infer S3, bucket, object key, signature, or checksum header
+rules. They should construct the provider request from the returned
+`uploadRequest` object and the selected `File`/`Blob` body only. If the provider
+upload result is ambiguous, the client should prefer confirming the same upload
+intent before creating a replacement intent. Signed upload URLs must not be
+persisted in local storage, session storage, logs, telemetry, or query keys.
 
 The frontend should treat object upload failure as a pending/failed client-side
 upload and may retry the storage PUT while the upload URL is still valid. If the
@@ -679,7 +694,8 @@ Generated file intent cleanup:
 2. Frontend computes optional SHA-256 if product wants checksum verification.
 3. `POST /files/upload-intents` with `purpose=DOCUMENT`,
    `subjectType=COACHING_RELATIONSHIP`, and `subjectId=<relationshipId>`.
-4. Upload bytes to `uploadUrl`.
+4. Upload bytes with `uploadRequest.method`, `uploadRequest.url`, and
+   `uploadRequest.headers`.
 5. `POST /upload-intents/:id/confirm` with returned `expectedVersion`.
 6. `POST /relationships/:relationshipId/documents` with confirmed `fileId`.
 7. Refresh document list.
@@ -736,10 +752,9 @@ Frontend must not depend on:
 
 ## Known Follow-Up
 
-UNVERIFIED -- REQUIRES FOLLOW-UP: the API route response for upload intent does
-not expose provider-signed upload headers, while `S3CompatibleStorageProvider`
-does sign `content-length`, `content-type`, `if-none-match`, and optional
-`x-amz-checksum-sha256`. Browser/client upload integration should be verified
-against the deployed storage provider before frontend release. If clients cannot
-complete direct upload reliably, create a future implementation issue to expose
-required upload headers or adjust signing behavior.
+PROVIDER-BACKED VALIDATION REQUIRED: Stage 20 exposes a browser-safe upload
+request and removes browser-forbidden `content-length` from the signed upload
+contract. Deployed object-storage CORS still must allow the Web origin, `PUT`,
+`content-type`, `if-none-match`, and optional `x-amz-checksum-sha256`. Real
+provider checksum metadata behavior remains provider-backed validation, not a
+fake/local test guarantee.

@@ -11,6 +11,8 @@ import {
   CreatePermissionProfileBody,
   CurrentEffectiveAccessDecisionsBody,
   ErrorResponse,
+  PlatformEffectiveAccessDecisionsBody,
+  PlatformEffectiveAccessDecisionsResponse,
   PlatformMembershipParams,
   PlatformProfileParams,
   ReplaceAccessGrantsBody,
@@ -249,6 +251,31 @@ export async function registerPermissionRoutes(
       data: await container.accessControl.currentEffectiveAccessDecisions(
         request.ctx,
         objectId(request.params.workspaceId),
+        request.body,
+      ),
+    }),
+  );
+
+  app.post<{ Body: Static<typeof PlatformEffectiveAccessDecisionsBody> }>(
+    '/api/v1/platform/me/effective-access/decisions',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Platform', 'Permissions'],
+        body: PlatformEffectiveAccessDecisionsBody,
+        response: {
+          200: PlatformEffectiveAccessDecisionsResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          409: ErrorResponse,
+          422: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.accessControl.platformEffectiveAccessDecisions(
+        request.ctx,
         request.body,
       ),
     }),

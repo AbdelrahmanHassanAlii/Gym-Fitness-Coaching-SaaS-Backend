@@ -11,12 +11,14 @@ import {
   CreateBranchBody,
   CreatePlatformMembershipBody,
   CreateWorkspaceBody,
+  EmptyQuery,
   ErrorResponse,
   IdParams,
   InvitationParams,
   InviteStaffBody,
   MembershipBranchParams,
   MembershipParams,
+  PlatformContextResponse,
   PlatformMembershipParams,
   SuccessResponse,
   UpdateBranchBody,
@@ -57,6 +59,24 @@ export async function registerWorkspaceRoutes(
       schema: { tags: ['Me'], response: { 200: {}, 401: ErrorResponse, 403: ErrorResponse } },
     },
     async (request) => ({ data: await container.workspaces.listMyWorkspaces(request.ctx) }),
+  );
+
+  app.get<{ Querystring: Static<typeof EmptyQuery> }>(
+    '/api/v1/me/platform-context',
+    {
+      preHandler: requireAuth(),
+      schema: {
+        tags: ['Me', 'Platform'],
+        querystring: EmptyQuery,
+        response: {
+          200: PlatformContextResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({ data: await container.workspaces.platformContext(request.ctx) }),
   );
 
   app.post<{ Body: Static<typeof CreateWorkspaceBody> }>(

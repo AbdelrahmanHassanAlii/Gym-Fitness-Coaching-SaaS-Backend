@@ -112,4 +112,42 @@ export const CurrentEffectiveAccessDecisionsBody = Type.Object(
   { additionalProperties: false },
 );
 
+export const PlatformEffectiveAccessDecisionsBody = Type.Object(
+  {
+    expectedAccessVersion: Type.Integer({ minimum: 0 }),
+    requests: Type.Array(
+      Type.Object({ permission: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+      { minItems: 1 },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const PlatformEffectiveAccessDecisionsResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        context: Type.Literal('PLATFORM'),
+        accessContext: Type.Literal('USER'),
+        membershipId: Type.String(),
+        membershipStatus: Type.Literal('ACTIVE'),
+        accessVersion: Type.Integer({ minimum: 0 }),
+        validUntil: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
+        decisions: Type.Array(
+          Type.Object(
+            {
+              permission: Type.String(),
+              allowed: Type.Boolean(),
+              effect: Type.Union([Type.Literal('ALLOW'), Type.Literal('DENY')]),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export { ErrorResponse, SuccessResponse };

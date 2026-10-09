@@ -3,6 +3,11 @@ import { ErrorResponse, SuccessResponse } from '../auth/auth.schemas';
 
 const WorkspaceType = Type.Union([Type.Literal('GYM'), Type.Literal('INDEPENDENT_TRAINER')]);
 const Language = Type.Union([Type.Literal('ar'), Type.Literal('en')]);
+const PlatformMembershipStatus = Type.Union([
+  Type.Literal('ACTIVE'),
+  Type.Literal('SUSPENDED'),
+  Type.Literal('ENDED'),
+]);
 const Role = Type.Union([
   Type.Literal('GYM_OWNER'),
   Type.Literal('GYM_MANAGER'),
@@ -19,6 +24,30 @@ export const IdParams = Type.Object({
 export const PlatformMembershipParams = Type.Object({
   platformMembershipId: Type.String(),
 });
+
+export const EmptyQuery = Type.Object({}, { additionalProperties: false });
+
+export const PlatformContextResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        context: Type.Literal('PLATFORM'),
+        accessContext: Type.Literal('USER'),
+        membership: Type.Object(
+          {
+            id: Type.String(),
+            status: PlatformMembershipStatus,
+            accessVersion: Type.Integer({ minimum: 0 }),
+            updatedAt: Type.String({ format: 'date-time' }),
+          },
+          { additionalProperties: false },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
 
 export const MembershipParams = Type.Object({
   workspaceId: Type.String(),

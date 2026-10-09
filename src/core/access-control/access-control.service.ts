@@ -54,6 +54,11 @@ type CurrentEffectiveAccessDecisionInput = {
   }>;
 };
 
+type PlatformEffectiveAccessDecisionInput = {
+  expectedAccessVersion: number;
+  requests: Array<{ permission: string }>;
+};
+
 export class AccessControlService {
   constructor(
     private readonly platformMemberships: PlatformMembershipRepository,
@@ -163,6 +168,85 @@ export class AccessControlService {
       membershipId: membership._id.toHexString(),
       accessVersion: membership.accessVersion ?? 0,
       context,
+      decisions,
+    };
+  }
+
+  async platformEffectiveAccessDecisions(
+    ctx: RequestContext,
+    input: PlatformEffectiveAccessDecisionInput,
+  ) {
+    if (!ctx.userId || !ctx.authSessionId) throw authRequired();
+    if (ctx.restrictedUntilVerified) {
+      throw new AppError({
+        code: 'AUTH_SESSION_RESTRICTED',
+        httpStatus: 403,
+        message: 'The account must verify a login identifier before continuing.',
+      });
+    }
+    if (ctx.supportSessionId) throw permissionDenied('SUPPORT_ACCESS_FORBIDDEN');
+    if (!ctx.mfaSatisfied) {
+      throw new AppError({
+        code: 'TWO_FACTOR_REQUIRED',
+        httpStatus: 403,
+        message: 'MFA is required for Platform access.',
+      });
+    }
+
+    const userId = new ObjectId(ctx.userId);
+    const membership = await this.platformMemberships.findByUserId(userId);
+    if (!membership) throw permissionDenied('PLATFORM_MEMBERSHIP_REQUIRED');
+    if (membership.status !== 'ACTIVE') {
+      throw permissionDenied('PLATFORM_MEMBERSHIP_INACTIVE');
+    }
+    const accessVersion = membership.accessVersion ?? 0;
+    if (input.expectedAccessVersion !== accessVersion) throw platformAccessVersionConflict();
+    ctx.platformMembershipId = membership._id.toHexString();
+
+    const permissions = normalizePlatformDecisionRequests(input.requests);
+    const now = new Date();
+    const [profiles, grants] = await Promise.all([
+      this.profiles.findManyByIds(membership.permissionProfileIds),
+      this.grants.listCurrent('PLATFORM_MEMBERSHIP', membership._id, 'PLATFORM'),
+    ]);
+    const eligibleProfiles = profiles.filter(
+      (profile) => profile.context === 'PLATFORM' && profile.status === 'ACTIVE',
+    );
+    const decisions = permissions.map((permission) => {
+      const decision = this.evaluateDecision(
+        { context: 'PLATFORM', permission, scope: { type: 'WORKSPACE' } },
+        eligibleProfiles,
+        grants,
+        now,
+      );
+      return { permission, allowed: decision.allowed, effect: decision.effect };
+    });
+    const relevantExpirations = grants
+      .filter(
+        (grant) =>
+          permissions.includes(grant.permission) &&
+          Boolean(grant.expiresAt && grant.expiresAt > now) &&
+          scopeApplies(grant, { type: 'WORKSPACE' }),
+      )
+      .map((grant) => grant.expiresAt as Date)
+      .sort((left, right) => left.getTime() - right.getTime());
+
+    const current = await this.platformMemberships.findById(membership._id);
+    if (
+      !current?.userId.equals(userId) ||
+      current.status !== 'ACTIVE' ||
+      (current.accessVersion ?? 0) !== accessVersion
+    ) {
+      throw platformAccessVersionConflict();
+    }
+
+    return {
+      context: 'PLATFORM' as const,
+      accessContext: 'USER' as const,
+      membershipId: membership._id.toHexString(),
+      membershipStatus: 'ACTIVE' as const,
+      accessVersion,
+      validUntil: relevantExpirations[0]?.toISOString() ?? null,
       decisions,
     };
   }
@@ -1021,6 +1105,39 @@ function invalidAccessDecisionRequest(code: string): AppError {
     code,
     httpStatus: 422,
     message: 'Invalid access decision request.',
+  });
+}
+
+function normalizePlatformDecisionRequests(
+  requests: PlatformEffectiveAccessDecisionInput['requests'],
+): string[] {
+  if (requests.length > stage19DecisionBatchLimit) {
+    throw invalidAccessDecisionRequest('ACCESS_DECISION_BATCH_TOO_LARGE');
+  }
+  const permissions = new Set<string>();
+  for (const request of requests) {
+    const definition = permissionDefinitionsByKey.get(request.permission);
+    if (!definition) throw invalidAccessDecisionRequest('PERMISSION_UNKNOWN');
+    if (!definition.allowedContexts.includes('PLATFORM')) {
+      throw invalidAccessDecisionRequest('PERMISSION_SCOPE_INVALID');
+    }
+    if (permissions.has(request.permission)) {
+      throw new AppError({
+        code: 'ACCESS_DECISION_REQUEST_DUPLICATE',
+        httpStatus: 409,
+        message: 'Duplicate access decision request.',
+      });
+    }
+    permissions.add(request.permission);
+  }
+  return [...permissions].sort();
+}
+
+function platformAccessVersionConflict(): AppError {
+  return new AppError({
+    code: 'PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+    httpStatus: 409,
+    message: 'Platform membership access version changed.',
   });
 }
 

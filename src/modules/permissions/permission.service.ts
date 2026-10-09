@@ -143,6 +143,10 @@ export class PermissionApplicationService {
       ? objectId(workspaceId, 'WORKSPACE_NOT_FOUND')
       : undefined;
     const existing = await this.requireProfileContext(id, workspaceObjectId);
+    const platformPermissionsChanged =
+      existing.context === 'PLATFORM' &&
+      input.permissions !== undefined &&
+      !permissionEntriesEqual(existing.permissions, input.permissions);
     if (input.permissions)
       await this.validateProfileEntries(
         ctx,
@@ -151,10 +155,19 @@ export class PermissionApplicationService {
         workspaceObjectId,
       );
     return await this.unitOfWork.withTransaction(async (tx) => {
+      const now = new Date();
       const updateInput: { name?: string; permissions?: PermissionProfileEntry[] } = {};
       if (input.name) updateInput.name = input.name.trim();
       if (input.permissions) updateInput.permissions = input.permissions;
-      const profile = await this.profiles.update(id, input.expectedVersion, updateInput, tx);
+      const profile = await this.profiles.update(
+        id,
+        input.expectedVersion,
+        { ...updateInput, now },
+        tx,
+      );
+      if (platformPermissionsChanged) {
+        await this.platformMemberships.bumpAccessVersionForAssignedProfile(id, now, tx);
+      }
       await this.writeAudit(
         ctx,
         workspaceObjectId,
@@ -187,7 +200,11 @@ export class PermissionApplicationService {
       : undefined;
     await this.requireProfileContext(id, workspaceObjectId);
     return await this.unitOfWork.withTransaction(async (tx) => {
-      const profile = await this.profiles.archive(id, expectedVersion, new Date(), tx);
+      const now = new Date();
+      const profile = await this.profiles.archive(id, expectedVersion, now, tx);
+      if (profile.context === 'PLATFORM') {
+        await this.platformMemberships.bumpAccessVersionForAssignedProfile(id, now, tx);
+      }
       await this.writeAudit(
         ctx,
         workspaceObjectId,
@@ -790,6 +807,17 @@ function grantKey(permission: string, scope: PermissionScope): string {
     .map((id) => id.toHexString())
     .sort()
     .join(',')}`;
+}
+
+function permissionEntriesEqual(
+  left: PermissionProfileEntry[],
+  right: PermissionProfileEntry[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const key = (entry: PermissionProfileEntry) => `${entry.permission}|${entry.effect}`;
+  const leftKeys = left.map(key).sort();
+  const rightKeys = right.map(key).sort();
+  return leftKeys.every((value, index) => value === rightKeys[index]);
 }
 
 function invalid(code: string): AppError {

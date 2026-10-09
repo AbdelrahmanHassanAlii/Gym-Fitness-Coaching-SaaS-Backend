@@ -106,6 +106,43 @@ export class WorkspaceApplicationService {
     return rows.filter((row): row is NonNullable<typeof row> => Boolean(row));
   }
 
+  async platformContext(ctx: RequestContext) {
+    const { user } = await this.requireAuthenticatedUser(ctx);
+    if (ctx.supportSessionId) {
+      throw new AppError({
+        code: 'SUPPORT_ACCESS_FORBIDDEN',
+        httpStatus: 403,
+        message: 'Support context cannot access the Platform portal.',
+      });
+    }
+    if (!ctx.mfaSatisfied) {
+      throw new AppError({
+        code: 'TWO_FACTOR_REQUIRED',
+        httpStatus: 403,
+        message: 'MFA is required for Platform access.',
+      });
+    }
+    const membership = await this.platformMemberships.findByUserId(user._id);
+    if (!membership) {
+      throw new AppError({
+        code: 'PLATFORM_MEMBERSHIP_REQUIRED',
+        httpStatus: 403,
+        message: 'A Platform membership is required.',
+      });
+    }
+    ctx.platformMembershipId = membership._id.toHexString();
+    return {
+      context: 'PLATFORM' as const,
+      accessContext: 'USER' as const,
+      membership: {
+        id: membership._id.toHexString(),
+        status: membership.status,
+        accessVersion: membership.accessVersion ?? 0,
+        updatedAt: membership.updatedAt.toISOString(),
+      },
+    };
+  }
+
   async createWorkspace(
     ctx: RequestContext,
     input: {

@@ -133,6 +133,27 @@ Permission discovery:
   denials gracefully.
 - Do not infer access from role name alone.
 
+### Platform shell bootstrap
+
+The Platform shell uses a separate, current-user-only contract:
+
+1. Call `GET /api/v1/me/platform-context` with a normal bearer session and no
+   support header. The server requires MFA and returns only Platform membership
+   id, lifecycle status, `accessVersion`, and `updatedAt`.
+2. Render no Platform data when the membership is absent or not `ACTIVE`.
+3. For an active membership, call
+   `POST /api/v1/platform/me/effective-access/decisions` with the exact
+   `accessVersion` and 1–25 unique Platform-context permission keys.
+4. Treat decisions as valid only through `validUntil` when it is non-null. On
+   `PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT`, rediscover the Platform
+   context before requesting decisions again.
+
+Both routes use the authenticated real actor, reject support context, and accept
+no caller-supplied user, membership, workspace, branch, relationship, context,
+or scope target. Decision results are sorted by permission key and expose only
+`permission`, `allowed`, and `effect`; policy/profile/grant sources are not
+returned. These routes do not use `Idempotency-Key` semantics.
+
 ## Headers
 
 | Header | Required when | Notes |

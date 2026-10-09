@@ -88,6 +88,7 @@ export class PlatformMembershipRepository {
           ...(to === 'SUSPENDED' ? { suspendedAt: now } : {}),
           ...(to === 'ENDED' ? { endedAt: now } : {}),
         },
+        $inc: { accessVersion: 1 },
         ...(to === 'ACTIVE' ? { $unset: { suspendedAt: '', endedAt: '' } } : {}),
       },
       { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
@@ -152,5 +153,18 @@ export class PlatformMembershipRepository {
     }
 
     return result;
+  }
+
+  async bumpAccessVersionForAssignedProfile(
+    profileId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<number> {
+    const result = await this.memberships.updateMany(
+      { permissionProfileIds: profileId },
+      { $set: { updatedAt: now }, $inc: { accessVersion: 1 } },
+      tx ? { session: tx.session } : undefined,
+    );
+    return result.modifiedCount;
   }
 }

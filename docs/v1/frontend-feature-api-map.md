@@ -93,6 +93,21 @@ Common loading and error behavior:
 | Error/forbidden states | `AUTH_REQUIRED`, inactive/missing membership on later workspace calls, restricted auth. |
 | Role differences | Platform admins can enter platform flows; workspace members enter workspace flows; trainees use relationship-scoped SELF flows after relationship discovery. |
 
+### Platform Foundation
+
+| Concern | Contract |
+| --- | --- |
+| Use cases | Bootstrap the Platform shell and permission-aware Workspaces, Users, and Operations navigation placeholders. |
+| APIs required | `GET /api/v1/me/platform-context`, then `POST /api/v1/platform/me/effective-access/decisions`. |
+| Sequence | Authenticate real actor -> satisfy MFA -> load Platform membership context -> require `ACTIVE` -> request bounded decisions with returned `accessVersion` -> render allowed navigation placeholders. |
+| Data dependencies | Platform membership id/status, `accessVersion`, requested Platform permission keys, server `validUntil`. |
+| Permissions | Self discovery requires no domain permission. Navigation decisions use existing Platform-context keys; workspace permissions are rejected. |
+| Empty/loading | Keep the Platform shell closed until both requests resolve. Missing/inactive membership, restricted session, MFA failure, and support context fail closed. |
+| Pagination | None; decision batches are 1–25 unique permissions. |
+| Optimistic/concurrency | Do not calculate access client-side. On access-version conflict, discard decisions and restart discovery. Retire cached decisions at `validUntil`. |
+| Error/forbidden states | `TWO_FACTOR_REQUIRED`, `AUTH_SESSION_RESTRICTED`, `SUPPORT_ACCESS_FORBIDDEN`, `PLATFORM_MEMBERSHIP_REQUIRED`, `PLATFORM_MEMBERSHIP_INACTIVE`, `PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT`. |
+| Role differences | This is Platform membership access, not workspace role access. Support Console remains a separate flow. |
+
 ### Workspace Administration
 
 | Concern | Contract |

@@ -259,6 +259,9 @@ export async function registerPermissionRoutes(
   app.post<{ Body: Static<typeof PlatformEffectiveAccessDecisionsBody> }>(
     '/api/v1/platform/me/effective-access/decisions',
     {
+      // Keep maxItems in the public schema while allowing the domain service to preserve
+      // ACCESS_DECISION_BATCH_TOO_LARGE (422) instead of Fastify's generic validation 400.
+      attachValidation: true,
       preHandler: requireAuth(),
       schema: {
         tags: ['Platform', 'Permissions'],
@@ -273,12 +276,20 @@ export async function registerPermissionRoutes(
         },
       },
     },
-    async (request) => ({
-      data: await container.accessControl.platformEffectiveAccessDecisions(
-        request.ctx,
-        request.body,
-      ),
-    }),
+    async (request) => {
+      if (
+        request.validationError &&
+        !isOnlyPlatformDecisionBatchLimitError(request.validationError)
+      ) {
+        throw request.validationError;
+      }
+      return {
+        data: await container.accessControl.platformEffectiveAccessDecisions(
+          request.ctx,
+          request.body,
+        ),
+      };
+    },
   );
 
   app.get<{ Params: Static<typeof MembershipParams> }>(
@@ -475,6 +486,16 @@ export async function registerPermissionRoutes(
         request.body,
       ),
     }),
+  );
+}
+
+function isOnlyPlatformDecisionBatchLimitError(error: {
+  validation?: Array<{ instancePath?: string; keyword?: string }>;
+}): boolean {
+  return (
+    error.validation?.length === 1 &&
+    error.validation[0]?.instancePath === '/requests' &&
+    error.validation[0]?.keyword === 'maxItems'
   );
 }
 

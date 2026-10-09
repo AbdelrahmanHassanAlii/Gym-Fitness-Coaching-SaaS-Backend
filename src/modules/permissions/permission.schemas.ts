@@ -117,7 +117,7 @@ export const PlatformEffectiveAccessDecisionsBody = Type.Object(
     expectedAccessVersion: Type.Integer({ minimum: 0 }),
     requests: Type.Array(
       Type.Object({ permission: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
-      { minItems: 1 },
+      { minItems: 1, maxItems: 25 },
     ),
   },
   { additionalProperties: false },

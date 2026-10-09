@@ -233,15 +233,91 @@ describe('WEB-021 Platform self access contracts', () => {
     }
   });
 
+  test('Platform decisions suppress stale output when lifecycle changes during evaluation', async () => {
+    const ids = testIds();
+    const ordering: string[] = [];
+    const collection = new MutablePlatformMembershipCollection(
+      platformMembership(ids, 'ACTIVE', 7),
+      ordering,
+    );
+    const memberships = new PlatformMembershipRepository(fakeDatabase(collection));
+    const evaluationPaused = deferred<void>();
+    const resumeEvaluation = deferred<void>();
+    const service = new AccessControlService(
+      memberships,
+      { async findById() {} } as never,
+      {} as never,
+      {
+        async findByUserInWorkspace() {
+          return null;
+        },
+      } as never,
+      {} as never,
+      {
+        async findManyByIds() {
+          ordering.push('evaluation-paused');
+          evaluationPaused.resolve();
+          await resumeEvaluation.promise;
+          ordering.push('evaluation-resumed');
+          return [];
+        },
+      } as never,
+      {
+        async listCurrent() {
+          return [];
+        },
+      } as never,
+    );
+
+    const outcomePromise = service
+      .platformEffectiveAccessDecisions(ctx(ids), {
+        expectedAccessVersion: 7,
+        requests: [{ permission: Permissions.PlatformMembershipsRead }],
+      })
+      .then(
+        (data) => ({ data }),
+        (error: unknown) => ({ error }),
+      );
+
+    await evaluationPaused.promise;
+    const transitioned = await memberships.transition(
+      ids.platformMembershipId,
+      ['ACTIVE'],
+      'SUSPENDED',
+      new Date('2026-10-09T03:00:00.000Z'),
+    );
+    ordering.push('mutation-committed');
+    expect(transitioned).toMatchObject({ status: 'SUSPENDED', accessVersion: 8 });
+    resumeEvaluation.resolve();
+
+    const outcome = await outcomePromise;
+    expect(outcome).toMatchObject({
+      error: {
+        code: 'PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+        httpStatus: 409,
+      },
+    });
+    expect('data' in outcome).toBe(false);
+    expect(ordering).toEqual([
+      'membership-read-initial',
+      'evaluation-paused',
+      'mutation-committed',
+      'evaluation-resumed',
+      'membership-read-final',
+    ]);
+  });
+
   test('explicit DENY wins and validUntil is the earliest relevant current expiry', async () => {
     const ids = testIds();
     const membership = platformMembership(ids, 'ACTIVE', 2);
+    const unrelatedEarlier = new Date(Date.now() + 10_000);
     const earlier = new Date(Date.now() + 30_000);
     const later = new Date(Date.now() + 60_000);
     const expired = new Date(Date.now() - 30_000);
     const grants = [
       platformGrant(ids, membership, Permissions.PlatformMembershipsRead, 'ALLOW', later),
       platformGrant(ids, membership, Permissions.PlatformMembershipsRead, 'DENY', earlier),
+      platformGrant(ids, membership, Permissions.AuditPlatformRead, 'ALLOW', unrelatedEarlier),
       platformGrant(ids, membership, Permissions.PlatformWorkspacesManage, 'ALLOW', expired),
     ];
     const result = await accessService(membership, [], grants).platformEffectiveAccessDecisions(
@@ -298,6 +374,7 @@ describe('WEB-021 Platform self access HTTP contracts', () => {
   test('POST /platform/me/effective-access/decisions exposes no target fields and validates shape', async () => {
     const ids = testIds();
     const calls: unknown[] = [];
+    const decisions = accessService(platformMembership(ids, 'ACTIVE', 3));
     const app = await buildApp(
       routeContainer(
         ids,
@@ -305,17 +382,10 @@ describe('WEB-021 Platform self access HTTP contracts', () => {
         {
           async platformEffectiveAccessDecisions(_ctx: RequestContext, input: unknown) {
             calls.push(input);
-            return {
-              context: 'PLATFORM',
-              accessContext: 'USER',
-              membershipId: ids.platformMembershipId.toHexString(),
-              membershipStatus: 'ACTIVE',
-              accessVersion: 3,
-              validUntil: null,
-              decisions: [
-                { permission: Permissions.PlatformMembershipsRead, allowed: false, effect: 'DENY' },
-              ],
-            };
+            return await decisions.platformEffectiveAccessDecisions(
+              ctx(ids),
+              input as Parameters<typeof decisions.platformEffectiveAccessDecisions>[1],
+            );
           },
         },
       ),
@@ -332,6 +402,49 @@ describe('WEB-021 Platform self access HTTP contracts', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(calls).toEqual([validBody]);
+
+    const openapi = app.swagger() as unknown as {
+      paths: Record<
+        string,
+        { post: { requestBody: { content: { 'application/json': { schema: unknown } } } } }
+      >;
+    };
+    const decisionOperation = openapi.paths['/api/v1/platform/me/effective-access/decisions'];
+    expect(decisionOperation).toBeDefined();
+    if (!decisionOperation) throw new Error('Platform decision route missing from OpenAPI');
+    const requestSchema = decisionOperation.post.requestBody.content['application/json'].schema as {
+      properties: { requests: { minItems?: number; maxItems?: number } };
+    };
+    expect(requestSchema.properties.requests).toMatchObject({ minItems: 1, maxItems: 25 });
+
+    const platformKeys = permissionDefinitions
+      .filter((definition) => definition.allowedContexts.includes('PLATFORM'))
+      .map((definition) => definition.key);
+    const maximum = await app.inject({
+      method: 'POST',
+      url: '/api/v1/platform/me/effective-access/decisions',
+      headers: { authorization: 'Bearer valid' },
+      payload: {
+        expectedAccessVersion: 3,
+        requests: platformKeys.slice(0, 25).map((permission) => ({ permission })),
+      },
+    });
+    expect(maximum.statusCode).toBe(200);
+    expect(maximum.json().data.decisions).toHaveLength(25);
+
+    const tooLarge = await app.inject({
+      method: 'POST',
+      url: '/api/v1/platform/me/effective-access/decisions',
+      headers: { authorization: 'Bearer valid' },
+      payload: {
+        expectedAccessVersion: 3,
+        requests: Array.from({ length: 26 }, () => ({
+          permission: Permissions.PlatformMembershipsRead,
+        })),
+      },
+    });
+    expect(tooLarge.statusCode).toBe(422);
+    expect(tooLarge.json().error.code).toBe('ACCESS_DECISION_BATCH_TOO_LARGE');
 
     for (const payload of [
       { ...validBody, membershipId: ids.platformMembershipId.toHexString() },
@@ -386,6 +499,27 @@ describe('WEB-021 Platform accessVersion propagation', () => {
       $set: { updatedAt: now },
       $inc: { accessVersion: 1 },
     });
+  });
+
+  test('assigned-profile propagation increments affected membership and leaves unrelated version unchanged', async () => {
+    const ids = testIds();
+    const unrelatedIds = {
+      ...ids,
+      userId: new ObjectId(),
+      platformMembershipId: new ObjectId(),
+    };
+    const affected = platformMembership(ids, 'ACTIVE', 8, [ids.profileId]);
+    const unrelated = platformMembership(unrelatedIds, 'ACTIVE', 12);
+    const collection = new PersistedPlatformMembershipCollection([affected, unrelated]);
+    const repository = new PlatformMembershipRepository(fakeDatabase(collection));
+
+    await repository.bumpAccessVersionForAssignedProfile(
+      ids.profileId,
+      new Date('2026-10-09T02:30:00.000Z'),
+    );
+
+    await expect(repository.findById(affected._id)).resolves.toMatchObject({ accessVersion: 9 });
+    await expect(repository.findById(unrelated._id)).resolves.toMatchObject({ accessVersion: 12 });
   });
 
   test('Platform profile permission update and archive propagate, while rename-only update does not', async () => {
@@ -801,6 +935,99 @@ class RecordingPlatformMembershipCollection {
   }
 }
 
-function fakeDatabase(collection: RecordingPlatformMembershipCollection) {
+class MutablePlatformMembershipCollection {
+  constructor(
+    private document: ReturnType<typeof platformMembership>,
+    private readonly ordering: string[],
+  ) {}
+
+  async findOne(filter: { _id?: ObjectId; userId?: ObjectId }) {
+    if (filter.userId) {
+      this.ordering.push('membership-read-initial');
+      if (!filter.userId.equals(this.document.userId)) return null;
+    }
+    if (filter._id) {
+      this.ordering.push('membership-read-final');
+      if (!filter._id.equals(this.document._id)) return null;
+    }
+    return this.snapshot();
+  }
+
+  async findOneAndUpdate(
+    filter: { _id: ObjectId; status: { $in: string[] } },
+    update: {
+      $set: Partial<ReturnType<typeof platformMembership>>;
+      $inc: { accessVersion: number };
+      $unset?: Record<string, string>;
+    },
+  ) {
+    if (
+      !filter._id.equals(this.document._id) ||
+      !filter.status.$in.includes(this.document.status)
+    ) {
+      return null;
+    }
+    this.document = {
+      ...this.document,
+      ...update.$set,
+      accessVersion: this.document.accessVersion + update.$inc.accessVersion,
+    };
+    return this.snapshot();
+  }
+
+  private snapshot() {
+    return { ...this.document, permissionProfileIds: [...this.document.permissionProfileIds] };
+  }
+}
+
+class PersistedPlatformMembershipCollection {
+  constructor(private readonly documents: Array<ReturnType<typeof platformMembership>>) {}
+
+  async findOne(filter: { _id?: ObjectId }) {
+    const document = this.documents.find((candidate) => filter._id?.equals(candidate._id));
+    return document ? this.snapshot(document) : null;
+  }
+
+  async updateMany(
+    filter: { permissionProfileIds: ObjectId },
+    update: { $set: { updatedAt: Date }; $inc: { accessVersion: number } },
+  ) {
+    let modifiedCount = 0;
+    for (const document of this.documents) {
+      if (
+        !document.permissionProfileIds.some((profileId) =>
+          profileId.equals(filter.permissionProfileIds),
+        )
+      ) {
+        continue;
+      }
+      document.updatedAt = update.$set.updatedAt;
+      document.accessVersion += update.$inc.accessVersion;
+      modifiedCount += 1;
+    }
+    return { modifiedCount };
+  }
+
+  private snapshot(document: ReturnType<typeof platformMembership>) {
+    return { ...document, permissionProfileIds: [...document.permissionProfileIds] };
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function fakeDatabase(
+  collection:
+    | RecordingPlatformMembershipCollection
+    | MutablePlatformMembershipCollection
+    | PersistedPlatformMembershipCollection,
+) {
   return { db: { collection: () => collection } } as never;
 }

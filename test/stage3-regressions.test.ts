@@ -734,6 +734,7 @@ function workspaceDocument(ids: ReturnType<typeof idsFixture>): WorkspaceDocumen
       'titan gy',
       'titan gym',
     ],
+    version: 0,
     ownerUserId: ids.userObjectId,
     status: 'ACTIVE',
     timezone: 'Africa/Cairo',

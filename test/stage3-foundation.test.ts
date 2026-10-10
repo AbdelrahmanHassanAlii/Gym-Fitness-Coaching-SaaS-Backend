@@ -21,7 +21,10 @@ describe('Stage 3 foundation', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/platform/workspaces',
-      headers: { authorization: 'Bearer jwt-with-totp-amr' },
+      headers: {
+        authorization: 'Bearer jwt-with-totp-amr',
+        'idempotency-key': 'stage3-server-mfa-check',
+      },
       payload: {
         type: 'GYM',
         name: 'Titan Gym',

@@ -197,6 +197,9 @@ user/workspace discovery.
 - `GET /api/v1/platform/workspaces`
 - `GET /api/v1/platform/workspaces/:workspaceId`
 - `POST /api/v1/platform/workspaces`
+- `GET /api/v1/platform/workspace-owner-candidates`
+- `POST /api/v1/platform/workspaces/:workspaceId/owner`
+- `POST /api/v1/platform/workspaces/:workspaceId/{activate,restrict,suspend,archive,restore}`
 - `GET /api/v1/platform/memberships`, `POST /api/v1/platform/memberships`
 - `POST /api/v1/platform/memberships/:platformMembershipId/suspend`
 - `POST /api/v1/platform/memberships/:platformMembershipId/reactivate`
@@ -231,6 +234,17 @@ Deployment prerequisite: migration `024-platform-workspace-search` must complete
 successfully before application instances serve workspace `q` search traffic.
 Search depends on the backfilled `nameSearchPrefixes` arrays and all three approved
 indexes; there is no regex or collection-scan fallback when that readiness is absent.
+
+Platform workspace management commands use `platform_workspaces.manage`, reject
+resolved support context, require `Idempotency-Key`, and return an exact minimized
+workspace summary. Migration `025-platform-workspace-management` must complete before
+these commands are enabled: it initializes the independent workspace management
+`version` to zero and creates the ACTIVE-owner-candidate keyset and exact-email indexes. Owner candidate
+search is an exact normalized-email lookup using the email/status compound index;
+unfiltered candidates are ACTIVE users ordered by `_id DESC`. Owner transfers and
+lifecycle commands use expected-version compare-and-set transactions with transactional
+audit and outbox writes. Same-owner and same-status commands are no-op successes and do
+not increment the version or duplicate events.
 
 **Main operations:** read/update current user, list user workspaces, create
 workspaces, manage platform memberships, read/update workspaces, create/update/

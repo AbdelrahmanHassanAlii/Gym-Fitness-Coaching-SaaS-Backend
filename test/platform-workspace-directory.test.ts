@@ -585,7 +585,10 @@ describe('Platform workspace directory integration', () => {
       const blankCreate = await appInstance().inject({
         method: 'POST',
         url: '/api/v1/platform/workspaces',
-        headers: { authorization: `Bearer ${actor.token}` },
+        headers: {
+          authorization: `Bearer ${actor.token}`,
+          'idempotency-key': 'workspace-rename-setup',
+        },
         payload: { ...createPayload, name: ' \t\u2003 ' },
       });
       expect(blankCreate.statusCode).toBe(400);
@@ -609,7 +612,10 @@ describe('Platform workspace directory integration', () => {
       const validCreate = await appInstance().inject({
         method: 'POST',
         url: '/api/v1/platform/workspaces',
-        headers: { authorization: `Bearer ${actor.token}` },
+        headers: {
+          authorization: `Bearer ${actor.token}`,
+          'idempotency-key': 'workspace-valid-rename-setup',
+        },
         payload: { ...createPayload, name: 'Atlas Gym' },
       });
       expect(validCreate.statusCode).toBe(201);

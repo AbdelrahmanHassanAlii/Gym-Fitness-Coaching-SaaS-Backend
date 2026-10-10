@@ -55,6 +55,7 @@ export interface WorkspaceDocument {
   type: WorkspaceType;
   name: string;
   nameSearchPrefixes: string[];
+  version: number;
   ownerUserId: ObjectId;
   status: WorkspaceStatus;
   timezone: string;

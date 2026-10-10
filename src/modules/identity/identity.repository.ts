@@ -105,6 +105,36 @@ export class IdentityRepository {
     return await this.users.findOne({ normalizedEmail }, tx ? { session: tx.session } : undefined);
   }
 
+  async listActiveOwnerCandidates(input: {
+    afterId?: ObjectId;
+    normalizedEmail?: string;
+    limit: number;
+  }): Promise<UserDocument[]> {
+    const cursor = this.users.find(
+      {
+        status: 'ACTIVE',
+        ...(input.afterId ? { _id: { $lt: input.afterId } } : {}),
+        ...(input.normalizedEmail ? { normalizedEmail: input.normalizedEmail } : {}),
+      },
+      {
+        projection: {
+          _id: 1,
+          firstName: 1,
+          lastName: 1,
+          email: 1,
+          normalizedEmail: 1,
+          preferredLanguage: 1,
+          timezone: 1,
+          status: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    );
+    if (!input.normalizedEmail) cursor.sort({ _id: -1 });
+    return await cursor.limit(input.limit + 1).toArray();
+  }
+
   async findByNormalizedPhone(
     normalizedPhone: string,
     tx?: TransactionContext,

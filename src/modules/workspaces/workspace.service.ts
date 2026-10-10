@@ -218,14 +218,16 @@ export class WorkspaceApplicationService {
       city?: string;
       governorate?: string;
     },
+    tx?: TransactionContext,
   ) {
     const actor = await this.requirePlatformAccess(ctx);
     const name = workspaceNameForPersistence(input.name);
+    assertIanaTimeZone(input.timezone);
     const ownerUserId = objectId(input.ownerUserId, 'USER_NOT_FOUND');
-    const owner = await this.identity.findById(ownerUserId);
-    if (owner?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
     const now = new Date();
-    return await this.unitOfWork.withTransaction(async (tx) => {
+    const operation = async (transaction: TransactionContext) => {
+      const owner = await this.identity.findById(ownerUserId, transaction);
+      if (owner?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
       const workspace = await this.workspaces.create(
         {
           type: input.type,
@@ -240,7 +242,7 @@ export class WorkspaceApplicationService {
           }),
           now,
         },
-        tx,
+        transaction,
       );
       const ownerMembership = await this.memberships.createActive(
         {
@@ -249,7 +251,7 @@ export class WorkspaceApplicationService {
           roles: [input.type === 'GYM' ? 'GYM_OWNER' : 'TRAINER'],
           now,
         },
-        tx,
+        transaction,
       );
       await this.writeBusinessAudit(
         ctx,
@@ -257,7 +259,7 @@ export class WorkspaceApplicationService {
         'WorkspaceCreated',
         workspace,
         'create',
-        tx,
+        transaction,
       );
       await this.writeOutbox(
         ctx,
@@ -268,13 +270,159 @@ export class WorkspaceApplicationService {
         {
           ownerMembershipId: ownerMembership._id.toHexString(),
         },
-        tx,
+        transaction,
       );
-      return {
-        workspace: safeWorkspace(workspace),
-        ownerMembership: safeMembership(ownerMembership),
-      };
+      return { workspace: safePlatformWorkspaceManagement(workspace) };
+    };
+    return tx ? await operation(tx) : await this.unitOfWork.withTransaction(operation);
+  }
+
+  async listPlatformWorkspaceOwnerCandidates(
+    _ctx: RequestContext,
+    query: { q?: string; cursor?: string; limit?: number },
+  ) {
+    const limit = query.limit ?? 50;
+    const normalizedEmail = query.q?.trim() ? normalizeEmail(query.q) : undefined;
+    const afterId = query.cursor ? platformWorkspaceCursor(query.cursor) : undefined;
+    const fetched = await this.identity.listActiveOwnerCandidates({
+      ...(afterId ? { afterId } : {}),
+      ...(normalizedEmail ? { normalizedEmail } : {}),
+      limit,
     });
+    const hasMore = fetched.length > limit;
+    const page = fetched.slice(0, limit);
+    return {
+      data: page.map((user) => ({
+        id: user._id.toHexString(),
+        displayName: `${user.firstName} ${user.lastName}`.trim(),
+        ...(user.email ? { email: user.email } : {}),
+      })),
+      meta: {
+        nextCursor: hasMore ? (page.at(-1)?._id.toHexString() ?? null) : null,
+        hasMore,
+      },
+    };
+  }
+
+  async reassignPlatformWorkspaceOwner(
+    ctx: RequestContext,
+    workspaceId: string,
+    input: { ownerUserId: string; expectedVersion: number },
+    tx: TransactionContext,
+  ) {
+    const actor = await this.requirePlatformAccess(ctx);
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const newOwnerId = objectId(input.ownerUserId, 'USER_NOT_FOUND');
+    const workspace = await this.workspaces.findById(id, tx);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+    if (workspace.version !== input.expectedVersion) throw workspaceVersionConflict();
+    const candidate = await this.identity.findById(newOwnerId, tx);
+    if (candidate?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
+    if (workspace.ownerUserId.equals(newOwnerId)) {
+      return { workspace: safePlatformWorkspaceManagement(workspace) };
+    }
+
+    const ownerRole = workspace.type === 'GYM' ? 'GYM_OWNER' : 'TRAINER';
+    const previousOwnerId = workspace.ownerUserId;
+    await this.memberships.grantOwnerRole(id, newOwnerId, ownerRole, new Date(), tx);
+    await this.memberships.revokeOwnerRole(id, previousOwnerId, ownerRole, new Date(), tx);
+    const updated = await this.workspaces.reassignOwner(
+      id,
+      input.expectedVersion,
+      newOwnerId,
+      new Date(),
+      tx,
+    );
+    await this.audit.write(
+      {
+        eventType: 'WorkspaceOwnershipTransferred',
+        workspaceId: id,
+        actor: { userId: actor.user._id, platformMembershipId: actor.platformMembership._id },
+        entity: { type: 'workspace', id },
+        action: 'owner_reassign',
+        before: { ownerUserId: previousOwnerId.toHexString() },
+        after: { ownerUserId: newOwnerId.toHexString() },
+        ipAddress: ctx.ipAddress,
+        correlationId: ctx.correlationId,
+      },
+      tx,
+    );
+    await this.writeOutbox(
+      ctx,
+      id,
+      'WorkspaceOwnershipTransferred',
+      'workspace',
+      id,
+      {
+        previousOwnerId: previousOwnerId.toHexString(),
+        newOwnerId: newOwnerId.toHexString(),
+        version: updated.version,
+      },
+      tx,
+    );
+    return { workspace: safePlatformWorkspaceManagement(updated) };
+  }
+
+  async transitionPlatformWorkspaceLifecycle(
+    ctx: RequestContext,
+    workspaceId: string,
+    command: 'activate' | 'restrict' | 'suspend' | 'archive' | 'restore',
+    expectedVersion: number,
+    tx: TransactionContext,
+  ) {
+    const actor = await this.requirePlatformAccess(ctx);
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const current = await this.workspaces.findById(id, tx);
+    if (!current) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+    if (current.version !== expectedVersion) throw workspaceVersionConflict();
+    const transition = workspaceLifecycleTransition(command);
+    if (!transition.from.includes(current.status)) {
+      if (current.status === transition.to) {
+        return { workspace: safePlatformWorkspaceManagement(current) };
+      }
+      throw new AppError({
+        code: 'INVALID_WORKSPACE_STATUS_TRANSITION',
+        httpStatus: 409,
+        message: 'The workspace cannot make the requested status transition.',
+      });
+    }
+    const updated = await this.workspaces.transitionPlatformStatus(
+      id,
+      expectedVersion,
+      transition.from,
+      transition.to,
+      new Date(),
+      tx,
+    );
+    const eventType = workspaceLifecycleEvent(command);
+    await this.audit.write(
+      {
+        eventType,
+        workspaceId: id,
+        actor: { userId: actor.user._id, platformMembershipId: actor.platformMembership._id },
+        entity: { type: 'workspace', id },
+        action: command,
+        before: { status: current.status },
+        after: { status: updated.status },
+        ipAddress: ctx.ipAddress,
+        correlationId: ctx.correlationId,
+      },
+      tx,
+    );
+    await this.writeOutbox(
+      ctx,
+      id,
+      eventType,
+      'workspace',
+      id,
+      {
+        previousStatus: current.status,
+        status: updated.status,
+        version: updated.version,
+      },
+      tx,
+    );
+    return { workspace: safePlatformWorkspaceManagement(updated) };
   }
 
   async listPlatformMemberships(ctx: RequestContext) {
@@ -1186,6 +1334,69 @@ function safeWorkspace(workspace: WorkspaceDocument) {
     city: workspace.city,
     governorate: workspace.governorate,
   };
+}
+
+function safePlatformWorkspaceManagement(workspace: WorkspaceDocument) {
+  return {
+    id: workspace._id.toHexString(),
+    name: workspace.name,
+    type: workspace.type,
+    status: workspace.status,
+    timezone: workspace.timezone,
+    defaultLanguage: workspace.defaultLanguage,
+    ...(workspace.country ? { country: workspace.country } : {}),
+    ...(workspace.city ? { city: workspace.city } : {}),
+    ...(workspace.governorate ? { governorate: workspace.governorate } : {}),
+    createdAt: workspace.createdAt.toISOString(),
+    version: workspace.version,
+  };
+}
+
+function assertIanaTimeZone(timezone: string): void {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0));
+  } catch {
+    throw new AppError({
+      code: 'VALIDATION_FAILED',
+      httpStatus: 400,
+      message: 'timezone must be a valid IANA time zone.',
+    });
+  }
+}
+
+function workspaceVersionConflict(): AppError {
+  return new AppError({
+    code: 'WORKSPACE_VERSION_CONFLICT',
+    httpStatus: 409,
+    message: 'The workspace management state has changed.',
+  });
+}
+
+function workspaceLifecycleTransition(
+  command: 'activate' | 'restrict' | 'suspend' | 'archive' | 'restore',
+): { from: WorkspaceStatus[]; to: WorkspaceStatus } {
+  if (command === 'activate') {
+    return { from: ['PENDING_ACTIVATION', 'RESTRICTED', 'SUSPENDED'], to: 'ACTIVE' };
+  }
+  if (command === 'restrict') return { from: ['ACTIVE'], to: 'RESTRICTED' };
+  if (command === 'suspend') return { from: ['ACTIVE', 'RESTRICTED'], to: 'SUSPENDED' };
+  if (command === 'archive') {
+    return {
+      from: ['PENDING_ACTIVATION', 'ACTIVE', 'RESTRICTED', 'SUSPENDED'],
+      to: 'ARCHIVED',
+    };
+  }
+  return { from: ['ARCHIVED'], to: 'ACTIVE' };
+}
+
+function workspaceLifecycleEvent(
+  command: 'activate' | 'restrict' | 'suspend' | 'archive' | 'restore',
+): string {
+  if (command === 'activate') return 'WorkspaceActivated';
+  if (command === 'restrict') return 'WorkspaceRestricted';
+  if (command === 'suspend') return 'WorkspaceSuspended';
+  if (command === 'archive') return 'WorkspaceArchived';
+  return 'WorkspaceRestored';
 }
 
 function safePlatformMembership(membership: PlatformMembershipDocument) {

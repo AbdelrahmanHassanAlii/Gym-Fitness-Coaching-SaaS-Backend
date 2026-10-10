@@ -22,6 +22,7 @@ import { migration021Stage16SupportAccess } from './021-stage16-support-access';
 import { migration022Stage17RetentionExportDeletion } from './022-stage17-retention-export-deletion';
 import { migration023Stage18DashboardsAnalytics } from './023-stage18-dashboards-analytics';
 import { migration024PlatformWorkspaceSearch } from './024-platform-workspace-search';
+import { migration025PlatformWorkspaceManagement } from './025-platform-workspace-management';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -49,4 +50,5 @@ export const migrations: Migration[] = [
   migration022Stage17RetentionExportDeletion,
   migration023Stage18DashboardsAnalytics,
   migration024PlatformWorkspaceSearch,
+  migration025PlatformWorkspaceManagement,
 ];

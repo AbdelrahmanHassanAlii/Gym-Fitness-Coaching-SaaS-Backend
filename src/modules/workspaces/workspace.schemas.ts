@@ -74,6 +74,85 @@ export const PlatformWorkspaceDetailResponse = Type.Object(
   { additionalProperties: false },
 );
 
+const PlatformWorkspaceManagementSummary = Type.Object(
+  {
+    id: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+    name: Type.String({ minLength: 1 }),
+    type: WorkspaceType,
+    status: WorkspaceStatus,
+    timezone: Type.String({ minLength: 1 }),
+    defaultLanguage: Language,
+    country: Type.Optional(Type.String()),
+    city: Type.Optional(Type.String()),
+    governorate: Type.Optional(Type.String()),
+    createdAt: Type.String({ format: 'date-time' }),
+    version: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
+export const PlatformWorkspaceManagementResponse = Type.Object(
+  {
+    data: Type.Object(
+      { workspace: PlatformWorkspaceManagementSummary },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const WorkspaceManagementParams = Type.Object(
+  { workspaceId: Type.String({ pattern: '^[0-9a-f]{24}$' }) },
+  { additionalProperties: false },
+);
+
+export const OwnerCandidateQuery = Type.Object(
+  {
+    q: Type.Optional(Type.String({ maxLength: 254 })),
+    cursor: Type.Optional(Type.String()),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+  },
+  { additionalProperties: false },
+);
+
+const OwnerCandidate = Type.Object(
+  {
+    id: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+    displayName: Type.String({ minLength: 1 }),
+    email: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const OwnerCandidateResponse = Type.Object(
+  {
+    data: Type.Array(OwnerCandidate),
+    meta: Type.Object(
+      { nextCursor: Type.Union([Type.String(), Type.Null()]), hasMore: Type.Boolean() },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const ReassignWorkspaceOwnerBody = Type.Object(
+  {
+    ownerUserId: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+    expectedVersion: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
+export const WorkspaceLifecycleBody = Type.Object(
+  { expectedVersion: Type.Integer({ minimum: 0 }) },
+  { additionalProperties: false },
+);
+
+export const IdempotencyHeaders = Type.Object(
+  { 'idempotency-key': Type.String({ minLength: 1 }) },
+  { additionalProperties: true },
+);
+
 const PlatformWorkspaceDirectoryRow = Type.Object(
   {
     id: Type.String({ pattern: '^[0-9a-f]{24}$' }),

@@ -14,21 +14,28 @@ import {
   CreateWorkspaceBody,
   EmptyQuery,
   ErrorResponse,
+  IdempotencyHeaders,
   IdParams,
   InvitationParams,
   InviteStaffBody,
   MembershipBranchParams,
   MembershipParams,
+  OwnerCandidateQuery,
+  OwnerCandidateResponse,
   PlatformContextResponse,
   PlatformMembershipParams,
   PlatformWorkspaceDetailParams,
   PlatformWorkspaceDetailResponse,
   PlatformWorkspaceDirectoryQuery,
   PlatformWorkspaceDirectoryResponse,
+  PlatformWorkspaceManagementResponse,
+  ReassignWorkspaceOwnerBody,
   SuccessResponse,
   UpdateBranchBody,
   UpdateMeBody,
   UpdateWorkspaceBody,
+  WorkspaceLifecycleBody,
+  WorkspaceManagementParams,
 } from './workspace.schemas';
 
 export async function registerWorkspaceRoutes(
@@ -89,6 +96,7 @@ export async function registerWorkspaceRoutes(
     {
       preHandler: [
         requireAuth(),
+        rejectSupportContext,
         requireAccess(container, {
           context: 'PLATFORM',
           permission: Permissions.PlatformWorkspacesManage,
@@ -97,12 +105,29 @@ export async function registerWorkspaceRoutes(
       schema: {
         tags: ['Workspaces'],
         body: CreateWorkspaceBody,
-        response: { 201: {}, 401: ErrorResponse, 403: ErrorResponse },
+        headers: IdempotencyHeaders,
+        response: {
+          201: PlatformWorkspaceManagementResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          409: ErrorResponse,
+        },
       },
     },
     async (request, reply) => {
-      const data = await container.workspaces.createWorkspace(request.ctx, request.body);
-      return reply.status(201).send({ data });
+      const result = await container.idempotency.runInTransaction(request.ctx, {
+        key: idempotencyKey(request.headers),
+        routeKey: 'POST /api/v1/platform/workspaces',
+        fingerprint: request.body,
+        unitOfWork: container.unitOfWork,
+        operation: (tx) =>
+          container.workspaces
+            .createWorkspace(request.ctx, request.body, tx)
+            .then((body) => ({ statusCode: 201, body })),
+      });
+      return reply.status(result.statusCode).send({ data: result.body });
     },
   );
 
@@ -163,6 +188,134 @@ export async function registerWorkspaceRoutes(
       ),
     }),
   );
+
+  app.get<{ Querystring: Static<typeof OwnerCandidateQuery> }>(
+    '/api/v1/platform/workspace-owner-candidates',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        querystring: OwnerCandidateQuery,
+        response: {
+          200: OwnerCandidateResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          422: ErrorResponse,
+        },
+      },
+    },
+    async (request) =>
+      await container.workspaces.listPlatformWorkspaceOwnerCandidates(request.ctx, request.query),
+  );
+
+  app.post<{
+    Params: Static<typeof WorkspaceManagementParams>;
+    Body: Static<typeof ReassignWorkspaceOwnerBody>;
+  }>(
+    '/api/v1/platform/workspaces/:workspaceId/owner',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        params: WorkspaceManagementParams,
+        body: ReassignWorkspaceOwnerBody,
+        headers: IdempotencyHeaders,
+        response: {
+          200: PlatformWorkspaceManagementResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          409: ErrorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await container.idempotency.runInTransaction(request.ctx, {
+        key: idempotencyKey(request.headers),
+        routeKey: `POST /api/v1/platform/workspaces/${request.params.workspaceId}/owner`,
+        fingerprint: request.body,
+        unitOfWork: container.unitOfWork,
+        operation: (tx) =>
+          container.workspaces
+            .reassignPlatformWorkspaceOwner(
+              request.ctx,
+              request.params.workspaceId,
+              request.body,
+              tx,
+            )
+            .then((body) => ({ body })),
+      });
+      return reply.status(result.statusCode).send({ data: result.body });
+    },
+  );
+
+  for (const command of ['activate', 'restrict', 'suspend', 'archive', 'restore'] as const) {
+    app.post<{
+      Params: Static<typeof WorkspaceManagementParams>;
+      Body: Static<typeof WorkspaceLifecycleBody>;
+    }>(
+      `/api/v1/platform/workspaces/:workspaceId/${command}`,
+      {
+        preHandler: [
+          requireAuth(),
+          rejectSupportContext,
+          requireAccess(container, {
+            context: 'PLATFORM',
+            permission: Permissions.PlatformWorkspacesManage,
+          }),
+        ],
+        schema: {
+          tags: ['Workspaces', 'Platform'],
+          params: WorkspaceManagementParams,
+          body: WorkspaceLifecycleBody,
+          headers: IdempotencyHeaders,
+          response: {
+            200: PlatformWorkspaceManagementResponse,
+            400: ErrorResponse,
+            401: ErrorResponse,
+            403: ErrorResponse,
+            404: ErrorResponse,
+            409: ErrorResponse,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await container.idempotency.runInTransaction(request.ctx, {
+          key: idempotencyKey(request.headers),
+          routeKey: `POST /api/v1/platform/workspaces/${request.params.workspaceId}/${command}`,
+          fingerprint: request.body,
+          unitOfWork: container.unitOfWork,
+          operation: (tx) =>
+            container.workspaces
+              .transitionPlatformWorkspaceLifecycle(
+                request.ctx,
+                request.params.workspaceId,
+                command,
+                request.body.expectedVersion,
+                tx,
+              )
+              .then((body) => ({ body })),
+        });
+        return reply.status(result.statusCode).send({ data: result.body });
+      },
+    );
+  }
 
   app.get(
     '/api/v1/platform/memberships',

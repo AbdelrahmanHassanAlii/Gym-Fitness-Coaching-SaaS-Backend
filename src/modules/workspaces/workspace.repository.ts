@@ -49,6 +49,7 @@ export class WorkspaceRepository {
       type: input.type,
       name: input.name,
       nameSearchPrefixes: workspaceNameSearchPrefixes(input.name),
+      version: 0,
       ownerUserId: input.ownerUserId,
       status: input.status ?? 'ACTIVE',
       timezone: input.timezone,
@@ -152,6 +153,48 @@ export class WorkspaceRepository {
         },
       },
     );
+  }
+
+  async reassignOwner(
+    workspaceId: ObjectId,
+    expectedVersion: number,
+    ownerUserId: ObjectId,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceDocument> {
+    const result = await this.workspaces.findOneAndUpdate(
+      { _id: workspaceId, version: expectedVersion },
+      { $set: { ownerUserId, updatedAt: now }, $inc: { version: 1 } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) throw workspaceVersionConflict();
+    return result;
+  }
+
+  async transitionPlatformStatus(
+    workspaceId: ObjectId,
+    expectedVersion: number,
+    from: WorkspaceStatus[],
+    to: WorkspaceStatus,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceDocument> {
+    const result = await this.workspaces.findOneAndUpdate(
+      { _id: workspaceId, version: expectedVersion, status: { $in: from } },
+      { $set: { status: to, updatedAt: now }, $inc: { version: 1 } },
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result) {
+      const current = await this.findById(workspaceId, tx);
+      if (!current) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+      if (current.version !== expectedVersion) throw workspaceVersionConflict();
+      throw new AppError({
+        code: 'INVALID_WORKSPACE_STATUS_TRANSITION',
+        httpStatus: 409,
+        message: 'The workspace cannot make the requested status transition.',
+      });
+    }
+    return result;
   }
 
   async activatePending(
@@ -340,6 +383,55 @@ export class WorkspaceMembershipRepository {
       { workspaceId, userId },
       tx ? { session: tx.session } : undefined,
     );
+  }
+
+  async grantOwnerRole(
+    workspaceId: ObjectId,
+    userId: ObjectId,
+    role: WorkspaceMembershipRole,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<WorkspaceMembershipDocument> {
+    const existing = await this.findByUserInWorkspace(workspaceId, userId, tx);
+    if (!existing) return await this.createActive({ workspaceId, userId, roles: [role], now }, tx);
+    const roles = Array.from(new Set([...existing.roles, role]));
+    const update: UpdateFilter<WorkspaceMembershipDocument> = {
+      $set: { roles, status: 'ACTIVE', updatedAt: now },
+      $unset: { endedAt: '' },
+      $inc: { accessVersion: 1 },
+    };
+    if (existing.status !== 'ACTIVE') {
+      update.$push = { engagementPeriods: { startedAt: now } };
+    }
+    const result = await this.memberships.findOneAndUpdate(
+      { _id: existing._id, workspaceId },
+      update,
+      { returnDocument: 'after', ...(tx ? { session: tx.session } : {}) },
+    );
+    if (!result)
+      throw notFound('WORKSPACE_MEMBERSHIP_NOT_FOUND', 'Workspace membership not found.');
+    return result;
+  }
+
+  async revokeOwnerRole(
+    workspaceId: ObjectId,
+    userId: ObjectId,
+    role: WorkspaceMembershipRole,
+    now = new Date(),
+    tx?: TransactionContext,
+  ): Promise<void> {
+    const existing = await this.findByUserInWorkspace(workspaceId, userId, tx);
+    if (!existing) return;
+    const roles = existing.roles.filter((candidate) => candidate !== role);
+    if (roles.length > 0) {
+      await this.memberships.updateOne(
+        { _id: existing._id, workspaceId },
+        { $set: { roles, updatedAt: now }, $inc: { accessVersion: 1 } },
+        tx ? { session: tx.session } : undefined,
+      );
+      return;
+    }
+    await this.transition(workspaceId, existing._id, ['ACTIVE', 'SUSPENDED'], 'ENDED', now, tx);
   }
 
   async reactivate(
@@ -906,6 +998,14 @@ function compact<T extends Record<string, unknown>>(input: T): Partial<T> {
 
 function notFound(code: string, message: string): AppError {
   return new AppError({ code, httpStatus: 404, message });
+}
+
+function workspaceVersionConflict(): AppError {
+  return new AppError({
+    code: 'WORKSPACE_VERSION_CONFLICT',
+    httpStatus: 409,
+    message: 'The workspace management state has changed.',
+  });
 }
 
 function invalidInvitation(): AppError {

@@ -103,6 +103,53 @@ describe('Platform workspace management contracts', () => {
     expect(mismatch.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
+  test('create handles concurrent duplicate delivery, conflicting replay, and post-commit retry', async () => {
+    const actor = await seedPlatformActor();
+    const owner = await seedUser('create-replay-owner@example.com');
+    const body = {
+      type: 'GYM',
+      name: 'Replay Gym',
+      ownerUserId: owner.toHexString(),
+      timezone: 'UTC',
+      defaultLanguage: 'en',
+    };
+    const concurrent = await Promise.all([
+      command('POST', '/api/v1/platform/workspaces', actor.token, body, 'create-concurrent'),
+      command('POST', '/api/v1/platform/workspaces', actor.token, body, 'create-concurrent'),
+    ]);
+    const committed = concurrent.find((response) => response.statusCode === 201);
+    expect(committed).toBeDefined();
+    if (!committed) throw new Error('Expected one committed create response');
+    expect(concurrent.every((response) => [201, 409].includes(response.statusCode))).toBe(true);
+
+    const ambiguousRetry = await command(
+      'POST',
+      '/api/v1/platform/workspaces',
+      actor.token,
+      body,
+      'create-concurrent',
+    );
+    expect(ambiguousRetry.statusCode).toBe(201);
+    expect(ambiguousRetry.json()).toEqual(committed.json());
+    const conflicting = await command(
+      'POST',
+      '/api/v1/platform/workspaces',
+      actor.token,
+      { ...body, name: 'Conflicting Gym' },
+      'create-concurrent',
+    );
+    expect(conflicting.statusCode).toBe(409);
+    expect(conflicting.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(await db().collection('workspaces').countDocuments()).toBe(1);
+    expect(await db().collection('workspace_memberships').countDocuments()).toBe(1);
+    expect(
+      await db().collection('audit_events').countDocuments({ eventType: 'WorkspaceCreated' }),
+    ).toBe(1);
+    expect(
+      await db().collection('outbox_events').countDocuments({ eventType: 'WorkspaceCreated' }),
+    ).toBe(1);
+  });
+
   test('rejects support, invalid timezone, and an owner made inactive before authoritative create', async () => {
     const actor = await seedPlatformActor();
     const owner = await seedUser('owner@example.com');
@@ -156,6 +203,48 @@ describe('Platform workspace management contracts', () => {
     }
   });
 
+  test('create rejects an owner made inactive immediately before transactional validation', async () => {
+    const actor = await seedPlatformActor();
+    const owner = await seedUser('create-race-owner@example.com');
+    const originalFind = container.identity.findById.bind(container.identity);
+    let raced = false;
+    container.identity.findById = async (userId, tx) => {
+      if (tx && userId.equals(owner) && !raced) {
+        raced = true;
+        await db()
+          .collection('users')
+          .updateOne({ _id: owner }, { $set: { status: 'SUSPENDED' } });
+      }
+      return await originalFind(userId, tx);
+    };
+    try {
+      const response = await command(
+        'POST',
+        '/api/v1/platform/workspaces',
+        actor.token,
+        {
+          type: 'GYM',
+          name: 'Race Gym',
+          ownerUserId: owner.toHexString(),
+          timezone: 'UTC',
+          defaultLanguage: 'en',
+        },
+        'create-owner-status-race',
+      );
+      expect(response.statusCode).toBe(404);
+      expect(raced).toBe(true);
+      expect(await db().collection('workspaces').countDocuments()).toBe(0);
+      expect(await db().collection('workspace_memberships').countDocuments()).toBe(0);
+      expect(await db().collection('audit_events').countDocuments()).toBe(0);
+      expect(await db().collection('outbox_events').countDocuments()).toBe(0);
+      expect(
+        await db().collection('idempotency_records').countDocuments({ state: 'COMPLETED' }),
+      ).toBe(0);
+    } finally {
+      container.identity.findById = originalFind;
+    }
+  });
+
   test('lists only ACTIVE minimized owner candidates using bounded opaque keyset pagination and exact email search', async () => {
     const actor = await seedPlatformActor();
     const first = await seedUser('first@example.com', 'ACTIVE', 'First', 'Owner');
@@ -178,6 +267,189 @@ describe('Platform workspace management contracts', () => {
     expect(searched.json().data).toEqual([
       { id: first.toHexString(), displayName: 'First Owner', email: 'first@example.com' },
     ]);
+  });
+
+  test('reads exact current management state and tracks lifecycle and owner changes', async () => {
+    const actor = await seedPlatformActor();
+    const originalOwner = await seedUser('state-owner@example.com', 'ACTIVE', 'State', 'Owner');
+    const nextOwner = await seedUser('state-next@example.com', 'ACTIVE', 'Next', 'Owner');
+    const workspace = await seedWorkspace(originalOwner, 'ACTIVE');
+    await seedOwnerMembership(workspace, originalOwner, ['GYM_OWNER']);
+
+    const readState = async () =>
+      await app.inject({
+        method: 'GET',
+        url: `/api/v1/platform/workspaces/${workspace}/management-state`,
+        headers: { authorization: `Bearer ${actor.token}` },
+      });
+
+    const initial = await readState();
+    expect(initial.statusCode).toBe(200);
+    expect(Object.keys(initial.json().data).sort()).toEqual(['owner', 'workspace']);
+    expect(Object.keys(initial.json().data.workspace).sort()).toEqual(
+      [
+        'createdAt',
+        'defaultLanguage',
+        'id',
+        'name',
+        'status',
+        'timezone',
+        'type',
+        'version',
+      ].sort(),
+    );
+    expect(initial.json().data.workspace).toMatchObject({ status: 'ACTIVE', version: 0 });
+    expect(initial.json().data.owner).toEqual({
+      id: originalOwner.toHexString(),
+      displayName: 'State Owner',
+      email: 'state-owner@example.com',
+    });
+    for (const prohibited of [
+      'ownerUserId',
+      'nameSearchPrefixes',
+      'accessVersion',
+      'permissionProfileIds',
+      'engagementPeriods',
+      'subscription',
+      'counts',
+      'roles',
+    ]) {
+      expect(JSON.stringify(initial.json())).not.toContain(prohibited);
+    }
+
+    expect(
+      (await lifecycle(workspace, 'restrict', 0, actor.token, 'state-restrict')).statusCode,
+    ).toBe(200);
+    const restricted = await readState();
+    expect(restricted.json().data.workspace).toMatchObject({ status: 'RESTRICTED', version: 1 });
+
+    expect(
+      (
+        await command(
+          'POST',
+          `/api/v1/platform/workspaces/${workspace}/owner`,
+          actor.token,
+          { ownerUserId: nextOwner.toHexString(), expectedVersion: 1 },
+          'state-owner-transfer',
+        )
+      ).statusCode,
+    ).toBe(200);
+    const transferred = await readState();
+    expect(transferred.json().data.workspace).toMatchObject({ status: 'RESTRICTED', version: 2 });
+    expect(transferred.json().data.owner).toEqual({
+      id: nextOwner.toHexString(),
+      displayName: 'Next Owner',
+      email: 'state-next@example.com',
+    });
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: `/api/v1/platform/workspaces/${new ObjectId()}/management-state`,
+      headers: { authorization: `Bearer ${actor.token}` },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe('WORKSPACE_NOT_FOUND');
+
+    const missingOwnerWorkspace = await seedWorkspace(new ObjectId(), 'ACTIVE');
+    const missingOwner = await app.inject({
+      method: 'GET',
+      url: `/api/v1/platform/workspaces/${missingOwnerWorkspace}/management-state`,
+      headers: { authorization: `Bearer ${actor.token}` },
+    });
+    expect(missingOwner.statusCode).toBe(500);
+    expect(missingOwner.json().error.code).toBe('WORKSPACE_OWNER_INVARIANT_VIOLATION');
+  });
+
+  test('management state enforces the complete Platform authority and support boundary', async () => {
+    const owner = await seedUser('authority-owner@example.com');
+    const workspace = await seedWorkspace(owner, 'ACTIVE');
+    await seedOwnerMembership(workspace, owner, ['GYM_OWNER']);
+    const url = `/api/v1/platform/workspaces/${workspace}/management-state`;
+
+    expect((await app.inject({ method: 'GET', url })).statusCode).toBe(401);
+    for (const options of [
+      { restricted: true },
+      { mfaSatisfied: false },
+      { membershipStatus: 'SUSPENDED' as const },
+      { allow: false },
+    ]) {
+      const actor = await seedPlatformActor(options);
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url,
+            headers: { authorization: `Bearer ${actor.token}` },
+          })
+        ).statusCode,
+      ).toBe(403);
+    }
+
+    const gymOwnerOnly = await seedPlatformActor({ membership: false });
+    const gymWorkspace = await seedWorkspace(gymOwnerOnly.userId, 'ACTIVE');
+    await seedOwnerMembership(gymWorkspace, gymOwnerOnly.userId, ['GYM_OWNER']);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: `/api/v1/platform/workspaces/${gymWorkspace}/management-state`,
+          headers: { authorization: `Bearer ${gymOwnerOnly.token}` },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    const memberOnly = await seedPlatformActor({ membership: false });
+    await seedOwnerMembership(workspace, memberOnly.userId, ['TRAINER']);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url,
+          headers: { authorization: `Bearer ${memberOnly.token}` },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    const allowed = await seedPlatformActor();
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url,
+          headers: { authorization: `Bearer ${allowed.token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const originalRead = container.workspaces.getPlatformWorkspaceManagementState.bind(
+      container.workspaces,
+    );
+    let readCalls = 0;
+    container.workspaces.getPlatformWorkspaceManagementState = async (...args) => {
+      readCalls += 1;
+      return await originalRead(...args);
+    };
+    const originalResolve = container.supportAccess.resolveForRequest.bind(container.supportAccess);
+    container.supportAccess.resolveForRequest = async (ctx) => {
+      ctx.supportSessionId = new ObjectId().toHexString();
+      return {} as never;
+    };
+    try {
+      const support = await app.inject({
+        method: 'GET',
+        url,
+        headers: {
+          authorization: `Bearer ${allowed.token}`,
+          'x-support-session-id': new ObjectId().toHexString(),
+        },
+      });
+      expect(support.statusCode).toBe(403);
+      expect(support.json().error.code).toBe('SUPPORT_ACCESS_FORBIDDEN');
+      expect(readCalls).toBe(0);
+    } finally {
+      container.workspaces.getPlatformWorkspaceManagementState = originalRead;
+      container.supportAccess.resolveForRequest = originalResolve;
+    }
   });
 
   test('reassigns ownership with CAS, maintains one authoritative owner, and replays idempotently', async () => {
@@ -233,6 +505,107 @@ describe('Platform workspace management contracts', () => {
         .collection('outbox_events')
         .countDocuments({ eventType: 'WorkspaceOwnershipTransferred' }),
     ).toBe(1);
+  });
+
+  test('owner reassignment handles concurrent duplicate delivery, conflict, and ambiguous retry', async () => {
+    const actor = await seedPlatformActor();
+    const oldOwner = await seedUser('owner-replay-old@example.com');
+    const newOwner = await seedUser('owner-replay-new@example.com');
+    const conflictingOwner = await seedUser('owner-replay-conflict@example.com');
+    const workspace = await seedWorkspace(oldOwner, 'ACTIVE');
+    await seedOwnerMembership(workspace, oldOwner, ['GYM_OWNER']);
+    const path = `/api/v1/platform/workspaces/${workspace}/owner`;
+    const body = { ownerUserId: newOwner.toHexString(), expectedVersion: 0 };
+    const concurrent = await Promise.all([
+      command('POST', path, actor.token, body, 'owner-concurrent'),
+      command('POST', path, actor.token, body, 'owner-concurrent'),
+    ]);
+    const committed = concurrent.find((response) => response.statusCode === 200);
+    expect(committed).toBeDefined();
+    if (!committed) throw new Error('Expected one committed owner response');
+    expect(concurrent.every((response) => [200, 409].includes(response.statusCode))).toBe(true);
+
+    const ambiguousRetry = await command('POST', path, actor.token, body, 'owner-concurrent');
+    expect(ambiguousRetry.statusCode).toBe(200);
+    expect(ambiguousRetry.json()).toEqual(committed.json());
+    const conflicting = await command(
+      'POST',
+      path,
+      actor.token,
+      { ownerUserId: conflictingOwner.toHexString(), expectedVersion: 0 },
+      'owner-concurrent',
+    );
+    expect(conflicting.statusCode).toBe(409);
+    expect(conflicting.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect((await db().collection('workspaces').findOne({ _id: workspace }))?.version).toBe(1);
+    expect(
+      await db()
+        .collection('workspace_memberships')
+        .countDocuments({ workspaceId: workspace, roles: 'GYM_OWNER', status: 'ACTIVE' }),
+    ).toBe(1);
+    expect(
+      await db().collection('audit_events').countDocuments({
+        workspaceId: workspace,
+        eventType: 'WorkspaceOwnershipTransferred',
+      }),
+    ).toBe(1);
+    expect(
+      await db().collection('outbox_events').countDocuments({
+        workspaceId: workspace,
+        eventType: 'WorkspaceOwnershipTransferred',
+      }),
+    ).toBe(1);
+  });
+
+  test('owner reassignment rejects a target made inactive before transactional validation', async () => {
+    const actor = await seedPlatformActor();
+    const oldOwner = await seedUser('reassign-race-old@example.com');
+    const newOwner = await seedUser('reassign-race-new@example.com');
+    const workspace = await seedWorkspace(oldOwner, 'ACTIVE');
+    await seedOwnerMembership(workspace, oldOwner, ['GYM_OWNER']);
+    const originalFind = container.identity.findById.bind(container.identity);
+    let raced = false;
+    container.identity.findById = async (userId, tx) => {
+      if (tx && userId.equals(newOwner) && !raced) {
+        raced = true;
+        await db()
+          .collection('users')
+          .updateOne({ _id: newOwner }, { $set: { status: 'SUSPENDED' } });
+      }
+      return await originalFind(userId, tx);
+    };
+    try {
+      const response = await command(
+        'POST',
+        `/api/v1/platform/workspaces/${workspace}/owner`,
+        actor.token,
+        { ownerUserId: newOwner.toHexString(), expectedVersion: 0 },
+        'reassign-owner-status-race',
+      );
+      expect(response.statusCode).toBe(404);
+      expect(raced).toBe(true);
+      expect(await db().collection('workspaces').findOne({ _id: workspace })).toMatchObject({
+        ownerUserId: oldOwner,
+        version: 0,
+      });
+      expect(
+        await db()
+          .collection('workspace_memberships')
+          .countDocuments({ workspaceId: workspace, userId: oldOwner, roles: 'GYM_OWNER' }),
+      ).toBe(1);
+      expect(
+        await db()
+          .collection('workspace_memberships')
+          .countDocuments({ workspaceId: workspace, userId: newOwner }),
+      ).toBe(0);
+      expect(await db().collection('audit_events').countDocuments()).toBe(0);
+      expect(await db().collection('outbox_events').countDocuments()).toBe(0);
+      expect(
+        await db().collection('idempotency_records').countDocuments({ state: 'COMPLETED' }),
+      ).toBe(0);
+    } finally {
+      container.identity.findById = originalFind;
+    }
   });
 
   test('enforces lifecycle transitions, version CAS, same-state no-op, and exact-once events', async () => {
@@ -309,6 +682,51 @@ describe('Platform workspace management contracts', () => {
       );
       expect(response.statusCode, `${from} -/-> ${commandName}`).toBe(409);
       expect(response.json().error.code).toBe('INVALID_WORKSPACE_STATUS_TRANSITION');
+    }
+  });
+
+  test('every lifecycle route composes concurrent, conflicting, and ambiguous idempotent delivery', async () => {
+    const actor = await seedPlatformActor();
+    const owner = await seedUser('lifecycle-replay-owner@example.com');
+    const cases = [
+      ['activate', 'PENDING_ACTIVATION', 'WorkspaceActivated'],
+      ['restrict', 'ACTIVE', 'WorkspaceRestricted'],
+      ['suspend', 'ACTIVE', 'WorkspaceSuspended'],
+      ['archive', 'ACTIVE', 'WorkspaceArchived'],
+      ['restore', 'ARCHIVED', 'WorkspaceRestored'],
+    ] as const;
+    for (const [commandName, from, eventType] of cases) {
+      const workspace = await seedWorkspace(owner, from);
+      const key = `lifecycle-concurrent-${commandName}`;
+      const concurrent = await Promise.all([
+        lifecycle(workspace, commandName, 0, actor.token, key),
+        lifecycle(workspace, commandName, 0, actor.token, key),
+      ]);
+      const committed = concurrent.find((response) => response.statusCode === 200);
+      expect(committed, commandName).toBeDefined();
+      if (!committed) throw new Error(`Expected one committed ${commandName} response`);
+      expect(
+        concurrent.every((response) => [200, 409].includes(response.statusCode)),
+        commandName,
+      ).toBe(true);
+
+      const ambiguousRetry = await lifecycle(workspace, commandName, 0, actor.token, key);
+      expect(ambiguousRetry.statusCode, commandName).toBe(200);
+      expect(ambiguousRetry.json(), commandName).toEqual(committed.json());
+      const conflicting = await lifecycle(workspace, commandName, 1, actor.token, key);
+      expect(conflicting.statusCode, commandName).toBe(409);
+      expect(conflicting.json().error.code, commandName).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect((await db().collection('workspaces').findOne({ _id: workspace }))?.version).toBe(1);
+      expect(
+        await db().collection('audit_events').countDocuments({ workspaceId: workspace, eventType }),
+        commandName,
+      ).toBe(1);
+      expect(
+        await db()
+          .collection('outbox_events')
+          .countDocuments({ workspaceId: workspace, eventType }),
+        commandName,
+      ).toBe(1);
     }
   });
 
@@ -500,6 +918,14 @@ describe('Platform workspace management contracts', () => {
       );
     }
     expect(document.paths['/api/v1/platform/workspace-owner-candidates']?.get).toBeDefined();
+
+    const managementState =
+      document.paths['/api/v1/platform/workspaces/{workspaceId}/management-state']?.get;
+    expect(managementState).toBeDefined();
+    expect(Object.keys(managementState?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '401', '403', '404']),
+    );
+    expect(managementState?.responses['200']?.content?.['application/json']?.schema).toBeDefined();
   });
 });
 
@@ -537,6 +963,7 @@ async function seedPlatformActor(
   options: {
     allow?: boolean;
     membership?: boolean;
+    membershipStatus?: 'ACTIVE' | 'SUSPENDED';
     mfaSatisfied?: boolean;
     restricted?: boolean;
   } = {},
@@ -565,7 +992,7 @@ async function seedPlatformActor(
       .insertOne({
         _id: new ObjectId(),
         userId,
-        status: 'ACTIVE',
+        status: options.membershipStatus ?? 'ACTIVE',
         permissionProfileIds: options.allow === false ? [] : [profileId],
         accessVersion: 0,
         createdAt: now,
@@ -583,6 +1010,7 @@ async function seedPlatformActor(
     expiresAt: new Date(now.getTime() + 3_600_000),
   });
   return {
+    userId,
     token: container.jwt.createAccessToken({
       userId: userId.toHexString(),
       authSessionId: session._id.toHexString(),

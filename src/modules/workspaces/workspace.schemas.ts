@@ -101,6 +101,28 @@ export const PlatformWorkspaceManagementResponse = Type.Object(
   { additionalProperties: false },
 );
 
+const PlatformWorkspaceOwnerIdentity = Type.Object(
+  {
+    id: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+    displayName: Type.Optional(Type.String({ minLength: 1 })),
+    email: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const PlatformWorkspaceManagementStateResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        workspace: PlatformWorkspaceManagementSummary,
+        owner: PlatformWorkspaceOwnerIdentity,
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const WorkspaceManagementParams = Type.Object(
   { workspaceId: Type.String({ pattern: '^[0-9a-f]{24}$' }) },
   { additionalProperties: false },

@@ -304,6 +304,29 @@ export class WorkspaceApplicationService {
     };
   }
 
+  async getPlatformWorkspaceManagementState(_ctx: RequestContext, workspaceId: string) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const workspace = await this.workspaces.findById(id);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+    const owner = await this.identity.findById(workspace.ownerUserId);
+    if (!owner) {
+      throw new AppError({
+        code: 'WORKSPACE_OWNER_INVARIANT_VIOLATION',
+        httpStatus: 500,
+        message: 'The workspace owner identity is unavailable.',
+      });
+    }
+    const displayName = `${owner.firstName} ${owner.lastName}`.trim();
+    return {
+      workspace: safePlatformWorkspaceManagement(workspace),
+      owner: {
+        id: owner._id.toHexString(),
+        ...(displayName ? { displayName } : {}),
+        ...(owner.email ? { email: owner.email } : {}),
+      },
+    };
+  }
+
   async reassignPlatformWorkspaceOwner(
     ctx: RequestContext,
     workspaceId: string,
@@ -313,11 +336,11 @@ export class WorkspaceApplicationService {
     const actor = await this.requirePlatformAccess(ctx);
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     const newOwnerId = objectId(input.ownerUserId, 'USER_NOT_FOUND');
+    const candidate = await this.identity.findById(newOwnerId, tx);
+    if (candidate?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
     const workspace = await this.workspaces.findById(id, tx);
     if (!workspace) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
     if (workspace.version !== input.expectedVersion) throw workspaceVersionConflict();
-    const candidate = await this.identity.findById(newOwnerId, tx);
-    if (candidate?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
     if (workspace.ownerUserId.equals(newOwnerId)) {
       return { workspace: safePlatformWorkspaceManagement(workspace) };
     }

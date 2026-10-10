@@ -196,6 +196,7 @@ user/workspace discovery.
 - `GET /api/v1/me`, `PATCH /api/v1/me`, `GET /api/v1/me/workspaces`
 - `GET /api/v1/platform/workspaces`
 - `GET /api/v1/platform/workspaces/:workspaceId`
+- `GET /api/v1/platform/workspaces/:workspaceId/management-state`
 - `POST /api/v1/platform/workspaces`
 - `GET /api/v1/platform/workspace-owner-candidates`
 - `POST /api/v1/platform/workspaces/:workspaceId/owner`
@@ -245,6 +246,12 @@ unfiltered candidates are ACTIVE users ordered by `_id DESC`. Owner transfers an
 lifecycle commands use expected-version compare-and-set transactions with transactional
 audit and outbox writes. Same-owner and same-status commands are no-op successes and do
 not increment the version or duplicate events.
+
+The dedicated Platform management-state GET exposes the current workspace management
+`version` and minimized authoritative owner identity needed before issuing those
+commands. It uses the same `platform_workspaces.manage` authorization and support
+denial as other Platform workspace reads. The locked directory and detail DTOs remain
+unchanged.
 
 **Main operations:** read/update current user, list user workspaces, create
 workspaces, manage platform memberships, read/update workspaces, create/update/

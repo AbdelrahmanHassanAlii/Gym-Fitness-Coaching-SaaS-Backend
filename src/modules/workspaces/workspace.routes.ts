@@ -29,6 +29,7 @@ import {
   PlatformWorkspaceDirectoryQuery,
   PlatformWorkspaceDirectoryResponse,
   PlatformWorkspaceManagementResponse,
+  PlatformWorkspaceManagementStateResponse,
   ReassignWorkspaceOwnerBody,
   SuccessResponse,
   UpdateBranchBody,
@@ -214,6 +215,38 @@ export async function registerWorkspaceRoutes(
     },
     async (request) =>
       await container.workspaces.listPlatformWorkspaceOwnerCandidates(request.ctx, request.query),
+  );
+
+  app.get<{ Params: Static<typeof WorkspaceManagementParams> }>(
+    '/api/v1/platform/workspaces/:workspaceId/management-state',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        params: WorkspaceManagementParams,
+        response: {
+          200: PlatformWorkspaceManagementStateResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          500: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.getPlatformWorkspaceManagementState(
+        request.ctx,
+        request.params.workspaceId,
+      ),
+    }),
   );
 
   app.post<{

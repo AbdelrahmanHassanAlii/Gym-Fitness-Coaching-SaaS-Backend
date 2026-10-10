@@ -1,7 +1,8 @@
 import type { Static } from '@sinclair/typebox';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
 import { requireAccess } from '../../core/access-control/access-control.middleware';
+import { AppError } from '../../core/errors/app-error';
 import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import { requireAuth } from '../auth/auth.middleware';
 import { Permissions } from '../permissions/permission.registry';
@@ -20,6 +21,8 @@ import {
   MembershipParams,
   PlatformContextResponse,
   PlatformMembershipParams,
+  PlatformWorkspaceDirectoryQuery,
+  PlatformWorkspaceDirectoryResponse,
   SuccessResponse,
   UpdateBranchBody,
   UpdateMeBody,
@@ -99,6 +102,33 @@ export async function registerWorkspaceRoutes(
       const data = await container.workspaces.createWorkspace(request.ctx, request.body);
       return reply.status(201).send({ data });
     },
+  );
+
+  app.get<{ Querystring: Static<typeof PlatformWorkspaceDirectoryQuery> }>(
+    '/api/v1/platform/workspaces',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        querystring: PlatformWorkspaceDirectoryQuery,
+        response: {
+          200: PlatformWorkspaceDirectoryResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          422: ErrorResponse,
+        },
+      },
+    },
+    async (request) =>
+      await container.workspaces.listPlatformWorkspaceDirectory(request.ctx, request.query),
   );
 
   app.get(
@@ -554,4 +584,13 @@ export async function registerWorkspaceRoutes(
       ),
     }),
   );
+}
+
+async function rejectSupportContext(request: FastifyRequest): Promise<void> {
+  if (!request.ctx.supportSessionId) return;
+  throw new AppError({
+    code: 'SUPPORT_ACCESS_FORBIDDEN',
+    httpStatus: 403,
+    message: 'Support context cannot access the Platform workspace directory.',
+  });
 }

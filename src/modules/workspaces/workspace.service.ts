@@ -143,6 +143,39 @@ export class WorkspaceApplicationService {
     };
   }
 
+  async listPlatformWorkspaceDirectory(
+    ctx: RequestContext,
+    query: { cursor?: string; limit?: number },
+  ) {
+    if (ctx.supportSessionId) {
+      throw new AppError({
+        code: 'SUPPORT_ACCESS_FORBIDDEN',
+        httpStatus: 403,
+        message: 'Support context cannot access the Platform workspace directory.',
+      });
+    }
+    const limit = query.limit ?? 50;
+    const afterId = query.cursor === undefined ? undefined : platformWorkspaceCursor(query.cursor);
+    const fetched = await this.workspaces.listPlatformDirectory({
+      ...(afterId ? { afterId } : {}),
+      limit,
+    });
+    const hasMore = fetched.length > limit;
+    const page = fetched.slice(0, limit);
+    return {
+      data: page.map((workspace) => ({
+        id: workspace._id.toHexString(),
+        name: workspace.name,
+        status: workspace.status,
+        createdAt: workspace.createdAt.toISOString(),
+      })),
+      meta: {
+        nextCursor: hasMore ? (page.at(-1)?._id.toHexString() ?? null) : null,
+        hasMore,
+      },
+    };
+  }
+
   async createWorkspace(
     ctx: RequestContext,
     input: {
@@ -1095,6 +1128,17 @@ function safeUser(user: UserDocument) {
     phoneVerified: Boolean(user.phoneVerifiedAt),
     status: user.status,
   };
+}
+
+function platformWorkspaceCursor(value: string): ObjectId {
+  if (!/^[0-9a-f]{24}$/.test(value) || !ObjectId.isValid(value)) {
+    throw new AppError({
+      code: 'CURSOR_INVALID',
+      httpStatus: 422,
+      message: 'The workspace directory cursor is invalid.',
+    });
+  }
+  return new ObjectId(value);
 }
 
 function safeWorkspace(workspace: WorkspaceDocument) {

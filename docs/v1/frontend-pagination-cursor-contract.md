@@ -69,6 +69,19 @@ or mutate cursor values in frontend code.
 
 ## Paginated API Inventory
 
+### Platform Workspace Directory
+
+| Route | Cursor input | Output | Limit | Ordering/tie-breaker | Filters bound to cursor | Invalid cursor |
+| --- | --- | --- | --- | --- | --- | --- |
+| `GET /api/v1/platform/workspaces` | opaque lowercase ObjectId token in `cursor` | `meta.nextCursor`, `meta.hasMore` | default 50, max 100 | fixed `_id DESC` | none; search, filters, and selectable sort are unsupported | `CURSOR_INVALID` 422 |
+
+The directory fetches `limit + 1`, returns at most `limit` rows, and emits the
+last returned row id only when another row exists. An exact-limit page has
+`hasMore: false` and `nextCursor: null`. Traversal is keyset-based rather than a
+snapshot: a newly inserted higher ObjectId appears after a first-page refresh,
+not in continuation pages using an older cursor. Frontends must not decode or
+construct the cursor.
+
 ### Leads
 
 | Route | Cursor input | Output | Limit | Ordering/tie-breaker | Filters bound to cursor | Invalid cursor |
@@ -221,9 +234,8 @@ These routes are list-like but not cursor-paginated in the locked implementation
 
 ## Locked-Stage Protection
 
-- No Stage 2-18 implementation was modified.
-- No cursor implementation, routes, schemas, services, repositories, migrations,
-  tests, OpenAPI artifacts, configuration, generated artifacts, or runtime
-  behavior were changed.
-- This contract documents existing behavior only, including non-uniform response
-  shapes and known `hasMore` limitations.
+- Existing Stage 2-20 cursor contracts remain unchanged.
+- The Platform workspace directory is additive and uses the built-in `_id`
+  index; it adds no migration, persisted field, backfill, package, or config.
+- Existing non-uniform response shapes and known `hasMore` limitations remain
+  documented as implemented.

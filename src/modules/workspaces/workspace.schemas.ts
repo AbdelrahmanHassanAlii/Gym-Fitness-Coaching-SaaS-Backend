@@ -27,6 +27,46 @@ export const PlatformMembershipParams = Type.Object({
 
 export const EmptyQuery = Type.Object({}, { additionalProperties: false });
 
+export const PlatformWorkspaceDirectoryQuery = Type.Object(
+  {
+    cursor: Type.Optional(Type.String()),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+  },
+  { additionalProperties: false },
+);
+
+const WorkspaceStatus = Type.Union([
+  Type.Literal('PENDING_ACTIVATION'),
+  Type.Literal('ACTIVE'),
+  Type.Literal('RESTRICTED'),
+  Type.Literal('SUSPENDED'),
+  Type.Literal('ARCHIVED'),
+]);
+
+const PlatformWorkspaceDirectoryRow = Type.Object(
+  {
+    id: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+    name: Type.String({ minLength: 1 }),
+    status: WorkspaceStatus,
+    createdAt: Type.String({ format: 'date-time' }),
+  },
+  { additionalProperties: false },
+);
+
+export const PlatformWorkspaceDirectoryResponse = Type.Object(
+  {
+    data: Type.Array(PlatformWorkspaceDirectoryRow),
+    meta: Type.Object(
+      {
+        nextCursor: Type.Union([Type.String({ pattern: '^[0-9a-f]{24}$' }), Type.Null()]),
+        hasMore: Type.Boolean(),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const PlatformContextResponse = Type.Object(
   {
     data: Type.Object(

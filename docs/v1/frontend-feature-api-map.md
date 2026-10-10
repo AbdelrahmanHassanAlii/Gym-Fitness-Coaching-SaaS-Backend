@@ -123,6 +123,21 @@ Common loading and error behavior:
 | Error/forbidden states | Inactive workspace, branch archived/inactive, missing branch assignment, permission denial. |
 | Role differences | Owner has broad workspace access; non-owner manager visibility can narrow to assigned branches; platform admin workspace creation is platform context. |
 
+### Platform Workspace Directory V1
+
+| Concern | Contract |
+| --- | --- |
+| Use cases | Read the Platform-authorized workspace directory. Detail and management actions are separate, deferred milestones. |
+| APIs required | `GET /api/v1/platform/workspaces`. |
+| Sequence | Authenticate unrestricted real actor -> satisfy server-side MFA -> require active Platform membership -> require `platform_workspaces.manage` -> request pages. Support context is denied. |
+| Data dependencies | Each row contains exactly `id`, `name`, workspace lifecycle `status`, and `createdAt`. |
+| Permissions | Existing `platform_workspaces.manage`; no workspace-context permission and no effective support identity. |
+| Empty/loading | Empty result is `{ data: [], meta: { nextCursor: null, hasMore: false } }`. |
+| Pagination | Opaque ObjectId cursor, fixed `_id DESC`, default 50, maximum 100. Replay `meta.nextCursor` only when `meta.hasMore` is true. Traversal is keyset-based, not a snapshot. |
+| Search/filter/sort | None in V1. Unsupported query parameters fail validation; sorting is not selectable. |
+| Error/forbidden states | `AUTH_REQUIRED`, `AUTH_SESSION_RESTRICTED`, `TWO_FACTOR_REQUIRED`, `SUPPORT_ACCESS_FORBIDDEN`, `PLATFORM_MEMBERSHIP_REQUIRED`, `PERMISSION_DENIED`, `VALIDATION_FAILED`, `CURSOR_INVALID`. |
+| Role differences | Platform authorization is authoritative. Workspace roles do not grant access. |
+
 ### Staff, Memberships, Invitations, And Branch Assignments
 
 | Concern | Contract |

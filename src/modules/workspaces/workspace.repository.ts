@@ -71,6 +71,19 @@ export class WorkspaceRepository {
     return workspaces.map((workspace) => workspace._id);
   }
 
+  async listPlatformDirectory(input: {
+    afterId?: ObjectId;
+    limit: number;
+  }): Promise<PlatformWorkspaceDirectoryDocument[]> {
+    return await this.workspaces
+      .find(input.afterId ? { _id: { $lt: input.afterId } } : {}, {
+        projection: { _id: 1, name: 1, status: 1, createdAt: 1 },
+      })
+      .sort({ _id: -1 })
+      .limit(input.limit + 1)
+      .toArray();
+  }
+
   async update(
     workspaceId: ObjectId,
     input: {
@@ -122,6 +135,11 @@ export class WorkspaceRepository {
     return result;
   }
 }
+
+export type PlatformWorkspaceDirectoryDocument = Pick<
+  WorkspaceDocument,
+  '_id' | 'name' | 'status' | 'createdAt'
+>;
 
 export class WorkspaceMembershipRepository {
   private readonly memberships: Collection<WorkspaceMembershipDocument>;

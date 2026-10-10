@@ -323,6 +323,7 @@ conflicts, and password reset conflicts.
 
 | Method/path family | Auth | Permission | Body/query | Response | Notes |
 | --- | --- | --- | --- | --- | --- |
+| `GET /api/v1/platform/workspaces` | Bearer + server MFA | `platform_workspaces.manage` | optional opaque `cursor`; `limit` 1-100, default 50 | `{ data: [{ id, name, status, createdAt }], meta: { nextCursor, hasMore } }` | Fixed `_id DESC` keyset traversal. Support context denied. No search, filters, selectable sort, owner/subscription data, or counts. Not snapshot-isolated. |
 | `POST /api/v1/platform/workspaces` | Bearer | `platform_workspaces.manage` | create workspace body | workspace DTO | Platform context. |
 | `GET /api/v1/platform/memberships` | Bearer | `platform_users.read` | optional list filters | memberships | Platform users. |
 | `POST /api/v1/platform/memberships` | Bearer | `platform_users.manage` | create platform membership | membership DTO | Platform admin. |

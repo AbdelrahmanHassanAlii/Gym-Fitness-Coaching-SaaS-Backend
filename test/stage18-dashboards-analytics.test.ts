@@ -18,6 +18,7 @@ import {
 import { INTEGRATION_TEST_TIMEOUT_MS } from './integration-timeouts';
 
 const STAGE18_TEST_TIMEOUT_MS = 120_000;
+const DASHBOARD_FIXTURE_NOW = '2026-10-09T12:00:00.000Z';
 
 describe('Stage 18 dashboards and analytics', () => {
   let container: AppContainer;
@@ -102,11 +103,13 @@ describe('Stage 18 dashboards and analytics', () => {
   );
 
   test('trainer dashboard is assignment-rooted, exact, audited, and has no recent activity', async () => {
-    const response = await app.inject({
-      method: 'GET',
-      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/trainer`,
-      headers: await bearer(container, fixture.trainer.userId),
-    });
+    const response = await withFrozenNow(DASHBOARD_FIXTURE_NOW, async () =>
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/trainer`,
+        headers: await bearer(container, fixture.trainer.userId),
+      }),
+    );
     expect(response.statusCode).toBe(200);
     const data = response.json().data;
     expect(data.summary).toMatchObject({
@@ -131,11 +134,13 @@ describe('Stage 18 dashboards and analytics', () => {
   });
 
   test('gym dashboard computes branch counts and gates recent activity before source queries', async () => {
-    const owner = await app.inject({
-      method: 'GET',
-      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
-      headers: await bearer(container, fixture.owner.userId),
-    });
+    const owner = await withFrozenNow(DASHBOARD_FIXTURE_NOW, async () =>
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
+        headers: await bearer(container, fixture.owner.userId),
+      }),
+    );
     expect(owner.statusCode).toBe(200);
     const data = owner.json().data;
     expect(data.summary).toMatchObject({
@@ -194,11 +199,13 @@ describe('Stage 18 dashboards and analytics', () => {
       container.audit,
     );
 
-    const ownerControl = await app.inject({
-      method: 'GET',
-      url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
-      headers: await bearer(container, fixture.owner.userId),
-    });
+    const ownerControl = await withFrozenNow(DASHBOARD_FIXTURE_NOW, async () =>
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/workspaces/${hex(fixture.workspaceId)}/dashboard/gym?activityLimit=1`,
+        headers: await bearer(container, fixture.owner.userId),
+      }),
+    );
     expect(ownerControl.statusCode).toBe(200);
     expect(ownerControl.json().data.recentActivity.WORKOUT_COMPLETED.items.length).toBeGreaterThan(
       0,
@@ -2198,6 +2205,37 @@ function ctx(userId: ObjectId): RequestContext {
     locale: 'en',
     timezone: 'Africa/Cairo',
   };
+}
+
+async function withFrozenNow<T>(iso: string, run: () => Promise<T>): Promise<T> {
+  const RealDate = Date;
+  const fixed = new RealDate(iso);
+  class FrozenDate extends RealDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) {
+        super(fixed.getTime());
+        return;
+      }
+      if (args.length === 1) {
+        const value = args[0];
+        super(value instanceof RealDate ? value.getTime() : (value as string | number));
+        return;
+      }
+      const [year = 0, month = 0, day = 1, hours = 0, minutes = 0, seconds = 0, milliseconds = 0] =
+        args as number[];
+      super(year, month, day, hours, minutes, seconds, milliseconds);
+    }
+
+    static override now() {
+      return fixed.getTime();
+    }
+  }
+  globalThis.Date = FrozenDate as DateConstructor;
+  try {
+    return await run();
+  } finally {
+    globalThis.Date = RealDate;
+  }
 }
 
 async function auditCount(container: AppContainer, accessKind: string) {

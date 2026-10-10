@@ -1,4 +1,10 @@
-import { type Collection, MongoServerError, ObjectId, type UpdateFilter } from 'mongodb';
+import {
+  type Collection,
+  type Filter,
+  MongoServerError,
+  ObjectId,
+  type UpdateFilter,
+} from 'mongodb';
 import type { Database } from '../../core/database/database';
 import type { TransactionContext } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
@@ -12,6 +18,7 @@ import type {
   WorkspaceStatus,
   WorkspaceType,
 } from './workspace.types';
+import { workspaceNameSearchPrefixes } from './workspace-search';
 
 export class WorkspaceRepository {
   private readonly workspaces: Collection<WorkspaceDocument>;
@@ -41,6 +48,7 @@ export class WorkspaceRepository {
       _id: new ObjectId(),
       type: input.type,
       name: input.name,
+      nameSearchPrefixes: workspaceNameSearchPrefixes(input.name),
       ownerUserId: input.ownerUserId,
       status: input.status ?? 'ACTIVE',
       timezone: input.timezone,
@@ -74,9 +82,16 @@ export class WorkspaceRepository {
   async listPlatformDirectory(input: {
     afterId?: ObjectId;
     limit: number;
+    q?: string;
+    status?: WorkspaceStatus;
   }): Promise<PlatformWorkspaceDirectoryDocument[]> {
+    const filter: Filter<WorkspaceDocument> = {
+      ...(input.afterId ? { _id: { $lt: input.afterId } } : {}),
+      ...(input.q ? { nameSearchPrefixes: input.q } : {}),
+      ...(input.status ? { status: input.status } : {}),
+    };
     return await this.workspaces
-      .find(input.afterId ? { _id: { $lt: input.afterId } } : {}, {
+      .find(filter, {
         projection: { _id: 1, name: 1, status: 1, createdAt: 1 },
       })
       .sort({ _id: -1 })
@@ -99,6 +114,7 @@ export class WorkspaceRepository {
     const now = input.now ?? new Date();
     const set = compact({
       name: input.name,
+      ...(input.name ? { nameSearchPrefixes: workspaceNameSearchPrefixes(input.name) } : {}),
       timezone: input.timezone,
       defaultLanguage: input.defaultLanguage,
       city: input.city,
@@ -112,6 +128,28 @@ export class WorkspaceRepository {
     );
     if (!result) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
     return result;
+  }
+
+  async findPlatformDetailById(
+    workspaceId: ObjectId,
+  ): Promise<PlatformWorkspaceDetailDocument | null> {
+    return await this.workspaces.findOne(
+      { _id: workspaceId },
+      {
+        projection: {
+          _id: 1,
+          name: 1,
+          type: 1,
+          status: 1,
+          timezone: 1,
+          defaultLanguage: 1,
+          country: 1,
+          city: 1,
+          governorate: 1,
+          createdAt: 1,
+        },
+      },
+    );
   }
 
   async activatePending(
@@ -139,6 +177,20 @@ export class WorkspaceRepository {
 export type PlatformWorkspaceDirectoryDocument = Pick<
   WorkspaceDocument,
   '_id' | 'name' | 'status' | 'createdAt'
+>;
+
+export type PlatformWorkspaceDetailDocument = Pick<
+  WorkspaceDocument,
+  | '_id'
+  | 'name'
+  | 'type'
+  | 'status'
+  | 'timezone'
+  | 'defaultLanguage'
+  | 'country'
+  | 'city'
+  | 'governorate'
+  | 'createdAt'
 >;
 
 export class WorkspaceMembershipRepository {

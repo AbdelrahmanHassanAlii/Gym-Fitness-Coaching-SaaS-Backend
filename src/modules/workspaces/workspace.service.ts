@@ -29,8 +29,10 @@ import type {
   WorkspaceDocument,
   WorkspaceMembershipDocument,
   WorkspaceMembershipRole,
+  WorkspaceStatus,
   WorkspaceType,
 } from './workspace.types';
+import { normalizeWorkspaceSearchQuery } from './workspace-search';
 
 export class WorkspaceApplicationService {
   constructor(
@@ -145,7 +147,7 @@ export class WorkspaceApplicationService {
 
   async listPlatformWorkspaceDirectory(
     ctx: RequestContext,
-    query: { cursor?: string; limit?: number },
+    query: { cursor?: string; limit?: number; q?: string; status?: WorkspaceStatus },
   ) {
     if (ctx.supportSessionId) {
       throw new AppError({
@@ -156,8 +158,11 @@ export class WorkspaceApplicationService {
     }
     const limit = query.limit ?? 50;
     const afterId = query.cursor === undefined ? undefined : platformWorkspaceCursor(query.cursor);
+    const q = normalizeWorkspaceSearchQuery(query.q);
     const fetched = await this.workspaces.listPlatformDirectory({
       ...(afterId ? { afterId } : {}),
+      ...(q ? { q } : {}),
+      ...(query.status ? { status: query.status } : {}),
       limit,
     });
     const hasMore = fetched.length > limit;
@@ -173,6 +178,31 @@ export class WorkspaceApplicationService {
         nextCursor: hasMore ? (page.at(-1)?._id.toHexString() ?? null) : null,
         hasMore,
       },
+    };
+  }
+
+  async getPlatformWorkspaceDetail(ctx: RequestContext, workspaceId: string) {
+    if (ctx.supportSessionId) {
+      throw new AppError({
+        code: 'SUPPORT_ACCESS_FORBIDDEN',
+        httpStatus: 403,
+        message: 'Support context cannot access Platform workspace details.',
+      });
+    }
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const workspace = await this.workspaces.findPlatformDetailById(id);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+    return {
+      id: workspace._id.toHexString(),
+      name: workspace.name,
+      type: workspace.type,
+      status: workspace.status,
+      timezone: workspace.timezone,
+      defaultLanguage: workspace.defaultLanguage,
+      ...(workspace.country ? { country: workspace.country } : {}),
+      ...(workspace.city ? { city: workspace.city } : {}),
+      ...(workspace.governorate ? { governorate: workspace.governorate } : {}),
+      createdAt: workspace.createdAt.toISOString(),
     };
   }
 

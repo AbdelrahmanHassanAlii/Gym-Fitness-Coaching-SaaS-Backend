@@ -195,6 +195,7 @@ user/workspace discovery.
 
 - `GET /api/v1/me`, `PATCH /api/v1/me`, `GET /api/v1/me/workspaces`
 - `GET /api/v1/platform/workspaces`
+- `GET /api/v1/platform/workspaces/:workspaceId`
 - `POST /api/v1/platform/workspaces`
 - `GET /api/v1/platform/memberships`, `POST /api/v1/platform/memberships`
 - `POST /api/v1/platform/memberships/:platformMembershipId/suspend`
@@ -218,10 +219,13 @@ user/workspace discovery.
 
 The Platform workspace directory GET is a read-only, Platform-authorized keyset
 list. It requires `platform_workspaces.manage`, rejects support context, accepts
-only opaque `cursor` and bounded `limit` (default 50, maximum 100), and returns
-workspace `id`, `name`, `status`, and `createdAt` only. Ordering is fixed to
-`_id DESC`; it has no search, filters, selectable sort, owner lookup,
-subscription data, or aggregate counts.
+opaque `cursor`, bounded `limit` (default 50, maximum 100), normalized workspace-name
+prefix `q`, and one exact workspace lifecycle `status`. Rows remain exactly
+workspace `id`, `name`, `status`, and `createdAt`. Ordering is fixed to `_id DESC`.
+Search uses a server-derived `nameSearchPrefixes` field and equality indexes; it
+does not accept regex or substring search. The Platform detail GET uses the same
+authorization and returns a minimized workspace profile without owner, membership,
+policy, commercial, deletion/retention, search-key, or aggregate data.
 
 **Main operations:** read/update current user, list user workspaces, create
 workspaces, manage platform memberships, read/update workspaces, create/update/

@@ -3,6 +3,13 @@ import { ErrorResponse, SuccessResponse } from '../auth/auth.schemas';
 
 const WorkspaceType = Type.Union([Type.Literal('GYM'), Type.Literal('INDEPENDENT_TRAINER')]);
 const Language = Type.Union([Type.Literal('ar'), Type.Literal('en')]);
+const WorkspaceStatus = Type.Union([
+  Type.Literal('PENDING_ACTIVATION'),
+  Type.Literal('ACTIVE'),
+  Type.Literal('RESTRICTED'),
+  Type.Literal('SUSPENDED'),
+  Type.Literal('ARCHIVED'),
+]);
 const PlatformMembershipStatus = Type.Union([
   Type.Literal('ACTIVE'),
   Type.Literal('SUSPENDED'),
@@ -31,17 +38,41 @@ export const PlatformWorkspaceDirectoryQuery = Type.Object(
   {
     cursor: Type.Optional(Type.String()),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+    q: Type.Optional(
+      Type.String({
+        description: 'Workspace-name prefix; maximum 64 normalized Unicode code points.',
+      }),
+    ),
+    status: Type.Optional(WorkspaceStatus),
   },
   { additionalProperties: false },
 );
 
-const WorkspaceStatus = Type.Union([
-  Type.Literal('PENDING_ACTIVATION'),
-  Type.Literal('ACTIVE'),
-  Type.Literal('RESTRICTED'),
-  Type.Literal('SUSPENDED'),
-  Type.Literal('ARCHIVED'),
-]);
+export const PlatformWorkspaceDetailParams = Type.Object(
+  { workspaceId: Type.String({ pattern: '^[0-9a-f]{24}$' }) },
+  { additionalProperties: false },
+);
+
+export const PlatformWorkspaceDetailResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        id: Type.String({ pattern: '^[0-9a-f]{24}$' }),
+        name: Type.String({ minLength: 1 }),
+        type: WorkspaceType,
+        status: WorkspaceStatus,
+        timezone: Type.String({ minLength: 1 }),
+        defaultLanguage: Language,
+        country: Type.Optional(Type.String()),
+        city: Type.Optional(Type.String()),
+        governorate: Type.Optional(Type.String()),
+        createdAt: Type.String({ format: 'date-time' }),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
 
 const PlatformWorkspaceDirectoryRow = Type.Object(
   {
@@ -110,16 +141,19 @@ export const InvitationParams = Type.Object({
   invitationId: Type.String(),
 });
 
-export const CreateWorkspaceBody = Type.Object({
-  type: WorkspaceType,
-  name: Type.String({ minLength: 1 }),
-  ownerUserId: Type.String(),
-  timezone: Type.String({ minLength: 1 }),
-  defaultLanguage: Language,
-  country: Type.Optional(Type.String()),
-  city: Type.Optional(Type.String()),
-  governorate: Type.Optional(Type.String()),
-});
+export const CreateWorkspaceBody = Type.Object(
+  {
+    type: WorkspaceType,
+    name: Type.String({ minLength: 1 }),
+    ownerUserId: Type.String(),
+    timezone: Type.String({ minLength: 1 }),
+    defaultLanguage: Language,
+    country: Type.Optional(Type.String()),
+    city: Type.Optional(Type.String()),
+    governorate: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
 
 export const UpdateMeBody = Type.Object(
   {

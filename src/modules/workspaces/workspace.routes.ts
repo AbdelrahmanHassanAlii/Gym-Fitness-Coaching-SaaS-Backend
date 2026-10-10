@@ -21,6 +21,8 @@ import {
   MembershipParams,
   PlatformContextResponse,
   PlatformMembershipParams,
+  PlatformWorkspaceDetailParams,
+  PlatformWorkspaceDetailResponse,
   PlatformWorkspaceDirectoryQuery,
   PlatformWorkspaceDirectoryResponse,
   SuccessResponse,
@@ -129,6 +131,37 @@ export async function registerWorkspaceRoutes(
     },
     async (request) =>
       await container.workspaces.listPlatformWorkspaceDirectory(request.ctx, request.query),
+  );
+
+  app.get<{ Params: Static<typeof PlatformWorkspaceDetailParams> }>(
+    '/api/v1/platform/workspaces/:workspaceId',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        params: PlatformWorkspaceDetailParams,
+        response: {
+          200: PlatformWorkspaceDetailResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+        },
+      },
+    },
+    async (request) => ({
+      data: await container.workspaces.getPlatformWorkspaceDetail(
+        request.ctx,
+        request.params.workspaceId,
+      ),
+    }),
   );
 
   app.get(

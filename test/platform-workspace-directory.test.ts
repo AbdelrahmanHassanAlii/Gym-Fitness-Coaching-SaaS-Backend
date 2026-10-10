@@ -10,6 +10,7 @@ import { MigrationRunner } from '../src/migrations/migration-runner';
 import type { AuthSessionDocument } from '../src/modules/auth/auth.types';
 import type { UserDocument } from '../src/modules/identity/identity.types';
 import { Permissions } from '../src/modules/permissions/permission.registry';
+import { workspaceNameSearchPrefixes } from '../src/modules/workspaces/workspace-search';
 
 const INTEGRATION_TIMEOUT_MS = 30_000;
 let integrationContainer: AppContainer | undefined;
@@ -111,6 +112,80 @@ describe('Platform workspace directory HTTP contract', () => {
     await app.close();
   });
 
+  test('rejects support context before Platform detail authorization or lookup', async () => {
+    const userId = new ObjectId();
+    const calls: string[] = [];
+    const app = await buildApp(
+      fakeContainer({
+        user: activeUser(userId),
+        session: activeSession(userId),
+        resolveSupportContext: async (ctx) => {
+          ctx.supportSessionId = new ObjectId().toHexString();
+        },
+        authorize: async () => {
+          calls.push('authorize');
+          return { allowed: true };
+        },
+        listPlatformWorkspaceDirectory: async () => ({
+          data: [],
+          meta: { nextCursor: null, hasMore: false },
+        }),
+        getPlatformWorkspaceDetail: async () => {
+          calls.push('detail');
+          return {};
+        },
+      }),
+    );
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/platform/workspaces/${new ObjectId().toHexString()}`,
+      headers: {
+        authorization: 'Bearer valid',
+        'x-support-session-id': new ObjectId().toHexString(),
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe('SUPPORT_ACCESS_FORBIDDEN');
+    expect(calls).toEqual([]);
+    await app.close();
+  });
+
+  test('rejects client-controlled workspace search prefixes on create', async () => {
+    const userId = new ObjectId();
+    let createCalled = false;
+    const app = await buildApp(
+      fakeContainer({
+        user: activeUser(userId),
+        session: activeSession(userId),
+        listPlatformWorkspaceDirectory: async () => ({
+          data: [],
+          meta: { nextCursor: null, hasMore: false },
+        }),
+        createWorkspace: async () => {
+          createCalled = true;
+          return {};
+        },
+      }),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/platform/workspaces',
+      headers: { authorization: 'Bearer valid' },
+      payload: {
+        type: 'GYM',
+        name: 'Spoofed',
+        ownerUserId: new ObjectId().toHexString(),
+        timezone: 'Africa/Cairo',
+        defaultLanguage: 'en',
+        nameSearchPrefixes: ['attacker-controlled'],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('VALIDATION_FAILED');
+    expect(createCalled).toBe(false);
+    await app.close();
+  });
+
   test('uses the existing Platform permission and preserves route-level auth failures', async () => {
     const userId = new ObjectId();
     const authorizationRequests: unknown[] = [];
@@ -187,11 +262,33 @@ describe('Platform workspace directory HTTP contract', () => {
     };
     const operation = document.paths['/api/v1/platform/workspaces']?.get;
     expect(operation).toBeDefined();
-    expect(operation?.parameters.map((parameter) => parameter.name)).toEqual(['cursor', 'limit']);
+    expect(operation?.parameters.map((parameter) => parameter.name)).toEqual([
+      'cursor',
+      'limit',
+      'q',
+      'status',
+    ]);
     expect(
       operation?.parameters.find((parameter) => parameter.name === 'limit')?.schema,
     ).toMatchObject({ type: 'integer', minimum: 1, maximum: 100, default: 50 });
+    expect(operation?.parameters.find((parameter) => parameter.name === 'q')?.schema).toMatchObject(
+      { type: 'string' },
+    );
+    expect(
+      operation?.parameters.find((parameter) => parameter.name === 'status')?.schema,
+    ).toMatchObject({
+      anyOf: [
+        { type: 'string', enum: ['PENDING_ACTIVATION'] },
+        { type: 'string', enum: ['ACTIVE'] },
+        { type: 'string', enum: ['RESTRICTED'] },
+        { type: 'string', enum: ['SUSPENDED'] },
+        { type: 'string', enum: ['ARCHIVED'] },
+      ],
+    });
     expect(Object.keys(operation?.responses ?? {})).toEqual(['200', '400', '401', '403', '422']);
+    const detail = document.paths['/api/v1/platform/workspaces/{workspaceId}']?.get;
+    expect(detail).toBeDefined();
+    expect(Object.keys(detail?.responses ?? {})).toEqual(['200', '400', '401', '403', '404']);
     await app.close();
   });
 });
@@ -242,6 +339,7 @@ describe('Platform workspace directory integration', () => {
         'limit=nope',
         'limit=101',
         'search=x',
+        'status=NOPE',
       ]) {
         const response = await directory(actor.token, query);
         expect(response.statusCode).toBe(400);
@@ -253,6 +351,9 @@ describe('Platform workspace directory integration', () => {
         expect(response.json().error.code).toBe('CURSOR_INVALID');
       }
       expect((await directory(actor.token, 'limit=100')).statusCode).toBe(200);
+      const tooLong = await directory(actor.token, `q=${encodeURIComponent('😀'.repeat(65))}`);
+      expect(tooLong.statusCode).toBe(400);
+      expect(tooLong.json().error.code).toBe('VALIDATION_FAILED');
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -384,12 +485,209 @@ describe('Platform workspace directory integration', () => {
     },
     INTEGRATION_TIMEOUT_MS,
   );
+
+  test(
+    'searches normalized English and Arabic name prefixes as literal text and combines status',
+    async () => {
+      const actor = await seedPlatformActor();
+      await insertWorkspace(objectIdFor(1), 'Atlas   Gym', 'ACTIVE');
+      await insertWorkspace(objectIdFor(2), 'ATLAS North', 'ARCHIVED');
+      await insertWorkspace(objectIdFor(3), 'نادي   القاهرة', 'ACTIVE');
+      await insertWorkspace(objectIdFor(4), 'Literal .* Gym', 'ACTIVE');
+
+      expect((await directory(actor.token, 'q=%20ATLAS%20%20g%20')).json().data).toHaveLength(1);
+      expect(
+        (await directory(actor.token, `q=${encodeURIComponent(' نادي  القا ')}`)).json().data,
+      ).toMatchObject([{ name: 'نادي   القاهرة' }]);
+      expect(
+        (await directory(actor.token, `q=${encodeURIComponent('Literal .*')}`)).json().data,
+      ).toMatchObject([{ name: 'Literal .* Gym' }]);
+      expect((await directory(actor.token, 'q=atlas&status=ACTIVE')).json().data).toMatchObject([
+        { name: 'Atlas   Gym', status: 'ACTIVE' },
+      ]);
+      expect((await directory(actor.token, 'q=missing')).json<unknown>()).toEqual({
+        data: [],
+        meta: { nextCursor: null, hasMore: false },
+      });
+      expect((await directory(actor.token, 'q=%20%20')).json().data).toHaveLength(4);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'paginates a stable searched result set in _id DESC order',
+    async () => {
+      const actor = await seedPlatformActor();
+      for (let sequence = 1; sequence <= 7; sequence += 1) {
+        await insertWorkspace(objectIdFor(sequence), `Search Gym ${sequence}`, 'ACTIVE');
+      }
+      await insertWorkspace(objectIdFor(8), 'Other', 'ACTIVE');
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const response = await directory(
+          actor.token,
+          `q=search&status=ACTIVE&limit=3${cursor ? `&cursor=${cursor}` : ''}`,
+        );
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        seen.push(...body.data.map((row: { id: string }) => row.id));
+        cursor = body.meta.nextCursor;
+      } while (cursor);
+      expect(seen).toEqual(
+        Array.from({ length: 7 }, (_, index) => objectIdFor(index + 1).toHexString()).reverse(),
+      );
+      expect(new Set(seen).size).toBe(7);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'returns a minimized Platform detail for every status and reports missing resources',
+    async () => {
+      const actor = await seedPlatformActor();
+      const statuses = [
+        'PENDING_ACTIVATION',
+        'ACTIVE',
+        'RESTRICTED',
+        'SUSPENDED',
+        'ARCHIVED',
+      ] as const;
+      for (const [index, status] of statuses.entries()) {
+        await insertWorkspace(objectIdFor(index + 1), `Detail ${status}`, status);
+        const response = await appInstance().inject({
+          method: 'GET',
+          url: `/api/v1/platform/workspaces/${objectIdFor(index + 1).toHexString()}`,
+          headers: { authorization: `Bearer ${actor.token}` },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data).toEqual({
+          id: objectIdFor(index + 1).toHexString(),
+          name: `Detail ${status}`,
+          type: 'GYM',
+          status,
+          timezone: 'Africa/Cairo',
+          defaultLanguage: 'en',
+          country: 'EG',
+          city: 'Cairo',
+          governorate: 'Cairo',
+          createdAt: '2026-10-09T10:00:00.000Z',
+        });
+      }
+
+      const malformed = await appInstance().inject({
+        method: 'GET',
+        url: '/api/v1/platform/workspaces/not-an-id',
+        headers: { authorization: `Bearer ${actor.token}` },
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.json().error.code).toBe('VALIDATION_FAILED');
+      const missing = await appInstance().inject({
+        method: 'GET',
+        url: `/api/v1/platform/workspaces/${new ObjectId().toHexString()}`,
+        headers: { authorization: `Bearer ${actor.token}` },
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json().error.code).toBe('WORKSPACE_NOT_FOUND');
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'enforces authentication, unrestricted sessions, MFA, active membership, and permission on detail',
+    async () => {
+      const targetId = objectIdFor(20);
+      expect(
+        (
+          await appInstance().inject({
+            method: 'GET',
+            url: `/api/v1/platform/workspaces/${targetId.toHexString()}`,
+          })
+        ).json().error.code,
+      ).toBe('AUTH_REQUIRED');
+
+      const restricted = await seedPlatformActor();
+      await integrationDb()
+        .collection('auth_sessions')
+        .updateOne({ _id: restricted.sessionId }, { $set: { restrictedUntilVerified: true } });
+      expect((await platformDetail(restricted.token, targetId)).json().error.code).toBe(
+        'AUTH_SESSION_RESTRICTED',
+      );
+
+      await clearBusinessCollections();
+      const mfaMissing = await seedPlatformActor({ mfaSatisfied: false });
+      expect((await platformDetail(mfaMissing.token, targetId)).json().error.code).toBe(
+        'TWO_FACTOR_REQUIRED',
+      );
+
+      await clearBusinessCollections();
+      const noMembership = await seedPlatformActor({ membership: false });
+      expect((await platformDetail(noMembership.token, targetId)).json().error.code).toBe(
+        'PLATFORM_MEMBERSHIP_REQUIRED',
+      );
+
+      await clearBusinessCollections();
+      const inactive = await seedPlatformActor({ membershipStatus: 'SUSPENDED' });
+      expect((await platformDetail(inactive.token, targetId)).json().error.code).toBe(
+        'PLATFORM_MEMBERSHIP_REQUIRED',
+      );
+
+      await clearBusinessCollections();
+      const denied = await seedPlatformActor({ allow: false });
+      expect((await platformDetail(denied.token, targetId)).json().error.code).toBe(
+        'PERMISSION_DENIED',
+      );
+
+      await clearBusinessCollections();
+      const allowed = await seedPlatformActor();
+      await insertWorkspace(targetId, 'Allowed Detail', 'ACTIVE');
+      expect((await platformDetail(allowed.token, targetId)).statusCode).toBe(200);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'omits absent locations and never exposes internal detail fields',
+    async () => {
+      const actor = await seedPlatformActor();
+      const id = objectIdFor(21);
+      await insertWorkspace(id, 'Minimal Detail', 'ACTIVE');
+      await integrationDb()
+        .collection('workspaces')
+        .updateOne(
+          { _id: id },
+          {
+            $unset: { country: '', city: '', governorate: '' },
+            $set: {
+              createdFromLeadId: new ObjectId(),
+              deletionLockedAt: new Date(),
+              subscription: { plan: 'SECRET' },
+              counts: { staff: 100 },
+            },
+          },
+        );
+      const response = await platformDetail(actor.token, id);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toEqual({
+        id: id.toHexString(),
+        name: 'Minimal Detail',
+        type: 'GYM',
+        status: 'ACTIVE',
+        timezone: 'Africa/Cairo',
+        defaultLanguage: 'en',
+        createdAt: '2026-10-09T10:00:00.000Z',
+      });
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
 });
 
 function fakeContainer(input: {
   user: UserDocument;
   session: AuthSessionDocument;
   listPlatformWorkspaceDirectory: (query: { cursor?: string; limit?: number }) => Promise<unknown>;
+  getPlatformWorkspaceDetail?: () => Promise<unknown>;
+  createWorkspace?: () => Promise<unknown>;
   resolveSupportContext?: (ctx: { supportSessionId?: string }) => Promise<void>;
   authorize?: (ctx: unknown, request: unknown) => Promise<unknown>;
 }) {
@@ -422,6 +720,8 @@ function fakeContainer(input: {
     auth: {},
     workspaces: {
       listPlatformWorkspaceDirectory: input.listPlatformWorkspaceDirectory,
+      getPlatformWorkspaceDetail: input.getPlatformWorkspaceDetail,
+      createWorkspace: input.createWorkspace,
     },
   } as never;
 }
@@ -608,12 +908,21 @@ async function seedPlatformActor(
     expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
   });
   return {
+    sessionId: session._id,
     token: containerInstance().jwt.createAccessToken({
       userId: userId.toHexString(),
       authSessionId: session._id.toHexString(),
       authenticationMethods: ['pwd'],
     }),
   };
+}
+
+async function platformDetail(token: string, workspaceId: ObjectId) {
+  return await appInstance().inject({
+    method: 'GET',
+    url: `/api/v1/platform/workspaces/${workspaceId.toHexString()}`,
+    headers: { authorization: `Bearer ${token}` },
+  });
 }
 
 async function directory(token: string, query = '') {
@@ -648,6 +957,7 @@ async function insertWorkspace(
       _id: id,
       type: 'GYM',
       name,
+      nameSearchPrefixes: workspaceNameSearchPrefixes(name),
       ownerUserId: new ObjectId(),
       status,
       timezone: 'Africa/Cairo',

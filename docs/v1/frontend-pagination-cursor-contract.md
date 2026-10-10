@@ -73,7 +73,7 @@ or mutate cursor values in frontend code.
 
 | Route | Cursor input | Output | Limit | Ordering/tie-breaker | Filters bound to cursor | Invalid cursor |
 | --- | --- | --- | --- | --- | --- | --- |
-| `GET /api/v1/platform/workspaces` | opaque lowercase ObjectId token in `cursor` | `meta.nextCursor`, `meta.hasMore` | default 50, max 100 | fixed `_id DESC` | none; search, filters, and selectable sort are unsupported | `CURSOR_INVALID` 422 |
+| `GET /api/v1/platform/workspaces` | opaque lowercase ObjectId token in `cursor` | `meta.nextCursor`, `meta.hasMore` | default 50, max 100 | fixed `_id DESC` | optional normalized name-prefix `q` and singular exact lifecycle `status`; both must remain stable | `CURSOR_INVALID` 422 |
 
 The directory fetches `limit + 1`, returns at most `limit` rows, and emits the
 last returned row id only when another row exists. An exact-limit page has
@@ -81,6 +81,10 @@ last returned row id only when another row exists. An exact-limit page has
 snapshot: a newly inserted higher ObjectId appears after a first-page refresh,
 not in continuation pages using an older cursor. Frontends must not decode or
 construct the cursor.
+
+Changing `q` or `status` starts a new traversal from page one. Search is
+case-insensitive normalized starts-with matching on workspace name only; it is not
+substring or regex search. The cursor never encodes filter state.
 
 ### Leads
 
@@ -235,7 +239,9 @@ These routes are list-like but not cursor-paginated in the locked implementation
 ## Locked-Stage Protection
 
 - Existing Stage 2-20 cursor contracts remain unchanged.
-- The Platform workspace directory is additive and uses the built-in `_id`
-  index; it adds no migration, persisted field, backfill, package, or config.
+- The original unfiltered Platform workspace directory continues to use the
+  built-in `_id` index. Migration 024 backfills the internal bounded
+  `nameSearchPrefixes` field and adds the status/search compound indexes needed
+  to preserve `_id DESC` without collection scans or blocking sorts.
 - Existing non-uniform response shapes and known `hasMore` limitations remain
   documented as implemented.

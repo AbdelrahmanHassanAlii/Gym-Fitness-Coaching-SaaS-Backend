@@ -2,6 +2,7 @@ import type { Db, ObjectId } from 'mongodb';
 import { PasswordHasher } from '../../core/auth/password-hasher';
 import { fingerprint } from '../../core/idempotency/idempotency.service';
 import { systemPermissionProfiles } from '../../modules/permissions/permission.registry';
+import { workspaceNameSearchPrefixes } from '../../modules/workspaces/workspace-search';
 import { offsetDays, seedNow, seedWorkspaceTimezone } from './seed-clock';
 import type { SeedDataset } from './seed-config';
 import { SeedIdFactory } from './seed-ids';
@@ -220,10 +221,12 @@ export async function buildV1BusinessSeedPlan(manifest: SeedManifest): Promise<S
   const workspaceAliases = datasetWorkspaceAliases[manifest.dataset];
   workspaceAliases.forEach((alias, index) => {
     const workspaceId = manifest.knownIds.workspaces[alias] ?? id('workspace', alias);
+    const workspaceName = `Seed ${manifest.namespace} ${alias.replace('workspace.', '').replaceAll('_', ' ')}`;
     const doc = {
       _id: workspaceId,
       type: 'GYM',
-      name: `Seed ${manifest.namespace} ${alias.replace('workspace.', '').replaceAll('_', ' ')}`,
+      name: workspaceName,
+      nameSearchPrefixes: workspaceNameSearchPrefixes(workspaceName),
       ownerUserId,
       status: alias.includes('restricted') ? 'RESTRICTED' : 'ACTIVE',
       timezone: seedWorkspaceTimezone,

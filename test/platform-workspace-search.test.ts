@@ -34,21 +34,52 @@ describe('Platform workspace name search normalization', () => {
 });
 
 describe('Platform workspace search migration', () => {
+  test('sorts both backfill and verification traversal by ascending _id', async () => {
+    const sorts: Array<Record<string, number>> = [];
+    const cursor = {
+      sort(specification: Record<string, number>) {
+        sorts.push(specification);
+        return this;
+      },
+      batchSize() {
+        return this;
+      },
+      async *[Symbol.asyncIterator]() {},
+    };
+    const db = {
+      collection() {
+        return {
+          find() {
+            return cursor;
+          },
+          async bulkWrite() {},
+          async createIndexes() {},
+        };
+      },
+    };
+
+    await migration024PlatformWorkspaceSearch.up(db as never);
+
+    expect(sorts).toEqual([{ _id: 1 }, { _id: 1 }]);
+  });
+
   test('backfills missing and stale prefixes in batches and creates only the approved indexes', async () => {
     const client = new MongoClient(mongoUri());
     await client.connect();
     const db = client.db(`platform_workspace_search_migration_${new ObjectId()}`);
     try {
       const workspaces = db.collection('workspaces');
+      const shuffledId = (position: number) =>
+        new ObjectId((253 - position).toString(16).padStart(24, '0'));
       await workspaces.insertMany([
         ...Array.from({ length: 251 }, (_, index) => ({
-          _id: new ObjectId(),
+          _id: shuffledId(index),
           name: `Atlas Gym ${index}`,
           status: 'ACTIVE',
         })),
-        { _id: new ObjectId(), name: ' نادي   القاهرة ', status: 'ARCHIVED' },
+        { _id: shuffledId(251), name: ' نادي   القاهرة ', status: 'ARCHIVED' },
         {
-          _id: new ObjectId(),
+          _id: shuffledId(252),
           name: '😀'.repeat(70),
           status: 'RESTRICTED',
           nameSearchPrefixes: ['stale'],

@@ -227,6 +227,11 @@ does not accept regex or substring search. The Platform detail GET uses the same
 authorization and returns a minimized workspace profile without owner, membership,
 policy, commercial, deletion/retention, search-key, or aggregate data.
 
+Deployment prerequisite: migration `024-platform-workspace-search` must complete
+successfully before application instances serve workspace `q` search traffic.
+Search depends on the backfilled `nameSearchPrefixes` arrays and all three approved
+indexes; there is no regex or collection-scan fallback when that readiness is absent.
+
 **Main operations:** read/update current user, list user workspaces, create
 workspaces, manage platform memberships, read/update workspaces, create/update/
 archive branches, read memberships, invite/revoke/accept staff invitations, manage

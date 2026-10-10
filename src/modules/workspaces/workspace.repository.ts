@@ -114,7 +114,9 @@ export class WorkspaceRepository {
     const now = input.now ?? new Date();
     const set = compact({
       name: input.name,
-      ...(input.name ? { nameSearchPrefixes: workspaceNameSearchPrefixes(input.name) } : {}),
+      ...(input.name !== undefined
+        ? { nameSearchPrefixes: workspaceNameSearchPrefixes(input.name) }
+        : {}),
       timezone: input.timezone,
       defaultLanguage: input.defaultLanguage,
       city: input.city,

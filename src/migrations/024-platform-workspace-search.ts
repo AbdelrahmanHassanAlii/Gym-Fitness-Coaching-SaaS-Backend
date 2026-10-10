@@ -17,6 +17,7 @@ export const migration024PlatformWorkspaceSearch: Migration = {
     const workspaces = db.collection<WorkspaceSearchBackfillDocument>('workspaces');
     const cursor = workspaces
       .find({}, { projection: { _id: 1, name: 1, nameSearchPrefixes: 1 } })
+      .sort({ _id: 1 })
       .batchSize(BACKFILL_BATCH_SIZE);
     let operations: AnyBulkWriteOperation<WorkspaceSearchBackfillDocument>[] = [];
 
@@ -41,6 +42,7 @@ export const migration024PlatformWorkspaceSearch: Migration = {
 
     const verification = workspaces
       .find({}, { projection: { _id: 1, name: 1, nameSearchPrefixes: 1 } })
+      .sort({ _id: 1 })
       .batchSize(BACKFILL_BATCH_SIZE);
     for await (const workspace of verification) {
       if (!sameStrings(workspace.nameSearchPrefixes, workspaceNameSearchPrefixes(workspace.name))) {

@@ -32,7 +32,7 @@ import type {
   WorkspaceStatus,
   WorkspaceType,
 } from './workspace.types';
-import { normalizeWorkspaceSearchQuery } from './workspace-search';
+import { normalizeWorkspaceSearchQuery, workspaceNameForPersistence } from './workspace-search';
 
 export class WorkspaceApplicationService {
   constructor(
@@ -220,6 +220,7 @@ export class WorkspaceApplicationService {
     },
   ) {
     const actor = await this.requirePlatformAccess(ctx);
+    const name = workspaceNameForPersistence(input.name);
     const ownerUserId = objectId(input.ownerUserId, 'USER_NOT_FOUND');
     const owner = await this.identity.findById(ownerUserId);
     if (owner?.status !== 'ACTIVE') throw notFound('USER_NOT_FOUND', 'User not found.');
@@ -228,7 +229,7 @@ export class WorkspaceApplicationService {
       const workspace = await this.workspaces.create(
         {
           type: input.type,
-          name: input.name.trim(),
+          name,
           ownerUserId,
           timezone: input.timezone,
           defaultLanguage: input.defaultLanguage,
@@ -372,11 +373,12 @@ export class WorkspaceApplicationService {
     },
   ) {
     const access = await this.requireWorkspaceAccess(ctx, workspaceId);
+    const name = input.name === undefined ? undefined : workspaceNameForPersistence(input.name);
     return await this.unitOfWork.withTransaction(async (tx) => {
       const workspace = await this.workspaces.update(
         access.workspace._id,
         compact({
-          name: input.name?.trim(),
+          name,
           timezone: input.timezone,
           defaultLanguage: input.defaultLanguage,
           city: input.city,

@@ -487,6 +487,43 @@ describe('Platform workspace directory integration', () => {
   );
 
   test(
+    'filters independently by every workspace status with valid keyset pagination',
+    async () => {
+      const actor = await seedPlatformActor();
+      const statuses = [
+        'PENDING_ACTIVATION',
+        'ACTIVE',
+        'RESTRICTED',
+        'SUSPENDED',
+        'ARCHIVED',
+      ] as const;
+      for (const [statusIndex, status] of statuses.entries()) {
+        await insertWorkspace(objectIdFor(statusIndex * 2 + 1), `${status} One`, status);
+        await insertWorkspace(objectIdFor(statusIndex * 2 + 2), `${status} Two`, status);
+      }
+
+      for (const status of statuses) {
+        const first = await directory(actor.token, `status=${status}&limit=1`);
+        expect(first.statusCode).toBe(200);
+        expect(first.json().data).toHaveLength(1);
+        expect(first.json().data[0].status).toBe(status);
+        expect(first.json().meta.hasMore).toBe(true);
+        expect(first.json().meta.nextCursor).toBe(first.json().data[0].id);
+
+        const second = await directory(
+          actor.token,
+          `status=${status}&limit=1&cursor=${first.json().meta.nextCursor}`,
+        );
+        expect(second.statusCode).toBe(200);
+        expect(second.json().data).toHaveLength(1);
+        expect(second.json().data[0].status).toBe(status);
+        expect(second.json().meta).toEqual({ nextCursor: null, hasMore: false });
+      }
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
     'searches normalized English and Arabic name prefixes as literal text and combines status',
     async () => {
       const actor = await seedPlatformActor();
@@ -510,6 +547,117 @@ describe('Platform workspace directory integration', () => {
         meta: { nextCursor: null, hasMore: false },
       });
       expect((await directory(actor.token, 'q=%20%20')).json().data).toHaveLength(4);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'accepts 64 normalized code points and searches emoji prefixes without splitting them',
+    async () => {
+      const actor = await seedPlatformActor();
+      const maximumQuery = 'A'.repeat(64);
+      await insertWorkspace(objectIdFor(1), `${maximumQuery} Tail`, 'ACTIVE');
+      await insertWorkspace(objectIdFor(2), '😀Rocket Gym', 'ACTIVE');
+
+      const maximum = await directory(actor.token, `q=${maximumQuery}`);
+      expect(maximum.statusCode).toBe(200);
+      expect(maximum.json().data).toMatchObject([{ name: `${maximumQuery} Tail` }]);
+
+      const emojiQuery = '😀R';
+      const emoji = await directory(actor.token, `q=${encodeURIComponent(emojiQuery)}`);
+      expect(emoji.statusCode).toBe(200);
+      expect(emoji.json().data).toMatchObject([{ name: '😀Rocket Gym' }]);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'rejects workspace creation with a Unicode-whitespace-only name without persisting it',
+    async () => {
+      const actor = await seedPlatformActor();
+      const createPayload = {
+        type: 'GYM',
+        ownerUserId: actor.userId.toHexString(),
+        timezone: 'Africa/Cairo',
+        defaultLanguage: 'en',
+      } as const;
+
+      const blankCreate = await appInstance().inject({
+        method: 'POST',
+        url: '/api/v1/platform/workspaces',
+        headers: { authorization: `Bearer ${actor.token}` },
+        payload: { ...createPayload, name: ' \t\u2003 ' },
+      });
+      expect(blankCreate.statusCode).toBe(400);
+      expect(blankCreate.json().error.code).toBe('VALIDATION_FAILED');
+      expect(await integrationDb().collection('workspaces').countDocuments()).toBe(0);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
+
+  test(
+    'rejects a Unicode-whitespace-only rename and preserves name and search prefixes',
+    async () => {
+      const actor = await seedPlatformActor();
+      const createPayload = {
+        type: 'GYM',
+        ownerUserId: actor.userId.toHexString(),
+        timezone: 'Africa/Cairo',
+        defaultLanguage: 'en',
+      } as const;
+
+      const validCreate = await appInstance().inject({
+        method: 'POST',
+        url: '/api/v1/platform/workspaces',
+        headers: { authorization: `Bearer ${actor.token}` },
+        payload: { ...createPayload, name: 'Atlas Gym' },
+      });
+      expect(validCreate.statusCode).toBe(201);
+      const workspaceId = validCreate.json().data.workspace.id as string;
+      const workspacePermissionProfileId = new ObjectId();
+      const now = new Date();
+      await integrationDb()
+        .collection('permission_profiles')
+        .insertOne({
+          _id: workspacePermissionProfileId,
+          workspaceId: new ObjectId(workspaceId),
+          context: 'WORKSPACE',
+          name: 'Workspace rename test profile',
+          permissions: [{ permission: Permissions.WorkspacesUpdate, effect: 'ALLOW' }],
+          isSystemDefault: false,
+          status: 'ACTIVE',
+          version: 0,
+          createdAt: now,
+          updatedAt: now,
+        });
+      await integrationDb()
+        .collection('workspace_memberships')
+        .updateOne(
+          { workspaceId: new ObjectId(workspaceId), userId: actor.userId },
+          { $set: { permissionProfileIds: [workspacePermissionProfileId] } },
+        );
+      const before = await integrationDb()
+        .collection('workspaces')
+        .findOne({ _id: new ObjectId(workspaceId) });
+
+      const blankRename = await appInstance().inject({
+        method: 'PATCH',
+        url: `/api/v1/workspaces/${workspaceId}`,
+        headers: { authorization: `Bearer ${actor.token}` },
+        payload: { name: '\u00a0\u2003\t' },
+      });
+      expect(blankRename.statusCode).toBe(400);
+      expect(blankRename.json().error.code).toBe('VALIDATION_FAILED');
+
+      const after = await integrationDb()
+        .collection('workspaces')
+        .findOne({ _id: new ObjectId(workspaceId) });
+      expect(after?.name).toBe('Atlas Gym');
+      expect(after?.nameSearchPrefixes).toEqual(before?.nameSearchPrefixes);
+      expect(after?.name).not.toBe('');
+      expect((await directory(actor.token, 'q=atlas')).json().data).toMatchObject([
+        { id: workspaceId, name: 'Atlas Gym' },
+      ]);
     },
     INTEGRATION_TIMEOUT_MS,
   );
@@ -908,6 +1056,7 @@ async function seedPlatformActor(
     expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
   });
   return {
+    userId,
     sessionId: session._id,
     token: containerInstance().jwt.createAccessToken({
       userId: userId.toHexString(),

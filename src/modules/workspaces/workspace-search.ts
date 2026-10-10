@@ -6,6 +6,18 @@ export function normalizeWorkspaceSearchText(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/gu, ' ');
 }
 
+export function workspaceNameForPersistence(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new AppError({
+      code: 'VALIDATION_FAILED',
+      httpStatus: 400,
+      message: 'Workspace name must not be empty.',
+    });
+  }
+  return trimmed;
+}
+
 export function normalizeWorkspaceSearchQuery(value?: string): string | undefined {
   if (value === undefined) return undefined;
   const normalized = normalizeWorkspaceSearchText(value);

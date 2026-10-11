@@ -34,6 +34,34 @@ export const PlatformMembershipParams = Type.Object({
 
 export const EmptyQuery = Type.Object({}, { additionalProperties: false });
 
+export const PlatformWorkspaceCountsParams = Type.Object(
+  { workspaceId: Type.String({ pattern: '^[a-fA-F0-9]{24}$' }) },
+  { additionalProperties: false },
+);
+const Count = Type.Integer({ minimum: 0 });
+export const PlatformWorkspaceCountsResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        workspaceId: Type.String(),
+        counts: Type.Object(
+          {
+            branches: Type.Object({ active: Count }, { additionalProperties: false }),
+            trainees: Type.Object(
+              { active: Count, needsReassignment: Count },
+              { additionalProperties: false },
+            ),
+            staff: Type.Object({ activeIncludingOwners: Count }, { additionalProperties: false }),
+          },
+          { additionalProperties: false },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const PlatformWorkspaceDirectoryQuery = Type.Object(
   {
     cursor: Type.Optional(Type.String()),

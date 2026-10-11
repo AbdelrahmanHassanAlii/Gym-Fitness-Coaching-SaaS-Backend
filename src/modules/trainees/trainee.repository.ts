@@ -370,6 +370,13 @@ export class CoachingRelationshipRepository {
     });
   }
 
+  async countByStatus(
+    workspaceId: ObjectId,
+    status: 'ACTIVE' | 'NEEDS_REASSIGNMENT',
+  ): Promise<number> {
+    return await this.relationships.countDocuments({ workspaceId, status });
+  }
+
   async createAssignment(
     input: {
       workspaceId: ObjectId;

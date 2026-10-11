@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
 import { requireAccess } from '../../core/access-control/access-control.middleware';
 import type { TransactionContext } from '../../core/database/unit-of-work';
+import { AppError } from '../../core/errors/app-error';
 import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import type { RequestContext } from '../../core/request-context/request-context';
 import { requireAuth } from '../auth/auth.middleware';
@@ -17,8 +18,10 @@ import {
   ErrorResponse,
   PaymentParams,
   PlanParams,
+  PlatformSubscriptionSummaryResponse,
   RejectPaymentBody,
   StartTrialBody,
+  SubscriptionSummaryParams,
   TransitionSubscriptionBody,
   UpdatePlanBody,
   WorkspaceParams,
@@ -28,6 +31,51 @@ export async function registerSubscriptionRoutes(
   app: FastifyInstance,
   container: AppContainer,
 ): Promise<void> {
+  app.get<{ Params: Static<typeof SubscriptionSummaryParams> }>(
+    '/api/v1/platform/workspaces/:workspaceId/subscription-summary',
+    {
+      preHandler: [
+        requireAuth(),
+        async (request) => {
+          if (request.ctx.supportSessionId) {
+            throw new AppError({
+              code: 'SUPPORT_ACCESS_FORBIDDEN',
+              httpStatus: 403,
+              message: 'Support context cannot access Platform subscription summaries.',
+            });
+          }
+        },
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.SubscriptionsRead,
+        }),
+      ],
+      schema: {
+        tags: ['Subscriptions', 'Platform'],
+        description:
+          'Read-only subscription summary. Requires subscriptions.read; support context is forbidden. Missing subscriptions return null. Term dates describe validity, not invoice cycles.',
+        params: SubscriptionSummaryParams,
+        response: {
+          200: PlatformSubscriptionSummaryResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          500: ErrorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      reply.header('Cache-Control', 'private, no-store');
+      return {
+        data: await container.subscriptions.getPlatformSubscriptionSummary(
+          request.ctx,
+          request.params.workspaceId,
+        ),
+      };
+    },
+  );
+
   app.get<{ Params: Static<typeof WorkspaceParams> }>(
     '/api/v1/workspaces/:workspaceId/subscription',
     {

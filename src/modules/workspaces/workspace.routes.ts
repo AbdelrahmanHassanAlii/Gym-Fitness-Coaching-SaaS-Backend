@@ -24,6 +24,8 @@ import {
   OwnerCandidateResponse,
   PlatformContextResponse,
   PlatformMembershipParams,
+  PlatformWorkspaceCountsParams,
+  PlatformWorkspaceCountsResponse,
   PlatformWorkspaceDetailParams,
   PlatformWorkspaceDetailResponse,
   PlatformWorkspaceDirectoryQuery,
@@ -43,6 +45,43 @@ export async function registerWorkspaceRoutes(
   app: FastifyInstance,
   container: AppContainer,
 ): Promise<void> {
+  app.get<{ Params: Static<typeof PlatformWorkspaceCountsParams> }>(
+    '/api/v1/platform/workspaces/:workspaceId/counts',
+    {
+      preHandler: [
+        requireAuth(),
+        rejectSupportContext,
+        requireAccess(container, {
+          context: 'PLATFORM',
+          permission: Permissions.PlatformWorkspacesManage,
+        }),
+      ],
+      schema: {
+        tags: ['Workspaces', 'Platform'],
+        description:
+          'Live workspace counts. Requires platform_workspaces.manage; support context is forbidden. Counts active branches, ACTIVE and NEEDS_REASSIGNMENT relationships separately, and ACTIVE staff memberships including owners. Counts are not historical snapshots.',
+        params: PlatformWorkspaceCountsParams,
+        response: {
+          200: PlatformWorkspaceCountsResponse,
+          400: ErrorResponse,
+          401: ErrorResponse,
+          403: ErrorResponse,
+          404: ErrorResponse,
+          500: ErrorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      reply.header('Cache-Control', 'private, no-store');
+      return {
+        data: await container.workspaces.getPlatformWorkspaceCounts(
+          request.ctx,
+          request.params.workspaceId,
+        ),
+      };
+    },
+  );
+
   app.get(
     '/api/v1/me',
     {

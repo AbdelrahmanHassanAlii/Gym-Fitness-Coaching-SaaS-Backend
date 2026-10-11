@@ -174,6 +174,47 @@ export class SubscriptionApplicationService {
     return subscriptionReadModel(subscription, terms, usage);
   }
 
+  async getPlatformSubscriptionSummary(_ctx: RequestContext, workspaceId: string) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    await this.assertWorkspaceExists(id);
+    const subscription = await this.subscriptions.findByWorkspaceId(id);
+    if (!subscription) return { workspaceId: id.toHexString(), subscription: null };
+
+    const terms = await this.subscriptions.findCurrentTerms(subscription);
+    const referencedPlan = terms ? await this.plans.findVersionWithPlan(terms.planVersionId) : null;
+    if ((subscription.currentTermsId && !terms) || (terms && !referencedPlan)) {
+      throw new AppError({
+        code: 'SUBSCRIPTION_SUMMARY_INTEGRITY_ERROR',
+        httpStatus: 500,
+        message: 'Subscription summary is unavailable.',
+      });
+    }
+
+    return {
+      workspaceId: id.toHexString(),
+      subscription: {
+        lifecycleStatus: subscription.lifecycleStatus,
+        startedAt: subscription.startedAt?.toISOString() ?? null,
+        expiresAt: subscription.expiresAt?.toISOString() ?? null,
+        graceEndsAt: subscription.graceEndsAt?.toISOString() ?? null,
+        frozenAt: subscription.frozenAt?.toISOString() ?? null,
+        expiredAt: subscription.expiredAt?.toISOString() ?? null,
+        cancelledAt: subscription.cancelledAt?.toISOString() ?? null,
+        currentTerms:
+          terms && referencedPlan
+            ? {
+                planId: referencedPlan.plan._id.toHexString(),
+                planName: referencedPlan.plan.name,
+                planVersionId: terms.planVersionId.toHexString(),
+                billingPeriod: terms.billingPeriod,
+                effectiveFrom: terms.effectiveFrom.toISOString(),
+                effectiveTo: terms.effectiveTo?.toISOString() ?? null,
+              }
+            : null,
+      },
+    };
+  }
+
   async getWorkspaceUsage(_ctx: RequestContext, workspaceId: string) {
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     await this.assertWorkspaceExists(id);

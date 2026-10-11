@@ -15,6 +15,7 @@ import type {
   EntitlementService,
   SubscriptionApplicationService,
 } from '../subscriptions/subscription.service';
+import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type {
   BranchRepository,
   InvitationRepository,
@@ -49,7 +50,35 @@ export class WorkspaceApplicationService {
     private readonly outbox: OutboxWriter,
     private readonly entitlements?: EntitlementService,
     private readonly subscriptions?: SubscriptionApplicationService,
+    private readonly coachingRelationships?: CoachingRelationshipRepository,
   ) {}
+
+  async getPlatformWorkspaceCounts(_ctx: RequestContext, workspaceId: string) {
+    const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
+    const workspace = await this.workspaces.findById(id);
+    if (!workspace) throw notFound('WORKSPACE_NOT_FOUND', 'Workspace not found.');
+    if (!this.coachingRelationships) {
+      throw new AppError({
+        code: 'WORKSPACE_COUNTS_UNAVAILABLE',
+        httpStatus: 500,
+        message: 'Workspace counts are unavailable.',
+      });
+    }
+    const [branches, activeTrainees, needsReassignment, staff] = await Promise.all([
+      this.branches.countActive(id),
+      this.coachingRelationships.countByStatus(id, 'ACTIVE'),
+      this.coachingRelationships.countByStatus(id, 'NEEDS_REASSIGNMENT'),
+      this.memberships.countActiveIncludingOwners(id),
+    ]);
+    return {
+      workspaceId: id.toHexString(),
+      counts: {
+        branches: { active: branches },
+        trainees: { active: activeTrainees, needsReassignment },
+        staff: { activeIncludingOwners: staff },
+      },
+    };
+  }
 
   async me(ctx: RequestContext) {
     const { user, session } = await this.requireAuthenticatedUser(ctx, { allowRestricted: true });

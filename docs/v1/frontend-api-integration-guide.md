@@ -18,6 +18,10 @@ behavior for frontend engineers without exposing unnecessary internal database
 details. Specialized follow-up issues own deeper contracts for feature mapping,
 errors, pagination, time/timezone, files, notifications, and support access.
 
+The additive [Platform workspace subscription and counts contract](platform-workspace-subscription-counts.md)
+documents the dedicated read-only subscription summary and live operational counts,
+their separate Platform permissions, and support-context denial.
+
 ## Evidence Used
 
 - `docs/v1/backend-module-inventory.md`

@@ -1,5 +1,6 @@
-import { Type } from '@sinclair/typebox';
+import { type Static, type TSchema, Type } from '@sinclair/typebox';
 import { ErrorResponse } from '../auth/auth.schemas';
+import { SubscriptionLifecycleStatuses } from './subscription.types';
 
 const BillingPeriod = Type.Union([Type.Literal('MONTHLY'), Type.Literal('YEARLY')]);
 const CustomerType = Type.Union([Type.Literal('INDIVIDUAL_TRAINER'), Type.Literal('GYM')]);
@@ -14,6 +15,56 @@ const Limits = Type.Object(
 );
 
 export const WorkspaceParams = Type.Object({ workspaceId: Type.String() });
+export const SubscriptionSummaryParams = Type.Object(
+  { workspaceId: Type.String({ pattern: '^[a-fA-F0-9]{24}$' }) },
+  { additionalProperties: false },
+);
+
+function nullable<T extends TSchema>(schema: T) {
+  return Type.Unsafe<Static<T> | null>({ ...schema, nullable: true });
+}
+
+const NullableDate = nullable(Type.String({ format: 'date-time' }));
+export const PlatformSubscriptionSummaryResponse = Type.Object(
+  {
+    data: Type.Object(
+      {
+        workspaceId: Type.String(),
+        subscription: nullable(
+          Type.Object(
+            {
+              lifecycleStatus: Type.Union(
+                SubscriptionLifecycleStatuses.map((status) => Type.Literal(status)),
+              ),
+              startedAt: NullableDate,
+              expiresAt: NullableDate,
+              graceEndsAt: NullableDate,
+              frozenAt: NullableDate,
+              expiredAt: NullableDate,
+              cancelledAt: NullableDate,
+              currentTerms: nullable(
+                Type.Object(
+                  {
+                    planId: Type.String(),
+                    planName: Type.String(),
+                    planVersionId: Type.String(),
+                    billingPeriod: BillingPeriod,
+                    effectiveFrom: Type.String({ format: 'date-time' }),
+                    effectiveTo: NullableDate,
+                  },
+                  { additionalProperties: false },
+                ),
+              ),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
 export const PlanParams = Type.Object({ planId: Type.String() });
 export const PaymentParams = Type.Object({ paymentId: Type.String() });
 

@@ -253,6 +253,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     outbox,
     entitlements,
     subscriptions,
+    coachingRelationships,
   );
   const auth = new AuthApplicationService(
     config,

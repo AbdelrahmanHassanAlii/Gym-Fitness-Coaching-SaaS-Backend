@@ -363,6 +363,14 @@ export class WorkspaceMembershipRepository {
     return await this.memberships.find({ workspaceId }).sort({ joinedAt: -1 }).toArray();
   }
 
+  async countActiveIncludingOwners(workspaceId: ObjectId): Promise<number> {
+    return await this.memberships.countDocuments({
+      workspaceId,
+      status: 'ACTIVE',
+      roles: { $in: ['GYM_OWNER', 'GYM_MANAGER', 'TRAINER', 'ASSISTANT_TRAINER', 'NUTRITIONIST'] },
+    });
+  }
+
   async findByIdInWorkspace(
     workspaceId: ObjectId,
     membershipId: ObjectId,
@@ -662,6 +670,10 @@ export class BranchRepository {
 
   async listByWorkspace(workspaceId: ObjectId): Promise<BranchDocument[]> {
     return await this.branches.find({ workspaceId }).sort({ createdAt: -1 }).toArray();
+  }
+
+  async countActive(workspaceId: ObjectId): Promise<number> {
+    return await this.branches.countDocuments({ workspaceId, status: 'ACTIVE' });
   }
 
   async findByIdInWorkspace(

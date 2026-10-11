@@ -11,6 +11,7 @@ import type { IdentityRepository } from '../identity/identity.repository';
 import type { UserDocument } from '../identity/identity.types';
 import type { PlatformMembershipRepository } from '../platform/platform.repository';
 import type { PlatformMembershipDocument } from '../platform/platform.types';
+import { managementError, type PlatformAuthorityGuard } from '../platform/platform-authority.guard';
 import type {
   EntitlementService,
   SubscriptionApplicationService,
@@ -51,6 +52,7 @@ export class WorkspaceApplicationService {
     private readonly entitlements?: EntitlementService,
     private readonly subscriptions?: SubscriptionApplicationService,
     private readonly coachingRelationships?: CoachingRelationshipRepository,
+    private readonly authorityGuard?: PlatformAuthorityGuard,
   ) {}
 
   async getPlatformWorkspaceCounts(_ctx: RequestContext, workspaceId: string) {
@@ -525,7 +527,6 @@ export class WorkspaceApplicationService {
     platformMembershipId: string,
     command: 'suspend' | 'reactivate' | 'end',
   ) {
-    const actor = await this.requirePlatformAccess(ctx);
     const id = objectId(platformMembershipId, 'PLATFORM_MEMBERSHIP_NOT_FOUND');
     const transition =
       command === 'suspend'
@@ -534,6 +535,17 @@ export class WorkspaceApplicationService {
           ? { from: ['SUSPENDED', 'ENDED'] as const, to: 'ACTIVE' as const }
           : { from: ['ACTIVE', 'SUSPENDED'] as const, to: 'ENDED' as const };
     return await this.unitOfWork.withTransaction(async (tx) => {
+      await this.authorityGuard?.serialize(tx);
+      await this.authorityGuard?.authorize(ctx, 'platform_users.manage', tx);
+      const actor = await this.requirePlatformAccess(ctx);
+      const target = await this.platformMemberships.findById(id, tx);
+      if (target?.userId.toHexString() === ctx.userId)
+        throw managementError('PLATFORM_MEMBERSHIP_SELF_MUTATION_FORBIDDEN', 403);
+      if (command === 'reactivate' && target) {
+        const account = await this.identity.findById(target.userId, tx);
+        if (account?.status !== 'ACTIVE')
+          throw managementError('PLATFORM_MEMBERSHIP_TARGET_ACCOUNT_INACTIVE', 409);
+      }
       const membership = await this.platformMemberships.transition(
         id,
         [...transition.from],
@@ -542,7 +554,15 @@ export class WorkspaceApplicationService {
         tx,
       );
       const eventType = platformMembershipEvent(command);
-      await this.writeBusinessAudit(ctx, actor, eventType, membership, command, tx);
+      await this.writeBusinessAudit(ctx, actor, eventType, membership, command, tx, {
+        targetMembershipId: membership._id.toHexString(),
+        targetUserId: membership.userId.toHexString(),
+        previousStatus: target?.status,
+        status: membership.status,
+        previousVersion: target?.version,
+        version: membership.version,
+        command,
+      });
       await this.writeOutbox(
         ctx,
         undefined,
@@ -1266,6 +1286,7 @@ export class WorkspaceApplicationService {
     entity: { _id: ObjectId } | ObjectId,
     action: string,
     tx: TransactionContext,
+    metadata?: Record<string, unknown>,
   ) {
     const entityId = entity instanceof ObjectId ? entity : entity._id;
     await this.audit.write(
@@ -1281,6 +1302,12 @@ export class WorkspaceApplicationService {
         },
         entity: { type: eventType, id: entityId },
         action,
+        ...(metadata
+          ? {
+              before: { status: metadata.previousStatus, version: metadata.previousVersion },
+              after: metadata,
+            }
+          : {}),
         ipAddress: ctx.ipAddress,
         correlationId: ctx.correlationId,
       },

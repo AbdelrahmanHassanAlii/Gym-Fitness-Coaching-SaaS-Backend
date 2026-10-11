@@ -1578,6 +1578,11 @@ class CountingAnalyticsRepository extends AnalyticsRepository {
 }
 
 async function seedStage18Fixture(container: AppContainer) {
+  // Provision durable recovery separately from actors whose analytics authority is under test.
+  await seedPlatformActor(container, [
+    Permissions.PlatformMembershipsManage,
+    Permissions.PlatformPermissionsManage,
+  ]);
   const db = container.database.db;
   const now = new Date('2026-09-20T10:00:00.000Z');
   const owner = await seedActor(container, 'GYM_OWNER');

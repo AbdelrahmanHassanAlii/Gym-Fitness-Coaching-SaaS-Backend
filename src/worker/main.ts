@@ -7,6 +7,7 @@ import { ExportJobRunner } from '../modules/exports/export.jobs';
 import { FileJobRunner } from '../modules/files/file.jobs';
 import { NotificationJobRunner } from '../modules/notifications/notification.jobs';
 import { registerNotificationOutboxHandlers } from '../modules/notifications/notification.outbox-handlers';
+import { registerPlatformLifecycleOutboxHandlers } from '../modules/platform/platform-lifecycle.outbox-handlers';
 import { RetentionJobRunner } from '../modules/retention/retention.jobs';
 import { SubscriptionJobRunner } from '../modules/subscriptions/subscription.jobs';
 import { SupportAccessJobRunner } from '../modules/support-access/support-access.jobs';
@@ -17,6 +18,7 @@ const logger = createLogger(config).child({ process: 'worker', workerId: config.
 const container = await createAppContainer(config);
 const outbox = new OutboxProcessor(container.database, config, logger);
 registerTraineeOutboxHandlers(outbox, container.trainees);
+registerPlatformLifecycleOutboxHandlers(outbox);
 registerNotificationOutboxHandlers(outbox, container.notifications);
 const subscriptionJobs = new SubscriptionJobRunner(container);
 const checkInJobs = new CheckInJobRunner(container);

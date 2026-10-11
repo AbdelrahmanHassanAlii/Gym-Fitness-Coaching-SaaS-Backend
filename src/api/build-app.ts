@@ -20,6 +20,7 @@ import { registerNotificationRoutes } from '../modules/notifications/notificatio
 import { registerNutritionRoutes } from '../modules/nutrition/nutrition.routes';
 import { registerPermissionRoutes } from '../modules/permissions/permission.routes';
 import { registerPlatformUserRoutes } from '../modules/platform-users/platform-user.routes';
+import { registerPlatformUserManagementRoutes } from '../modules/platform-users/platform-user-management.routes';
 import { registerProgressRoutes } from '../modules/progress/progress.routes';
 import { registerRetentionRoutes } from '../modules/retention/retention.routes';
 import { registerSubscriptionRoutes } from '../modules/subscriptions/subscription.routes';
@@ -136,6 +137,7 @@ export async function buildApp(container: AppContainer) {
   await registerWorkspaceRoutes(app, container);
   await registerPermissionRoutes(app, container);
   await registerPlatformUserRoutes(app, container);
+  await registerPlatformUserManagementRoutes(app, container);
   await registerSubscriptionRoutes(app, container);
   await registerLeadRoutes(app, container);
   await registerTraineeRoutes(app, container);

@@ -213,6 +213,7 @@ export async function buildV1BusinessSeedPlan(manifest: SeedManifest): Promise<S
       status: 'ACTIVE',
       permissionProfileIds: [],
       accessVersion: 1,
+      version: 0,
       createdAt: seedNow,
       updatedAt: seedNow,
     });

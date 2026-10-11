@@ -6,6 +6,7 @@ import { AppError } from '../../core/errors/app-error';
 import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import type { PlatformMembershipRepository } from '../platform/platform.repository';
+import type { PlatformAuthorityGuard } from '../platform/platform-authority.guard';
 import type {
   BranchRepository,
   WorkspaceMembershipRepository,
@@ -40,6 +41,7 @@ export class PermissionApplicationService {
     private readonly workspaceMemberships: WorkspaceMembershipRepository,
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly authorityGuard?: PlatformAuthorityGuard,
   ) {}
 
   async listDefinitions() {
@@ -107,6 +109,8 @@ export class PermissionApplicationService {
   ) {
     await this.validateProfileEntries(ctx, 'PLATFORM', input.permissions);
     return await this.unitOfWork.withTransaction(async (tx) => {
+      await this.authorityGuard?.serialize(tx);
+      await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
       const createInput: {
         context: 'PLATFORM';
         name: string;
@@ -155,6 +159,12 @@ export class PermissionApplicationService {
         workspaceObjectId,
       );
     return await this.unitOfWork.withTransaction(async (tx) => {
+      if (existing.context === 'PLATFORM') {
+        await this.authorityGuard?.serialize(tx);
+        await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
+        if (input.permissions)
+          await this.validateProfileEntries(ctx, 'PLATFORM', input.permissions);
+      }
       const now = new Date();
       const updateInput: { name?: string; permissions?: PermissionProfileEntry[] } = {};
       if (input.name) updateInput.name = input.name.trim();
@@ -165,7 +175,7 @@ export class PermissionApplicationService {
         { ...updateInput, now },
         tx,
       );
-      if (platformPermissionsChanged) {
+      if (platformPermissionsChanged && !this.authorityGuard) {
         await this.platformMemberships.bumpAccessVersionForAssignedProfile(id, now, tx);
       }
       await this.writeAudit(
@@ -200,9 +210,13 @@ export class PermissionApplicationService {
       : undefined;
     await this.requireProfileContext(id, workspaceObjectId);
     return await this.unitOfWork.withTransaction(async (tx) => {
+      if (workspaceObjectId === undefined) {
+        await this.authorityGuard?.serialize(tx);
+        await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
+      }
       const now = new Date();
       const profile = await this.profiles.archive(id, expectedVersion, now, tx);
-      if (profile.context === 'PLATFORM') {
+      if (profile.context === 'PLATFORM' && !this.authorityGuard) {
         await this.platformMemberships.bumpAccessVersionForAssignedProfile(id, now, tx);
       }
       await this.writeAudit(
@@ -282,6 +296,10 @@ export class PermissionApplicationService {
     await this.assertAssignableProfiles('PLATFORM', profileIds);
     await this.assertCanDelegateProfiles(ctx, 'PLATFORM', profileIds);
     return await this.unitOfWork.withTransaction(async (tx) => {
+      await this.authorityGuard?.serialize(tx);
+      await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
+      await this.assertAssignableProfiles('PLATFORM', profileIds);
+      await this.assertCanDelegateProfiles(ctx, 'PLATFORM', profileIds);
       const updated = await this.platformMemberships.replacePermissionProfiles(
         membershipObjectId,
         input.expectedVersion,
@@ -407,6 +425,10 @@ export class PermissionApplicationService {
     grants: ValidatedGrant[],
   ) {
     return await this.unitOfWork.withTransaction(async (tx) => {
+      if (context === 'PLATFORM') {
+        await this.authorityGuard?.serialize(tx);
+        await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
+      }
       if (subjectType === 'WORKSPACE_MEMBERSHIP' && workspaceId) {
         await this.workspaceMemberships.bumpAccessVersion(
           workspaceId,

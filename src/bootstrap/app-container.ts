@@ -48,8 +48,10 @@ import {
 } from '../modules/permissions/permission.repository';
 import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
+import { PlatformAuthorityGuard } from '../modules/platform/platform-authority.guard';
 import { PlatformUserRepository } from '../modules/platform-users/platform-user.repository';
 import { PlatformUserApplicationService } from '../modules/platform-users/platform-user.service';
+import { PlatformUserManagementService } from '../modules/platform-users/platform-user-management.service';
 import { ProgressRepository } from '../modules/progress/progress.repository';
 import { ProgressApplicationService } from '../modules/progress/progress.service';
 import { RetentionRepository } from '../modules/retention/retention.repository';
@@ -137,6 +139,8 @@ export interface AppContainer {
   analytics: AnalyticsApplicationService;
   workspaces: WorkspaceApplicationService;
   platformUsers: PlatformUserApplicationService;
+  platformUserManagement: PlatformUserManagementService;
+  platformAuthorityGuard: PlatformAuthorityGuard;
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
@@ -167,10 +171,19 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const authSecurityEvents = new AuthSecurityEventWriter(database);
   const auditRepo = new AuditRepository(database);
   const analyticsRepo = new AnalyticsRepository(database);
-  const platformMemberships = new PlatformMembershipRepository(database);
+  const platformAuthorityGuard = new PlatformAuthorityGuard(database);
+  const platformMemberships = new PlatformMembershipRepository(
+    database,
+    unitOfWork,
+    platformAuthorityGuard,
+  );
   const permissionDefinitions = new PermissionDefinitionRepository(database);
-  const permissionProfiles = new PermissionProfileRepository(database);
-  const accessGrants = new AccessGrantRepository(database);
+  const permissionProfiles = new PermissionProfileRepository(
+    database,
+    unitOfWork,
+    platformAuthorityGuard,
+  );
+  const accessGrants = new AccessGrantRepository(database, unitOfWork, platformAuthorityGuard);
   const workspaceRepo = new WorkspaceRepository(database);
   const workspaceMemberships = new WorkspaceMembershipRepository(database);
   const branches = new BranchRepository(database);
@@ -182,6 +195,13 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const refreshTokens = new RefreshTokenService(database, credentialDigests);
   const audit = new AuditWriter(database);
   const outbox = new OutboxWriter(database);
+  const platformUserManagement = new PlatformUserManagementService(
+    database,
+    platformMemberships,
+    platformAuthorityGuard,
+    audit,
+    outbox,
+  );
   const idempotency = new IdempotencyService(database);
   const subscriptionPlans = new SubscriptionPlanRepository(database);
   const subscriptionsRepo = new SubscriptionRepository(database);
@@ -257,6 +277,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     entitlements,
     subscriptions,
     coachingRelationships,
+    platformAuthorityGuard,
   );
   const auth = new AuthApplicationService(
     config,
@@ -436,6 +457,8 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
     accessControl,
+    platformUserManagement,
+    platformAuthorityGuard,
     platformUsers: new PlatformUserApplicationService(
       new PlatformUserRepository(database),
       accessControl,
@@ -500,6 +523,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       workspaceMemberships,
       audit,
       outbox,
+      platformAuthorityGuard,
     ),
     entitlements,
     subscriptions,

@@ -3,6 +3,8 @@ import type { Database } from './database';
 
 export interface TransactionContext {
   session: ClientSession;
+  beforeCommit?: Map<string, () => Promise<void>>;
+  platformAccessRevisionSubjects?: Set<string>;
 }
 
 const defaultTransactionOptions: TransactionOptions = {
@@ -19,7 +21,12 @@ export class UnitOfWork {
   ): Promise<T> {
     const session = this.database.client.startSession();
     try {
-      return await session.withTransaction(() => operation({ session }), options);
+      return await session.withTransaction(async () => {
+        const tx: TransactionContext = { session, beforeCommit: new Map() };
+        const result = await operation(tx);
+        for (const check of tx.beforeCommit?.values() ?? []) await check();
+        return result;
+      }, options);
     } finally {
       await session.endSession();
     }

@@ -1,7 +1,11 @@
 import { type Collection, MongoServerError, ObjectId } from 'mongodb';
 import type { Database } from '../../core/database/database';
-import type { TransactionContext } from '../../core/database/unit-of-work';
+import type { TransactionContext, UnitOfWork } from '../../core/database/unit-of-work';
 import { AppError } from '../../core/errors/app-error';
+import {
+  assertAssignedMembershipRevisionCapacity,
+  type PlatformAuthorityGuard,
+} from '../platform/platform-authority.guard';
 import type {
   AccessGrantDocument,
   AccessGrantSubjectType,
@@ -39,7 +43,11 @@ export class PermissionDefinitionRepository {
 export class PermissionProfileRepository {
   private readonly profiles: Collection<PermissionProfileDocument>;
 
-  constructor(database: Database) {
+  constructor(
+    private readonly database: Database,
+    private readonly unitOfWork?: UnitOfWork,
+    private readonly authorityGuard?: PlatformAuthorityGuard,
+  ) {
     this.profiles = database.db.collection<PermissionProfileDocument>('permission_profiles');
   }
 
@@ -48,6 +56,72 @@ export class PermissionProfileRepository {
       .find({ context: 'WORKSPACE', workspaceId, status: 'ACTIVE' })
       .sort({ name: 1 })
       .toArray();
+  }
+
+  private async protectedProfileWrite<T>(
+    profileId: ObjectId,
+    tx: TransactionContext | undefined,
+    operation: (tx?: TransactionContext) => Promise<T>,
+  ): Promise<T> {
+    if (!this.authorityGuard) return await operation(tx);
+    if (!tx) {
+      if (!this.unitOfWork) throw new Error('Platform profile writes require UnitOfWork.');
+      return await this.unitOfWork.withTransaction((next) =>
+        this.protectedProfileWrite(profileId, next, operation),
+      );
+    }
+    const profile = await this.findById(profileId, tx);
+    if (profile?.context === 'PLATFORM') await this.authorityGuard.serialize(tx);
+    return await operation(tx);
+  }
+
+  async update(
+    profileId: ObjectId,
+    expectedVersion: number,
+    input: { name?: string; permissions?: PermissionProfileEntry[]; now?: Date },
+    tx?: TransactionContext,
+  ) {
+    return await this.protectedProfileWrite(profileId, tx, async (next) => {
+      const previous = await this.findById(profileId, next);
+      const result = await this.updateWithinTransaction(profileId, expectedVersion, input, next);
+      if (
+        this.authorityGuard &&
+        result.context === 'PLATFORM' &&
+        input.permissions &&
+        JSON.stringify(
+          previous?.permissions.map((entry) => `${entry.permission}|${entry.effect}`).sort(),
+        ) !==
+          JSON.stringify(
+            input.permissions.map((entry) => `${entry.permission}|${entry.effect}`).sort(),
+          )
+      )
+        await this.bumpAssignedMemberships(profileId, input.now ?? new Date(), next);
+      return result;
+    });
+  }
+
+  async archive(
+    profileId: ObjectId,
+    expectedVersion: number,
+    now = new Date(),
+    tx?: TransactionContext,
+  ) {
+    return await this.protectedProfileWrite(profileId, tx, async (next) => {
+      const result = await this.archiveWithinTransaction(profileId, expectedVersion, now, next);
+      if (this.authorityGuard && result.context === 'PLATFORM')
+        await this.bumpAssignedMemberships(profileId, now, next);
+      return result;
+    });
+  }
+
+  private async bumpAssignedMemberships(profileId: ObjectId, now: Date, tx?: TransactionContext) {
+    const memberships = this.database.db.collection('platform_memberships');
+    await assertAssignedMembershipRevisionCapacity(this.database.db, profileId, tx);
+    await memberships.updateMany(
+      { permissionProfileIds: profileId },
+      { $set: { updatedAt: now }, $inc: { accessVersion: 1, version: 1 } },
+      tx ? { session: tx.session } : {},
+    );
   }
 
   async listPlatform(): Promise<PermissionProfileDocument[]> {
@@ -131,7 +205,7 @@ export class PermissionProfileRepository {
     }
   }
 
-  async update(
+  private async updateWithinTransaction(
     profileId: ObjectId,
     expectedVersion: number,
     input: { name?: string; permissions?: PermissionProfileEntry[]; now?: Date },
@@ -156,7 +230,7 @@ export class PermissionProfileRepository {
     return result;
   }
 
-  async archive(
+  private async archiveWithinTransaction(
     profileId: ObjectId,
     expectedVersion: number,
     now = new Date(),
@@ -184,7 +258,11 @@ export class PermissionProfileRepository {
 export class AccessGrantRepository {
   private readonly grants: Collection<AccessGrantDocument>;
 
-  constructor(database: Database) {
+  constructor(
+    private readonly database: Database,
+    private readonly unitOfWork?: UnitOfWork,
+    private readonly authorityGuard?: PlatformAuthorityGuard,
+  ) {
     this.grants = database.db.collection<AccessGrantDocument>('access_grants');
   }
 
@@ -223,6 +301,41 @@ export class AccessGrantRepository {
     now = new Date(),
     tx?: TransactionContext,
   ): Promise<AccessGrantDocument[]> {
+    if (context === 'PLATFORM' && this.authorityGuard) {
+      if (!tx) {
+        if (!this.unitOfWork) throw new Error('Platform grant writes require UnitOfWork.');
+        return await this.unitOfWork.withTransaction((next) =>
+          this.replaceCurrent(
+            subjectType,
+            subjectId,
+            context,
+            workspaceId,
+            grants,
+            createdBy,
+            now,
+            next,
+          ),
+        );
+      }
+      await this.authorityGuard.serialize(tx);
+      if (!tx.platformAccessRevisionSubjects?.has(subjectId.toHexString())) {
+        const member = await this.database.db
+          .collection('platform_memberships')
+          .findOneAndUpdate(
+            { _id: subjectId, status: 'ACTIVE' },
+            { $set: { updatedAt: now }, $inc: { version: 1, accessVersion: 1 } },
+            { session: tx.session, returnDocument: 'after' },
+          );
+        if (!member || !Number.isSafeInteger(member.version) || member.version < 0)
+          throw new AppError({
+            code: 'PLATFORM_MEMBERSHIP_ACCESS_VERSION_CONFLICT',
+            httpStatus: 409,
+            message: 'Platform access state changed.',
+          });
+        tx.platformAccessRevisionSubjects ??= new Set();
+        tx.platformAccessRevisionSubjects.add(subjectId.toHexString());
+      }
+    }
     await this.grants.deleteMany(
       { subjectType, subjectId, context, ...(workspaceId ? { workspaceId } : {}) },
       tx ? { session: tx.session } : undefined,

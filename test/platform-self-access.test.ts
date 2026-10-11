@@ -497,7 +497,7 @@ describe('WEB-021 Platform accessVersion propagation', () => {
     expect(collection.lastManyFilter).toEqual({ permissionProfileIds: ids.profileId });
     expect(collection.lastManyUpdate).toEqual({
       $set: { updatedAt: now },
-      $inc: { accessVersion: 1 },
+      $inc: { accessVersion: 1, version: 1 },
     });
   });
 

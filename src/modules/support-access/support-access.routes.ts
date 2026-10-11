@@ -1,6 +1,7 @@
 import type { Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
+import { AppError } from '../../core/errors/app-error';
 import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import { requireAuth } from '../auth/auth.middleware';
 import {
@@ -203,9 +204,27 @@ export async function registerSupportAccessContext(
   app: FastifyInstance,
   container: AppContainer,
 ): Promise<void> {
-  app.addHook('preHandler', async (request) => {
+  app.addHook('preHandler', async (request, reply) => {
     const header = request.headers['x-support-session-id'];
     if (!header) return;
+    if (
+      /^\/api\/v1\/platform\/users\/[^/?]+\/(management-state|suspend|reactivate|end)(?:\?.*)?$/.test(
+        request.url,
+      )
+    ) {
+      await requireAuth()(request, reply);
+      if (!request.ctx.mfaSatisfied)
+        throw new AppError({
+          code: 'TWO_FACTOR_REQUIRED',
+          httpStatus: 403,
+          message: 'MFA is required.',
+        });
+      throw new AppError({
+        code: 'SUPPORT_ACCESS_FORBIDDEN',
+        httpStatus: 403,
+        message: 'Support context cannot manage Platform users.',
+      });
+    }
     if (Array.isArray(header) || !header.trim()) return;
     await container.supportAccess.resolveForRequest(request.ctx, header, {
       method: request.method,

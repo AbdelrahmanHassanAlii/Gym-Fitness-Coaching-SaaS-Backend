@@ -24,6 +24,7 @@ import { migration023Stage18DashboardsAnalytics } from './023-stage18-dashboards
 import { migration024PlatformWorkspaceSearch } from './024-platform-workspace-search';
 import { migration025PlatformWorkspaceManagement } from './025-platform-workspace-management';
 import { migration026PlatformUserDirectoryIndexes } from './026-platform-user-directory-indexes';
+import { migration027PlatformUserLifecycleManagement } from './027-platform-user-lifecycle-management';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -53,4 +54,5 @@ export const migrations: Migration[] = [
   migration024PlatformWorkspaceSearch,
   migration025PlatformWorkspaceManagement,
   migration026PlatformUserDirectoryIndexes,
+  migration027PlatformUserLifecycleManagement,
 ];

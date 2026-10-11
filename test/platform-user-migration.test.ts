@@ -5,9 +5,9 @@ import { migrations } from '../src/migrations';
 import { migration026PlatformUserDirectoryIndexes } from '../src/migrations/026-platform-user-directory-indexes';
 import { summaryIntegrationConfig } from './platform-workspace-summary.helpers';
 
-test('026 is last, index-only and rerunnable without document changes', async () => {
-  expect(migrations).toHaveLength(26);
-  expect(migrations.at(-1)).toBe(migration026PlatformUserDirectoryIndexes);
+test('026 remains index-only and rerunnable without document changes', async () => {
+  expect(migrations).toHaveLength(27);
+  expect(migrations[25]).toBe(migration026PlatformUserDirectoryIndexes);
   const database = await Database.connect(
     summaryIntegrationConfig(`platform_user_migration_${new ObjectId()}`),
   );

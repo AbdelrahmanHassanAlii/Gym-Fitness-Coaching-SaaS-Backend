@@ -899,51 +899,7 @@ export class AccessControlService {
     grants: AccessGrantDocument[],
     now: Date,
   ): AuthorizationDecision {
-    const profileEntries = profiles.flatMap((profile) =>
-      profile.permissions.filter((entry) => entry.permission === input.permission),
-    );
-    let source: AuthorizationDecision['source'] = 'NONE';
-    let effect: AuthorizationDecision['effect'] = 'DENY';
-    const reasons: string[] = [];
-
-    if (profileEntries.some((entry) => entry.effect === 'DENY')) {
-      source = 'PROFILE';
-      effect = 'DENY';
-      reasons.push('profile-deny');
-    } else if (profileEntries.some((entry) => entry.effect === 'ALLOW')) {
-      source = 'PROFILE';
-      effect = 'ALLOW';
-      reasons.push('profile-allow');
-    }
-
-    const applicableGrants = grants.filter(
-      (grant) =>
-        grant.permission === input.permission &&
-        (!grant.expiresAt || grant.expiresAt > now) &&
-        scopeApplies(grant, input.scope),
-    );
-
-    if (applicableGrants.length > 0) {
-      const bestSpecificity = Math.max(
-        ...applicableGrants.map((grant) => scopeSpecificity[grant.scope.type]),
-      );
-      const strongest = applicableGrants.filter(
-        (grant) => scopeSpecificity[grant.scope.type] === bestSpecificity,
-      );
-      source = 'EXPLICIT_GRANT';
-      effect = strongest.some((grant) => grant.effect === 'DENY') ? 'DENY' : 'ALLOW';
-      reasons.push(`explicit-${effect.toLowerCase()}`);
-    }
-
-    return {
-      allowed: effect === 'ALLOW',
-      permission: input.permission,
-      context: input.context,
-      ...(input.scope ? { scope: input.scope } : {}),
-      source,
-      effect,
-      reasons: reasons.length > 0 ? reasons : ['default-deny'],
-    };
+    return evaluateAccessDecision(input, profiles, grants, now);
   }
 
   private assertAllowed(decision: AuthorizationDecision): AuthorizationDecision {
@@ -1193,4 +1149,57 @@ function supportSensitivePlatformPermission(permission: string): string | null {
     return 'support.sensitive.read';
   }
   return null;
+}
+
+export function evaluateAccessDecision(
+  input: AuthorizationRequest,
+  profiles: Array<{ permissions: Array<{ permission: string; effect: PermissionEffect }> }>,
+  grants: AccessGrantDocument[],
+  now: Date,
+): AuthorizationDecision {
+  const profileEntries = profiles.flatMap((profile) =>
+    profile.permissions.filter((entry) => entry.permission === input.permission),
+  );
+  let source: AuthorizationDecision['source'] = 'NONE';
+  let effect: AuthorizationDecision['effect'] = 'DENY';
+  const reasons: string[] = [];
+
+  if (profileEntries.some((entry) => entry.effect === 'DENY')) {
+    source = 'PROFILE';
+    effect = 'DENY';
+    reasons.push('profile-deny');
+  } else if (profileEntries.some((entry) => entry.effect === 'ALLOW')) {
+    source = 'PROFILE';
+    effect = 'ALLOW';
+    reasons.push('profile-allow');
+  }
+
+  const applicableGrants = grants.filter(
+    (grant) =>
+      grant.permission === input.permission &&
+      (!grant.expiresAt || grant.expiresAt > now) &&
+      scopeApplies(grant, input.scope),
+  );
+
+  if (applicableGrants.length > 0) {
+    const bestSpecificity = Math.max(
+      ...applicableGrants.map((grant) => scopeSpecificity[grant.scope.type]),
+    );
+    const strongest = applicableGrants.filter(
+      (grant) => scopeSpecificity[grant.scope.type] === bestSpecificity,
+    );
+    source = 'EXPLICIT_GRANT';
+    effect = strongest.some((grant) => grant.effect === 'DENY') ? 'DENY' : 'ALLOW';
+    reasons.push(`explicit-${effect.toLowerCase()}`);
+  }
+
+  return {
+    allowed: effect === 'ALLOW',
+    permission: input.permission,
+    context: input.context,
+    ...(input.scope ? { scope: input.scope } : {}),
+    source,
+    effect,
+    reasons: reasons.length > 0 ? reasons : ['default-deny'],
+  };
 }

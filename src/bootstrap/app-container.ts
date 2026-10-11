@@ -48,6 +48,8 @@ import {
 } from '../modules/permissions/permission.repository';
 import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
+import { PlatformUserRepository } from '../modules/platform-users/platform-user.repository';
+import { PlatformUserApplicationService } from '../modules/platform-users/platform-user.service';
 import { ProgressRepository } from '../modules/progress/progress.repository';
 import { ProgressApplicationService } from '../modules/progress/progress.service';
 import { RetentionRepository } from '../modules/retention/retention.repository';
@@ -134,6 +136,7 @@ export interface AppContainer {
   auditService: AuditApplicationService;
   analytics: AnalyticsApplicationService;
   workspaces: WorkspaceApplicationService;
+  platformUsers: PlatformUserApplicationService;
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
   subscriptions: SubscriptionApplicationService;
@@ -433,6 +436,10 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     audit,
     outbox,
     accessControl,
+    platformUsers: new PlatformUserApplicationService(
+      new PlatformUserRepository(database),
+      accessControl,
+    ),
     idempotency,
     jobLeases: new JobLeaseManager(database),
     storage,

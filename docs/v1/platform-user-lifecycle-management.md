@@ -80,7 +80,7 @@ Any pre-existing Platform memberships require both durable recovery authorities.
 
 Lifecycle event types remain `PlatformMembershipSuspended`, `PlatformMembershipReactivated` and `PlatformMembershipEnded`. Safe metadata records target IDs, command and previous/new status/version. Existing actor/correlation/IP/user-agent fields remain. No names/emails/secrets/tokens/free-text reason are added. Idempotent replay emits no new events; each successful new command inserts one committed audit and one committed outbox fact.
 
-Worker handlers explicitly acknowledge these three informational lifecycle facts without notifications, session revocation or fabricated side effects. They are retry-safe. Outbox delivery is retryable; exactly-once external delivery is not promised. Existing unrelated event-consumer behavior is unchanged.
+Worker handlers validate the lifecycle event type, `platform_membership` aggregate, ObjectId or canonical lowercase hex aggregate ID, and object payload with canonical string `userId` before acknowledging. Minimal historical `{ userId }` payloads remain valid; enriched management metadata is not required. Malformed facts reject through the existing outbox retry/failure mechanism and are not marked processed. Acknowledgment is informational, side-effect free and retry-safe, without notifications or session revocation. Outbox delivery is retryable; exactly-once external delivery is not promised. Existing unrelated event-consumer behavior is unchanged.
 
 ## Errors
 

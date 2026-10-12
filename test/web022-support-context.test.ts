@@ -532,6 +532,108 @@ describe('WEB-022 explicit support management denial and cache boundary', () => 
   });
 });
 
+describe('WEB-022 canonical support route boundary', () => {
+  test.each([
+    ['GET', '/api/v1/platform/%73upport/policies'],
+    ['HEAD', '/api/v1/platform/%73upport/policies'],
+    ['GET', '/api/v1/platform/%73upport/sessions/'],
+  ] as const)('%s encoded management route denies before lookups', async (method, path) => {
+    const f = await started();
+    const spies = [
+      spyOn(container.identity, 'findById'),
+      spyOn(container.authSessions, 'findActive'),
+      spyOn(container.supportAccess, 'resolveForRequest'),
+      spyOn(container.supportAccess, 'listPolicies'),
+      spyOn(container.supportAccess, 'getSession'),
+      spyOn(container.workspaceRepo, 'findById'),
+    ];
+    try {
+      const response = await app.inject({
+        method,
+        url: path.endsWith('/') ? `${path}${f.sessionId}` : path,
+        headers: { authorization: `Bearer ${f.token}`, 'x-support-session-id': f.sessionId },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.headers['cache-control']).toBe('private, no-store');
+      if (method !== 'HEAD') expect(response.json().error.code).toBe('SUPPORT_ACCESS_FORBIDDEN');
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  test('encoded start success, replay, conflict and permission loss retain authorization and no-store', async () => {
+    const f = await fixture();
+    const send = (body = f.body) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/platform/%73upport/access-requests',
+        headers: { authorization: `Bearer ${f.token}`, 'idempotency-key': f.key },
+        payload: body,
+      });
+    const initial = await send();
+    expect(initial.statusCode).toBe(201);
+    expect(initial.headers['cache-control']).toBe('private, no-store');
+    const replay = await send();
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json()).toMatchObject(initial.json());
+    expect(replay.headers['cache-control']).toBe('private, no-store');
+    const conflict = await send({ ...f.body, reason: 'Different encoded command' });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(conflict.headers['cache-control']).toBe('private, no-store');
+    await container.database.db
+      .collection('permission_profiles')
+      .updateOne({ _id: f.profileId }, { $set: { permissions: [] } });
+    const denied = await send();
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe('PERMISSION_DENIED');
+    expect(denied.headers['cache-control']).toBe('private, no-store');
+    for (const collection of ['support_sessions', 'support_access_requests'])
+      expect(await container.database.db.collection(collection).countDocuments()).toBe(1);
+  });
+
+  test('encoded current context preserves minimized success and expiry denial with no-store', async () => {
+    const f = await started();
+    const literal = await context(f, f.sessionId);
+    const send = () =>
+      app.inject({
+        method: 'GET',
+        url: '/api/v1/me/%73upport-context',
+        headers: { authorization: `Bearer ${f.token}`, 'x-support-session-id': f.sessionId },
+      });
+    const response = await send();
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(literal.json());
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    await container.database.db
+      .collection('support_sessions')
+      .updateOne({ _id: new ObjectId(f.sessionId) }, { $set: { expiresAt: new Date(0) } });
+    const expired = await send();
+    expect(expired.statusCode).toBe(403);
+    expect(expired.json().error.code).toBe('SUPPORT_SESSION_EXPIRED');
+    expect(expired.headers['cache-control']).toBe('private, no-store');
+  });
+
+  test('raw unmatched support fallback remains protected and unrelated routes stay isolated', async () => {
+    const url = '/api/v1/platform/support/not-a-route?probe=1';
+    const missing = await app.inject({ method: 'GET', url });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.headers['cache-control']).toBe('private, no-store');
+    const denied = await app.inject({
+      method: 'GET',
+      url,
+      headers: { 'x-support-session-id': new ObjectId().toHexString() },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe('SUPPORT_ACCESS_FORBIDDEN');
+    expect(denied.headers['cache-control']).toBe('private, no-store');
+    const health = await app.inject({ method: 'GET', url: '/health/live' });
+    expect(health.statusCode).toBe(200);
+    expect(health.headers['cache-control']).toBeUndefined();
+  });
+});
+
 function integrationConfig(dbName: string): AppConfig {
   return {
     env: 'test',

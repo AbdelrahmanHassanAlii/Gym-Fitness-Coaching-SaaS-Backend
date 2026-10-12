@@ -34,16 +34,15 @@ function isSupportPath(url: string): boolean {
 /** Register before authentication/runtime hooks so errors also receive no-store. */
 export async function registerSupportWebBoundary(app: FastifyInstance, container: AppContainer) {
   app.addHook('onSend', async (request, reply, payload) => {
-    if (isSupportPath(request.url)) reply.header('Cache-Control', 'private, no-store');
+    if (isSupportPath(request.routeOptions.url ?? '') || isSupportPath(request.url))
+      reply.header('Cache-Control', 'private, no-store');
     return payload;
   });
   app.addHook('onRequest', async (request, reply) => {
-    if (!isSupportPath(request.url)) return;
+    const routePath = request.routeOptions.url ?? '';
+    if (!isSupportPath(routePath) && !isSupportPath(request.url)) return;
     reply.header('Cache-Control', 'private, no-store');
-    if (
-      request.url.split('?')[0] !== currentContextPath &&
-      request.headers['x-support-session-id'] !== undefined
-    ) {
+    if (routePath !== currentContextPath && request.headers['x-support-session-id'] !== undefined) {
       throw new AppError({
         code: 'SUPPORT_ACCESS_FORBIDDEN',
         httpStatus: 403,

@@ -831,6 +831,88 @@ test('transaction retry reauthorizes actor after authority removal', async () =>
   expect(await h.db.collection('outbox_events').countDocuments()).toBe(0);
 });
 
+test('concurrent guarded authority removal prevents stale actor assignment', async () => {
+  const remover = await operator();
+  const actor = await operator();
+  const user = await target();
+  const p = await profile();
+  const before = await member(user);
+  const key = new ObjectId().toHexString();
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+  const removalSerialized = deferred();
+  const assignmentContending = deferred();
+  const releaseRemoval = deferred();
+  const original = Collection.prototype.updateOne;
+  let guardAttempts = 0;
+  let realConflict = false;
+  // Only pause after the real first guard write and observe the competing write.
+  // Neither authorization, serialization nor MongoDB retry errors are simulated.
+  const spy = spyOn(Collection.prototype, 'updateOne').mockImplementation(async function (
+    this: Collection,
+    ...args: Parameters<Collection['updateOne']>
+  ) {
+    if (this.collectionName !== 'platform_authority_guards') return original.apply(this, args);
+    const attempt = ++guardAttempts;
+    const write = original.apply(this, args);
+    if (attempt === 2) assignmentContending.resolve();
+    try {
+      const result = await write;
+      if (attempt === 1) {
+        removalSerialized.resolve();
+        await releaseRemoval.promise;
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof MongoServerError && error.hasErrorLabel('TransientTransactionError'))
+        realConflict = true;
+      throw error;
+    }
+  });
+  try {
+    const removal = put(remover, actor.userId, []);
+    await removalSerialized.promise;
+    const assignment = put(actor, user.userId, [p], 0, key);
+    await assignmentContending.promise;
+    releaseRemoval.resolve();
+    const [removed, rejected] = await Promise.all([removal, assignment]);
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json().data.permissionProfiles).toEqual([]);
+    expect((await member(actor))?.permissionProfileIds).toEqual([]);
+    expect(realConflict).toBe(true);
+    expect(guardAttempts).toBeGreaterThanOrEqual(3);
+    expect(rejected.statusCode).toBe(403);
+    expect(rejected.json().error.code).toBe('PERMISSION_DENIED');
+    const after = await member(user);
+    expect(after?.permissionProfileIds).toEqual(before?.permissionProfileIds);
+    expect(after?.version).toBe(before?.version);
+    expect(after?.accessVersion).toBe(before?.accessVersion);
+    expect(
+      await h.db.collection('audit_events').countDocuments({
+        eventType: 'MembershipPermissionProfilesReplaced',
+        'entity.id': before?._id,
+      }),
+    ).toBe(0);
+    expect(
+      await h.db.collection('outbox_events').countDocuments({
+        eventType: 'MembershipPermissionProfilesReplaced',
+        aggregateId: before?._id,
+      }),
+    ).toBe(0);
+    expect(await h.db.collection('idempotency_records').findOne({ key })).toMatchObject({
+      state: 'FAILED',
+    });
+  } finally {
+    releaseRemoval.resolve();
+    spy.mockRestore();
+  }
+}, 30_000);
+
 test('IN_PROGRESS/stale recovery and post-commit response loss replay preserve one logical event', async () => {
   const actor = await operator();
   const user = await target();

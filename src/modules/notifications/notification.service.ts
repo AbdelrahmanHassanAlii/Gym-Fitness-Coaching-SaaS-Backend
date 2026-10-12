@@ -11,6 +11,7 @@ import type { PushProvider } from '../../core/messaging/push.provider';
 import type { RequestContext } from '../../core/request-context/request-context';
 import type { CheckInRepository } from '../checkins/checkin.repository';
 import type { IdentityRepository } from '../identity/identity.repository';
+import { isPlatformAssignmentFact } from '../platform/platform-assignment.fact';
 import type { CoachingRelationshipRepository } from '../trainees/trainee.repository';
 import type {
   WorkspaceMembershipRepository,
@@ -161,6 +162,7 @@ export class NotificationApplicationService {
   }
 
   async handleOutboxEvent(event: OutboxEventDocument): Promise<void> {
+    if (isPlatformAssignmentFact(event)) return;
     const entries = entriesForEvent(event.eventType);
     if (entries.length === 0 || !event._id) return;
     for (const entry of entries) {

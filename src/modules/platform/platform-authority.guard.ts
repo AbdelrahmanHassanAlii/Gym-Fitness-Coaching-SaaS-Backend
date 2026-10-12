@@ -100,7 +100,12 @@ export class PlatformAuthorityGuard {
       )
       .limit(PLATFORM_AUTHORITY_SCAN_LIMIT + 1)
       .toArray();
-    assertBounded(profiles.length, grants.length);
+    assertBounded(
+      profiles.length,
+      grants.length,
+      profiles.reduce((n, p) => n + p.permissions.length, 0),
+      grants.reduce((n, g) => n + (g.scope.resourceIds?.length ?? 0), 0),
+    );
     if (
       !evaluateAccessDecision(
         { context: 'PLATFORM', permission, scope: { type: 'WORKSPACE' } },

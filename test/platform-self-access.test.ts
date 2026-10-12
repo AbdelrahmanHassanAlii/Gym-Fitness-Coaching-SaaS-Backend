@@ -559,16 +559,21 @@ describe('WEB-021 Platform accessVersion propagation', () => {
     expect(events.slice(0, 2)).toEqual(['bump:9', 'replace-grants']);
   });
 
-  test('assigned Platform profile replacement preserves the existing CAS version bump', async () => {
+  test('trusted repository profile replacement preserves the existing accessVersion CAS bump', async () => {
     const ids = testIds();
-    const events: string[] = [];
-    const service = permissionService(ids, [], events);
-    const result = await service.replacePlatformMembershipProfiles(
-      ctx(ids),
-      ids.platformMembershipId.toHexString(),
-      { expectedVersion: 9, profileIds: [ids.profileId.toHexString()] },
+    const collection = new RecordingPlatformMembershipCollection(
+      platformMembership(ids, 'ACTIVE', 10),
     );
-    expect(events).toContain('replace-profiles:9');
+    const repository = new PlatformMembershipRepository(fakeDatabase(collection));
+    const result = await repository.replacePermissionProfiles(ids.platformMembershipId, 9, [
+      ids.profileId,
+    ]);
+    expect(collection.lastFilter).toEqual({
+      _id: ids.platformMembershipId,
+      status: 'ACTIVE',
+      accessVersion: 9,
+    });
+    expect(collection.lastUpdate).toMatchObject({ $inc: { version: 1, accessVersion: 1 } });
     expect(result.accessVersion).toBe(10);
   });
 });

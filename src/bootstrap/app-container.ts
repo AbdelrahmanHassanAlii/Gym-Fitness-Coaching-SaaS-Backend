@@ -49,6 +49,7 @@ import {
 import { PermissionApplicationService } from '../modules/permissions/permission.service';
 import { PlatformMembershipRepository } from '../modules/platform/platform.repository';
 import { PlatformAuthorityGuard } from '../modules/platform/platform-authority.guard';
+import { PlatformProfileAssignmentService } from '../modules/platform-users/platform-profile-assignment.service';
 import { PlatformUserRepository } from '../modules/platform-users/platform-user.repository';
 import { PlatformUserApplicationService } from '../modules/platform-users/platform-user.service';
 import { PlatformUserManagementService } from '../modules/platform-users/platform-user-management.service';
@@ -140,6 +141,7 @@ export interface AppContainer {
   workspaces: WorkspaceApplicationService;
   platformUsers: PlatformUserApplicationService;
   platformUserManagement: PlatformUserManagementService;
+  platformProfileAssignment: PlatformProfileAssignmentService;
   platformAuthorityGuard: PlatformAuthorityGuard;
   permissions: PermissionApplicationService;
   entitlements: EntitlementService;
@@ -195,6 +197,12 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
   const refreshTokens = new RefreshTokenService(database, credentialDigests);
   const audit = new AuditWriter(database);
   const outbox = new OutboxWriter(database);
+  const platformProfileAssignment = new PlatformProfileAssignmentService(
+    database,
+    platformAuthorityGuard,
+    audit,
+    outbox,
+  );
   const platformUserManagement = new PlatformUserManagementService(
     database,
     platformMemberships,
@@ -458,6 +466,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
     outbox,
     accessControl,
     platformUserManagement,
+    platformProfileAssignment,
     platformAuthorityGuard,
     platformUsers: new PlatformUserApplicationService(
       new PlatformUserRepository(database),
@@ -524,6 +533,7 @@ export async function createAppContainer(config: AppConfig): Promise<AppContaine
       audit,
       outbox,
       platformAuthorityGuard,
+      platformProfileAssignment,
     ),
     entitlements,
     subscriptions,

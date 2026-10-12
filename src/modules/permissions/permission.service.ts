@@ -7,6 +7,7 @@ import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import type { PlatformMembershipRepository } from '../platform/platform.repository';
 import type { PlatformAuthorityGuard } from '../platform/platform-authority.guard';
+import type { PlatformProfileAssignmentService } from '../platform-users/platform-profile-assignment.service';
 import type {
   BranchRepository,
   WorkspaceMembershipRepository,
@@ -42,6 +43,7 @@ export class PermissionApplicationService {
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
     private readonly authorityGuard?: PlatformAuthorityGuard,
+    private readonly platformAssignments?: PlatformProfileAssignmentService,
   ) {}
 
   async listDefinitions() {
@@ -151,7 +153,7 @@ export class PermissionApplicationService {
       existing.context === 'PLATFORM' &&
       input.permissions !== undefined &&
       !permissionEntriesEqual(existing.permissions, input.permissions);
-    if (input.permissions)
+    if (input.permissions && (existing.context !== 'PLATFORM' || !this.authorityGuard))
       await this.validateProfileEntries(
         ctx,
         existing.context,
@@ -162,8 +164,29 @@ export class PermissionApplicationService {
       if (existing.context === 'PLATFORM') {
         await this.authorityGuard?.serialize(tx);
         await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
-        if (input.permissions)
-          await this.validateProfileEntries(ctx, 'PLATFORM', input.permissions);
+        const current = await this.requireProfileContext(id, undefined, tx);
+        if (input.permissions && !permissionEntriesEqual(current.permissions, input.permissions)) {
+          const seen = new Set<string>();
+          for (const entry of input.permissions) {
+            if (seen.has(entry.permission))
+              throw duplicate('PERMISSION_PROFILE_PERMISSION_DUPLICATE');
+            seen.add(entry.permission);
+            await this.assertPermissionAllowed(
+              entry.permission,
+              'PLATFORM',
+              { type: 'WORKSPACE' },
+              tx,
+            );
+          }
+          if (this.authorityGuard && !this.platformAssignments)
+            throw new Error('Platform delegation evaluator required.');
+          await this.platformAssignments?.profileChange(
+            ctx,
+            current,
+            { ...current, permissions: input.permissions },
+            tx,
+          );
+        }
       }
       const now = new Date();
       const updateInput: { name?: string; permissions?: PermissionProfileEntry[] } = {};
@@ -213,6 +236,15 @@ export class PermissionApplicationService {
       if (workspaceObjectId === undefined) {
         await this.authorityGuard?.serialize(tx);
         await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
+        const current = await this.requireProfileContext(id, undefined, tx);
+        if (this.authorityGuard && !this.platformAssignments)
+          throw new Error('Platform delegation evaluator required.');
+        await this.platformAssignments?.profileChange(
+          ctx,
+          current,
+          { ...current, status: 'ARCHIVED' },
+          tx,
+        );
       }
       const now = new Date();
       const profile = await this.profiles.archive(id, expectedVersion, now, tx);
@@ -289,42 +321,17 @@ export class PermissionApplicationService {
     membershipId: string,
     input: { expectedVersion: number; profileIds: string[] },
   ) {
-    const membershipObjectId = objectId(membershipId, 'PLATFORM_MEMBERSHIP_NOT_FOUND');
-    const profileIds = uniqueObjectIds(input.profileIds, 'PERMISSION_PROFILE_DUPLICATE');
-    const membership = await this.platformMemberships.findById(membershipObjectId);
-    if (!membership) throw notFound('PLATFORM_MEMBERSHIP_NOT_FOUND');
-    await this.assertAssignableProfiles('PLATFORM', profileIds);
-    await this.assertCanDelegateProfiles(ctx, 'PLATFORM', profileIds);
-    return await this.unitOfWork.withTransaction(async (tx) => {
-      await this.authorityGuard?.serialize(tx);
-      await this.authorityGuard?.authorize(ctx, 'platform_permissions.manage', tx);
-      await this.assertAssignableProfiles('PLATFORM', profileIds);
-      await this.assertCanDelegateProfiles(ctx, 'PLATFORM', profileIds);
-      const updated = await this.platformMemberships.replacePermissionProfiles(
-        membershipObjectId,
-        input.expectedVersion,
-        profileIds,
-        new Date(),
-        tx,
-      );
-      await this.writeAudit(
-        ctx,
-        undefined,
-        'MembershipPermissionProfilesReplaced',
-        updated._id,
-        'replace',
-        tx,
-      );
-      await this.writeOutbox(
-        ctx,
-        undefined,
-        'MembershipPermissionProfilesReplaced',
-        'platform_membership',
-        updated._id,
-        tx,
-      );
-      return safeAssignment(updated._id, updated.permissionProfileIds, updated.accessVersion ?? 0);
-    });
+    const assignments = this.platformAssignments;
+    if (!assignments)
+      throw new AppError({
+        code: 'INTERNAL_ERROR',
+        httpStatus: 500,
+        message: 'Platform assignment service is required.',
+      });
+    await assignments.authorize(ctx);
+    return this.unitOfWork.withTransaction((tx) =>
+      assignments.legacy(ctx, membershipId, input, tx),
+    );
   }
 
   async listWorkspaceAccess(_ctx: RequestContext, workspaceId: string, membershipId: string) {
@@ -483,8 +490,12 @@ export class PermissionApplicationService {
     if (!workspace) throw notFound('WORKSPACE_NOT_FOUND');
   }
 
-  private async requireProfileContext(profileId: ObjectId, workspaceId: ObjectId | undefined) {
-    const profile = await this.profiles.findById(profileId);
+  private async requireProfileContext(
+    profileId: ObjectId,
+    workspaceId: ObjectId | undefined,
+    tx?: TransactionContext,
+  ) {
+    const profile = await this.profiles.findById(profileId, tx);
     if (!profile) throw notFound('PERMISSION_PROFILE_NOT_FOUND');
     if (
       workspaceId &&
@@ -577,9 +588,10 @@ export class PermissionApplicationService {
     permission: string,
     context: PermissionContext,
     scope: PermissionScope,
+    tx?: TransactionContext,
   ) {
     if (!permissionKeys.has(permission)) throw invalid('PERMISSION_UNKNOWN');
-    const definition = await this.definitions.findActiveByKey(permission);
+    const definition = await this.definitions.findActiveByKey(permission, tx);
     if (!definition?.allowedContexts.includes(context)) {
       throw invalid('PERMISSION_CONTEXT_INVALID');
     }

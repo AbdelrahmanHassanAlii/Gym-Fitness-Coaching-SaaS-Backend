@@ -1,6 +1,7 @@
 import { ObjectId } from 'mongodb';
 import type { OutboxProcessor } from '../../core/events/outbox.processor';
 import type { OutboxEventDocument } from '../../core/events/outbox.types';
+import { isPlatformAssignmentFact } from '../platform/platform-assignment.fact';
 import type { TraineeApplicationService } from './trainee.service';
 
 export function registerTraineeOutboxHandlers(
@@ -34,6 +35,7 @@ export function registerTraineeOutboxHandlers(
   processor.register(
     'MembershipPermissionProfilesReplaced',
     async (event) => {
+      if (isPlatformAssignmentFact(event)) return;
       const membershipId = aggregateId(event);
       if (!event.workspaceId || !membershipId) return;
       await trainees.reconcilePrimaryEligibility(

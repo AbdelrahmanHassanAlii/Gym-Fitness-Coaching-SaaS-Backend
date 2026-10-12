@@ -399,6 +399,20 @@ test('last permissions manager is protected across lifecycle and legacy assignme
     headers: { authorization: `Bearer ${actor.token}` },
   });
   expect(errorCode(legacy)).toBe('PLATFORM_LAST_MANAGEMENT_AUTHORITY_REQUIRED');
+  // Assignment now forbids self mutation before recovery evaluation. A different
+  // actor with temporary authority still cannot remove the final durable holder.
+  const actorMembership = await h.db
+    .collection('platform_memberships')
+    .findOne({ userId: actor.userId });
+  await h.db.collection('access_grants').insertOne({
+    subjectId: actorMembership?._id,
+    subjectType: 'PLATFORM_MEMBERSHIP',
+    context: 'PLATFORM',
+    permission: Permissions.PlatformPermissionsManage,
+    effect: 'ALLOW',
+    scope: { type: 'WORKSPACE' },
+    expiresAt: new Date(Date.now() + 3_600_000),
+  });
   for (const [method, suffix, payload] of [
     ['PUT', 'permission-profiles', { expectedVersion: 0, profileIds: [] }],
     [
@@ -419,7 +433,7 @@ test('last permissions manager is protected across lifecycle and legacy assignme
     const result = await h.app.inject({
       method,
       url: `/api/v1/platform/memberships/${membership?._id}/${suffix}`,
-      headers: { authorization: `Bearer ${last.token}` },
+      headers: { authorization: `Bearer ${actor.token}` },
       payload,
     });
     expect(errorCode(result)).toBe('PLATFORM_LAST_MANAGEMENT_AUTHORITY_REQUIRED');

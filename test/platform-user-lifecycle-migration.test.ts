@@ -40,9 +40,9 @@ async function recovery(version?: number) {
   return membership;
 }
 
-test('027 is last, backfills only missing revisions and initializes a stable rerunnable guard', async () => {
-  expect(migrations).toHaveLength(27);
-  expect(migrations.at(-1)).toBe(migration027PlatformUserLifecycleManagement);
+test('027 remains in its locked position, backfills only missing revisions and initializes a stable rerunnable guard', async () => {
+  expect(migrations.slice(0, 27)).toHaveLength(27);
+  expect(migrations[26]).toBe(migration027PlatformUserLifecycleManagement);
   const missing = await recovery();
   const existing = await recovery(7);
   await migration027PlatformUserLifecycleManagement.up(h.db);

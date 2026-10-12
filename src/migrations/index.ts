@@ -25,6 +25,7 @@ import { migration024PlatformWorkspaceSearch } from './024-platform-workspace-se
 import { migration025PlatformWorkspaceManagement } from './025-platform-workspace-management';
 import { migration026PlatformUserDirectoryIndexes } from './026-platform-user-directory-indexes';
 import { migration027PlatformUserLifecycleManagement } from './027-platform-user-lifecycle-management';
+import { migration028PlatformMembershipPermissionProfileFanoutIndex } from './028-platform-membership-permission-profile-fanout-index';
 import type { Migration } from './migration.types';
 
 export const migrations: Migration[] = [
@@ -55,4 +56,5 @@ export const migrations: Migration[] = [
   migration025PlatformWorkspaceManagement,
   migration026PlatformUserDirectoryIndexes,
   migration027PlatformUserLifecycleManagement,
+  migration028PlatformMembershipPermissionProfileFanoutIndex,
 ];

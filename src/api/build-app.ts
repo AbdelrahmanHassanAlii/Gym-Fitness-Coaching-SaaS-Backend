@@ -29,6 +29,10 @@ import {
   registerSupportAccessContext,
   registerSupportAccessRoutes,
 } from '../modules/support-access/support-access.routes';
+import {
+  registerSupportWebBoundary,
+  registerSupportWebContextRoute,
+} from '../modules/support-access/support-web.routes';
 import { registerTraineeRoutes } from '../modules/trainees/trainee.routes';
 import { registerTrainingRoutes } from '../modules/training/training.routes';
 import { registerWorkoutRoutes } from '../modules/workouts/workout.routes';
@@ -129,6 +133,7 @@ export async function buildApp(container: AppContainer) {
   }
 
   await registerRequestContext(app);
+  await registerSupportWebBoundary(app, container);
   await registerAuthentication(app, container);
   await registerSupportAccessContext(app, container);
   registerErrorHandler(app);
@@ -153,6 +158,7 @@ export async function buildApp(container: AppContainer) {
   await registerRetentionRoutes(app, container);
   await registerNotificationRoutes(app, container);
   await registerSupportAccessRoutes(app, container);
+  await registerSupportWebContextRoute(app, container);
   await registerAuditRoutes(app, container);
   await registerAnalyticsRoutes(app, container);
 

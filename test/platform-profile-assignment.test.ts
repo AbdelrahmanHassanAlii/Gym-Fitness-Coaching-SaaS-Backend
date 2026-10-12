@@ -845,12 +845,28 @@ test('concurrent guarded authority removal prevents stale actor assignment', asy
     });
     return { promise, resolve };
   };
+  const waitForBarrier = (barrier: Promise<void>, request: Promise<unknown>, label: string) =>
+    Promise.race([
+      barrier,
+      request.then(() => {
+        throw new Error(`${label} completed before its expected guard write`);
+      }),
+    ]);
+  // Verify premature completion rejects even when the expected barrier never fires.
+  const absentBarrier = deferred();
+  for (const label of ['authority removal', 'assignment'])
+    await expect(waitForBarrier(absentBarrier.promise, Promise.resolve(), label)).rejects.toThrow(
+      `${label} completed before its expected guard write`,
+    );
+  absentBarrier.resolve();
   const removalSerialized = deferred();
   const assignmentContending = deferred();
   const releaseRemoval = deferred();
   const original = Collection.prototype.updateOne;
   let guardAttempts = 0;
   let realConflict = false;
+  let removal: ReturnType<typeof put> | undefined;
+  let assignment: ReturnType<typeof put> | undefined;
   // Only pause after the real first guard write and observe the competing write.
   // Neither authorization, serialization nor MongoDB retry errors are simulated.
   const spy = spyOn(Collection.prototype, 'updateOne').mockImplementation(async function (
@@ -875,10 +891,10 @@ test('concurrent guarded authority removal prevents stale actor assignment', asy
     }
   });
   try {
-    const removal = put(remover, actor.userId, []);
-    await removalSerialized.promise;
-    const assignment = put(actor, user.userId, [p], 0, key);
-    await assignmentContending.promise;
+    removal = put(remover, actor.userId, []);
+    await waitForBarrier(removalSerialized.promise, removal, 'authority removal');
+    assignment = put(actor, user.userId, [p], 0, key);
+    await waitForBarrier(assignmentContending.promise, assignment, 'assignment');
     releaseRemoval.resolve();
     const [removed, rejected] = await Promise.all([removal, assignment]);
     expect(removed.statusCode).toBe(200);
@@ -908,8 +924,13 @@ test('concurrent guarded authority removal prevents stale actor assignment', asy
       state: 'FAILED',
     });
   } finally {
-    releaseRemoval.resolve();
-    spy.mockRestore();
+    try {
+      releaseRemoval.resolve();
+      await Promise.allSettled([removal, assignment]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(Collection.prototype.updateOne).toBe(original);
   }
 }, 30_000);
 

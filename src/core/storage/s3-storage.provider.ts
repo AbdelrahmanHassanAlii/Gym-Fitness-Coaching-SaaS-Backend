@@ -187,7 +187,7 @@ export class S3CompatibleStorageProvider implements StorageProvider {
       'X-Amz-Expires': String(expires),
       'X-Amz-SignedHeaders': signedHeaders,
     });
-    const canonicalQuery = canonicalSearch(query);
+    const canonicalQuery = signing ? canonicalExportSearch(query) : canonicalSearch(query);
     const canonicalRequest = [
       method,
       path,
@@ -261,6 +261,17 @@ function canonicalSearch(params: URLSearchParams): string {
   return [...params.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join('&');
+}
+
+function canonicalExportSearch(params: URLSearchParams): string {
+  return [...params.entries()]
+    .map(([key, value]) => ({ key: encodeURIComponent(key), value: encodeURIComponent(value) }))
+    .sort((left, right) => {
+      if (left.key !== right.key) return left.key < right.key ? -1 : 1;
+      return left.value < right.value ? -1 : left.value > right.value ? 1 : 0;
+    })
+    .map(({ key, value }) => `${key}=${value}`)
     .join('&');
 }
 

@@ -36,13 +36,32 @@ describe('Stage 17 export storage signing', () => {
       expect(query.get('response-content-type')).toBe('application/zip');
       expect(query.get('response-cache-control')).toBe('private, no-store');
 
-      // Independently recompute SigV4: the cache override must be part of the signed query.
+      // Fixed canonical fixture: independent of the production ordering implementation.
       const signature = query.get('X-Amz-Signature');
       query.delete('X-Amz-Signature');
-      const canonicalQuery = [...query.entries()]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-        .join('&');
+      expect([...query.keys()]).toEqual([
+        'X-Amz-Algorithm',
+        'X-Amz-Credential',
+        'X-Amz-Date',
+        'X-Amz-Expires',
+        'X-Amz-SignedHeaders',
+        'response-cache-control',
+        'response-content-disposition',
+        'response-content-type',
+      ]);
+      const canonicalQuery = [
+        'X-Amz-Algorithm=AWS4-HMAC-SHA256',
+        'X-Amz-Credential=TEST%2F20261013%2Fus-east-1%2Fs3%2Faws4_request',
+        'X-Amz-Date=20261013T100000Z',
+        `X-Amz-Expires=${seconds}`,
+        'X-Amz-SignedHeaders=host',
+        'response-cache-control=private%2C%20no-store',
+        'response-content-disposition=attachment%3B%20filename%3D%22export.zip%22',
+        'response-content-type=application%2Fzip',
+      ].join('&');
+      expect(new URL(result.url).search.slice(1)).toBe(
+        `${canonicalQuery}&X-Amz-Signature=${signature}`,
+      );
       const canonical = [
         'GET',
         '/private/workspace/export.zip',
@@ -62,6 +81,9 @@ describe('Stage 17 export storage signing', () => {
       for (const value of ['us-east-1', 's3', 'aws4_request'])
         key = createHmac('sha256', key).update(value).digest();
       expect(signature).toBe(createHmac('sha256', key).update(toSign).digest('hex'));
+      if (remaining === 120_000) {
+        expect(signature).toBe('3bfb1f15b86beb815265f349711add54006d633e0e3e0c4176b6f31965f76bad');
+      }
     },
   );
 
@@ -98,6 +120,16 @@ describe('Stage 17 export storage signing', () => {
     expect(result.expiresAt).toBe(expiresAt);
     expect(new URL(result.url).searchParams.get('X-Amz-Expires')).toBe('1');
     expect(new URL(result.url).searchParams.has('response-cache-control')).toBe(false);
+    expect([...new URL(result.url).searchParams.keys()]).toEqual([
+      'response-content-disposition',
+      'response-content-type',
+      'X-Amz-Algorithm',
+      'X-Amz-Credential',
+      'X-Amz-Date',
+      'X-Amz-Expires',
+      'X-Amz-SignedHeaders',
+      'X-Amz-Signature',
+    ]);
   });
 
   test('fake provider captures export options and enforces deadline', async () => {

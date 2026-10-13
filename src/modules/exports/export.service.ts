@@ -13,6 +13,7 @@ import { AppError } from '../../core/errors/app-error';
 import type { OutboxWriter } from '../../core/events/outbox.writer';
 import type { RequestContext } from '../../core/request-context/request-context';
 import type { StorageProvider } from '../../core/storage/storage.provider';
+import { DownloadUrlExpiredError } from '../../core/storage/storage.provider';
 import type { FileRepository } from '../files/file.repository';
 import type { FileDocument, GeneratedFileIntentDocument } from '../files/file.types';
 import { Permissions } from '../permissions/permission.registry';
@@ -46,7 +47,7 @@ export class WorkspaceExportApplicationService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  async create(ctx: RequestContext, workspaceId: string, tx: TransactionContext) {
+  async authorizeCreate(ctx: RequestContext, workspaceId: string, tx?: TransactionContext) {
     if (ctx.supportSessionId) throw forbidden('EXPORT_SUPPORT_FORBIDDEN');
     const id = objectId(workspaceId, 'WORKSPACE_NOT_FOUND');
     await this.accessControl.authorize(ctx, {
@@ -55,11 +56,12 @@ export class WorkspaceExportApplicationService {
       permission: Permissions.ExportsWorkspaceCreate,
       scope: { type: 'WORKSPACE' },
     });
-    const [workspace, membership, subscription] = await Promise.all([
-      this.workspaces.findById(id, tx),
-      ctx.userId ? this.memberships.findByUserInWorkspace(id, new ObjectId(ctx.userId)) : null,
-      this.subscriptions.findByWorkspaceId(id, tx),
-    ]);
+    // MongoDB transactions do not support concurrent commands on the same session.
+    const workspace = await this.workspaces.findById(id, tx);
+    const membership = ctx.userId
+      ? await this.memberships.findByUserInWorkspace(id, new ObjectId(ctx.userId))
+      : null;
+    const subscription = await this.subscriptions.findByWorkspaceId(id, tx);
     if (workspace?.status !== 'ACTIVE' || workspace?.deletionLockRequestId) {
       throw conflict('WORKSPACE_DELETION_LOCKED');
     }
@@ -67,6 +69,11 @@ export class WorkspaceExportApplicationService {
     if (!subscription || !exportAllowed(subscription.lifecycleStatus, subscription.expiredAt)) {
       throw conflict('EXPORT_NOT_ALLOWED_FOR_SUBSCRIPTION');
     }
+    return { id, membership };
+  }
+
+  async create(ctx: RequestContext, workspaceId: string, tx: TransactionContext) {
+    const { id, membership } = await this.authorizeCreate(ctx, workspaceId, tx);
     const now = this.clock();
     const document: WorkspaceExportRequestDocument = {
       _id: new ObjectId(),
@@ -163,13 +170,23 @@ export class WorkspaceExportApplicationService {
     if (!file?._id.equals(exportRequest.artifactFileId) || file.status !== 'ACTIVE') {
       throw conflict('EXPORT_ARTIFACT_NOT_READY');
     }
-    const expiresAt = new Date(this.clock().getTime() + sensitiveDownloadTtlMs);
-    const signed = await this.storage.createDownloadUrl({
-      key: file.storageKey,
-      fileName: file.originalName,
-      contentType: file.mimeType,
-      expiresAt,
-    });
+    const now = this.clock();
+    const expiresAt = new Date(
+      Math.min(now.getTime() + sensitiveDownloadTtlMs, exportRequest.expiresAt.getTime()),
+    );
+    const signed = await this.storage
+      .createDownloadUrl({
+        key: file.storageKey,
+        fileName: file.originalName,
+        contentType: file.mimeType,
+        expiresAt,
+        cacheControl: 'private, no-store',
+        expiresAtIsHardDeadline: true,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DownloadUrlExpiredError) throw conflict('EXPORT_NOT_READY');
+        throw error;
+      });
     await this.audit.write(
       auditEvent(ctx, id, 'WorkspaceExportDownloadUrlIssued', exportObjectId, 'read', {
         exportId: exportObjectId.toHexString(),
@@ -551,7 +568,7 @@ function safeExport(item: WorkspaceExportRequestDocument) {
     requestedAt: item.requestedAt.toISOString(),
     completedAt: item.completedAt?.toISOString(),
     failedAt: item.failedAt?.toISOString(),
-    failure: item.failure,
+    failure: item.failure ? { code: item.failure.code, retryable: false as const } : undefined,
     expiresAt: item.expiresAt?.toISOString(),
     expiredAt: item.expiredAt?.toISOString(),
     format: item.format,

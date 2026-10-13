@@ -1,6 +1,7 @@
 import type { Static } from '@sinclair/typebox';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AppContainer } from '../../bootstrap/app-container';
+import { AppError } from '../../core/errors/app-error';
 import { idempotencyKey } from '../../core/idempotency/idempotency.service';
 import type { RequestContext } from '../../core/request-context/request-context';
 import { requireAuth } from '../auth/auth.middleware';
@@ -9,7 +10,22 @@ import { ErrorResponse, ExportParams, ListQuery, WorkspaceParams } from './expor
 export async function registerExportRoutes(app: FastifyInstance, container: AppContainer) {
   app.post<{ Params: Static<typeof WorkspaceParams> }>(
     '/api/v1/workspaces/:workspaceId/exports',
-    routeOptions({ params: WorkspaceParams }),
+    {
+      ...routeOptions({ params: WorkspaceParams }),
+      preHandler: [
+        requireAuth(),
+        async (request) => {
+          if (request.headers['x-support-session-id'] !== undefined) {
+            throw new AppError({
+              code: 'EXPORT_SUPPORT_FORBIDDEN',
+              httpStatus: 403,
+              message: 'This operation is forbidden.',
+            });
+          }
+          await container.exports.authorizeCreate(request.ctx, request.params.workspaceId);
+        },
+      ],
+    },
     async (request, reply) =>
       await idempotent(
         reply,
@@ -80,7 +96,8 @@ async function idempotent<T>(
     routeKey,
     fingerprint,
     unitOfWork: container.unitOfWork,
-    operation: async (tx) => ({ body: { data: await operation(tx) } }),
+    // Store the JSON acknowledgement, avoiding BSON's undefined-to-null conversion on replay.
+    operation: async (tx) => ({ body: JSON.parse(JSON.stringify({ data: await operation(tx) })) }),
   });
   return reply.status(result.statusCode).send(result.body);
 }

@@ -9,6 +9,7 @@ import type {
   PresignedUrl,
   StorageProvider,
 } from './storage.provider';
+import { strictDownloadExpiry } from './storage.provider';
 
 interface S3Config {
   endpoint: string;
@@ -24,7 +25,10 @@ const emptyPayloadHash = 'UNSIGNED-PAYLOAD';
 export class S3CompatibleStorageProvider implements StorageProvider {
   readonly provider = 's3';
 
-  constructor(private readonly config: S3Config) {}
+  constructor(
+    private readonly config: S3Config,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
 
   async createUploadUrl(input: CreateUploadUrlInput): Promise<PresignedUploadRequest> {
     const headers = {
@@ -119,6 +123,10 @@ export class S3CompatibleStorageProvider implements StorageProvider {
   }
 
   async createDownloadUrl(input: CreateDownloadUrlInput): Promise<PresignedUrl> {
+    const now = this.clock();
+    const strict = input.expiresAtIsHardDeadline
+      ? strictDownloadExpiry(input.expiresAt, now)
+      : undefined;
     return {
       url: this.presign(
         'GET',
@@ -128,9 +136,13 @@ export class S3CompatibleStorageProvider implements StorageProvider {
         {
           'response-content-disposition': `attachment; filename="${safeFileName(input.fileName)}"`,
           'response-content-type': input.contentType,
+          ...(input.cacheControl !== undefined
+            ? { 'response-cache-control': input.cacheControl }
+            : {}),
         },
+        strict ? { now, expiresInSeconds: strict.expiresInSeconds } : undefined,
       ),
-      expiresAt: input.expiresAt,
+      expiresAt: strict?.expiresAt ?? input.expiresAt,
     };
   }
 
@@ -154,11 +166,14 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     expiresAt: Date,
     signedRequestHeaders: Record<string, string>,
     queryParams: Record<string, string> = {},
+    signing?: { now: Date; expiresInSeconds: number },
   ): string {
-    const now = new Date();
+    const now = signing?.now ?? new Date();
     const amzDate = amzTimestamp(now);
     const dateStamp = amzDate.slice(0, 8);
-    const expires = Math.max(1, Math.floor((expiresAt.getTime() - now.getTime()) / 1000));
+    const expires =
+      signing?.expiresInSeconds ??
+      Math.max(1, Math.floor((expiresAt.getTime() - now.getTime()) / 1000));
     const credentialScope = `${dateStamp}/${this.config.region}/${service}/aws4_request`;
     const host = new URL(this.config.endpoint).host;
     const path = `/${this.config.bucket}/${encodeKey(key)}`;

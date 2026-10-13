@@ -63,7 +63,7 @@ export class RetentionApplicationService {
     input: { expectedVersion: number; reason: string },
     tx?: TransactionContext,
   ) {
-    await this.authorizePlatform(ctx, Permissions.DeletionApprove);
+    await this.authorizeApproval(ctx);
     const id = objectId(deletionId, 'WORKSPACE_DELETION_NOT_FOUND');
     const now = this.clock();
     const operation = async (transaction: TransactionContext) => {
@@ -533,6 +533,10 @@ export class RetentionApplicationService {
       permission,
       scope: { type: 'WORKSPACE' },
     });
+  }
+
+  async authorizeApproval(ctx: RequestContext) {
+    await this.authorizePlatform(ctx, Permissions.DeletionApprove);
   }
 
   private batchSize() {

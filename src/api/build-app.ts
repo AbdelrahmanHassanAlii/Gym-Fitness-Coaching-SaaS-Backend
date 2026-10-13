@@ -38,6 +38,7 @@ import { registerTrainingRoutes } from '../modules/training/training.routes';
 import { registerWorkoutRoutes } from '../modules/workouts/workout.routes';
 import { registerWorkspaceRoutes } from '../modules/workspaces/workspace.routes';
 import { registerHealthRoutes } from './health.routes';
+import { registerStage17SecurityBoundary } from './stage17-security-boundary';
 
 export async function buildApp(container: AppContainer) {
   const { config } = container;
@@ -133,6 +134,7 @@ export async function buildApp(container: AppContainer) {
   }
 
   await registerRequestContext(app);
+  await registerStage17SecurityBoundary(app);
   await registerSupportWebBoundary(app, container);
   await registerAuthentication(app, container);
   await registerSupportAccessContext(app, container);

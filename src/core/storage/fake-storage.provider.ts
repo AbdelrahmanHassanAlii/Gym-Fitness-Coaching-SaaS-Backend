@@ -6,11 +6,14 @@ import type {
   PresignedUrl,
   StorageProvider,
 } from './storage.provider';
+import { strictDownloadExpiry } from './storage.provider';
 
 export class FakeStorageProvider implements StorageProvider {
   readonly provider = 'fake';
   readonly objects = new Map<string, ObjectMetadata>();
   readonly bodies = new Map<string, Uint8Array>();
+  readonly downloadRequests: CreateDownloadUrlInput[] = [];
+  constructor(private readonly clock: () => Date = () => new Date()) {}
   failNextUploadUrl = false;
   failNextDownloadUrl = false;
   failNextStat = false;
@@ -73,9 +76,13 @@ export class FakeStorageProvider implements StorageProvider {
       this.failNextDownloadUrl = false;
       throw new Error('Injected download presign failure');
     }
+    const expiresAt = input.expiresAtIsHardDeadline
+      ? strictDownloadExpiry(input.expiresAt, this.clock()).expiresAt
+      : input.expiresAt;
+    this.downloadRequests.push({ ...input });
     return {
-      url: `https://storage.test/download/${encodeURIComponent(input.key)}?signature=test&name=${encodeURIComponent(input.fileName)}`,
-      expiresAt: input.expiresAt,
+      url: `https://storage.test/download/${encodeURIComponent(input.key)}?signature=test&name=${encodeURIComponent(input.fileName)}${input.cacheControl !== undefined ? `&response-cache-control=${encodeURIComponent(input.cacheControl)}` : ''}`,
+      expiresAt,
     };
   }
 

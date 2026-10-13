@@ -37,7 +37,19 @@ export async function registerRetentionRoutes(app: FastifyInstance, container: A
   app.post(
     '/api/v1/platform/workspace-deletions/:deletionId/approve',
     {
-      preHandler: requireAuth(),
+      preHandler: [
+        requireAuth(),
+        async (request) => {
+          if (request.headers['x-support-session-id'] !== undefined) {
+            throw new AppError({
+              code: 'SUPPORT_ACCESS_FORBIDDEN',
+              httpStatus: 403,
+              message: 'This operation is forbidden.',
+            });
+          }
+          await container.retention.authorizeApproval(request.ctx);
+        },
+      ],
       schema: {
         tags: ['Retention'],
         params: deletionIdParamsSchema,
@@ -60,11 +72,15 @@ export async function registerRetentionRoutes(app: FastifyInstance, container: A
         fingerprint: { params: request.params, body: request.body },
         unitOfWork: container.unitOfWork,
         operation: async (tx) => ({
-          body: await container.retention.approve(
-            request.ctx,
-            params.deletionId,
-            request.body as { expectedVersion: number; reason: string },
-            tx,
+          body: JSON.parse(
+            JSON.stringify(
+              await container.retention.approve(
+                request.ctx,
+                params.deletionId,
+                request.body as { expectedVersion: number; reason: string },
+                tx,
+              ),
+            ),
           ),
         }),
       });
